@@ -1,0 +1,239 @@
+<!doctype html>
+<html lang="zh-CN">
+<head>
+  <meta charset="utf-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1" />
+  <title>方案A - 专业情报工作台</title>
+  <style>
+    :root {
+      --bg: #0f172a;
+      --panel: #111827;
+      --panel-2: #182235;
+      --line: #314158;
+      --text: #e5e7eb;
+      --muted: #94a3b8;
+      --accent: #14b8a6;
+      --blue: #38bdf8;
+      --warn: #f59e0b;
+      --danger: #ef4444;
+      --ok: #22c55e;
+      --radius: 8px;
+    }
+    * { box-sizing: border-box; }
+    body {
+      margin: 0;
+      font-family: "Microsoft YaHei", "Segoe UI", Arial, sans-serif;
+      background: var(--bg);
+      color: var(--text);
+      letter-spacing: 0;
+    }
+    button, input, textarea, select { font: inherit; }
+    .app {
+      min-height: 100vh;
+      display: grid;
+      grid-template-columns: 280px minmax(520px, 1fr) 340px;
+      grid-template-rows: 58px 1fr;
+    }
+    header {
+      grid-column: 1 / 4;
+      display: flex;
+      align-items: center;
+      justify-content: space-between;
+      padding: 0 20px;
+      border-bottom: 1px solid var(--line);
+      background: #0b1220;
+    }
+    .brand { display: flex; align-items: center; gap: 12px; font-weight: 700; }
+    .brand-mark {
+      width: 30px; height: 30px; border: 1px solid var(--accent);
+      display: grid; place-items: center; border-radius: 6px; color: var(--accent);
+    }
+    .status { display: flex; align-items: center; gap: 16px; color: var(--muted); font-size: 13px; }
+    .dot { width: 8px; height: 8px; background: var(--ok); border-radius: 999px; display: inline-block; margin-right: 6px; }
+    aside, main, section.right {
+      padding: 18px;
+      overflow: auto;
+    }
+    aside {
+      border-right: 1px solid var(--line);
+      background: #0b1220;
+    }
+    section.right {
+      border-left: 1px solid var(--line);
+      background: #0b1220;
+    }
+    h1, h2, h3, p { margin: 0; }
+    h2 { font-size: 15px; margin-bottom: 12px; }
+    h3 { font-size: 13px; color: var(--muted); margin-bottom: 10px; font-weight: 600; }
+    .block {
+      background: var(--panel);
+      border: 1px solid var(--line);
+      border-radius: var(--radius);
+      padding: 14px;
+      margin-bottom: 14px;
+    }
+    label { display: block; color: var(--muted); font-size: 12px; margin-bottom: 6px; }
+    textarea, input, select {
+      width: 100%;
+      border: 1px solid var(--line);
+      background: #0b1220;
+      color: var(--text);
+      border-radius: 6px;
+      padding: 10px;
+      outline: none;
+    }
+    textarea { min-height: 140px; resize: vertical; }
+    .row { display: grid; grid-template-columns: 1fr 1fr; gap: 10px; }
+    .primary {
+      width: 100%;
+      height: 42px;
+      border: 0;
+      color: white;
+      background: var(--accent);
+      border-radius: 6px;
+      cursor: pointer;
+      font-weight: 700;
+    }
+    .ghost {
+      border: 1px solid var(--line);
+      color: var(--text);
+      background: transparent;
+      border-radius: 6px;
+      padding: 8px 10px;
+      cursor: pointer;
+    }
+    .tabs { display: flex; gap: 6px; margin-bottom: 12px; }
+    .tab {
+      padding: 8px 12px;
+      border: 1px solid var(--line);
+      border-radius: 6px;
+      color: var(--muted);
+      background: #0b1220;
+      font-size: 13px;
+    }
+    .tab.active { color: var(--text); border-color: var(--accent); }
+    .timeline { display: grid; gap: 10px; }
+    .event {
+      display: grid;
+      grid-template-columns: 86px 1fr;
+      gap: 12px;
+      background: var(--panel);
+      border: 1px solid var(--line);
+      border-radius: var(--radius);
+      padding: 12px;
+    }
+    .time { color: var(--muted); font-size: 12px; }
+    .event strong { display: block; margin-bottom: 4px; font-size: 14px; }
+    .event p { color: var(--muted); font-size: 13px; line-height: 1.45; }
+    .metric-grid { display: grid; grid-template-columns: repeat(3, 1fr); gap: 12px; margin-bottom: 14px; }
+    .metric {
+      border: 1px solid var(--line);
+      border-radius: var(--radius);
+      background: var(--panel);
+      padding: 14px;
+    }
+    .metric span { color: var(--muted); font-size: 12px; }
+    .metric b { display: block; font-size: 24px; margin-top: 8px; }
+    .file-list { display: grid; gap: 8px; }
+    .file {
+      display: grid;
+      grid-template-columns: 1fr auto;
+      gap: 8px;
+      align-items: center;
+      border: 1px solid var(--line);
+      border-radius: 6px;
+      padding: 10px;
+      background: var(--panel-2);
+    }
+    .file small { display: block; color: var(--muted); margin-top: 3px; }
+    .pill {
+      display: inline-flex;
+      align-items: center;
+      height: 22px;
+      padding: 0 8px;
+      border-radius: 999px;
+      background: rgba(20,184,166,.14);
+      color: var(--accent);
+      font-size: 12px;
+      white-space: nowrap;
+    }
+    .upload-target {
+      border: 1px dashed var(--line);
+      border-radius: var(--radius);
+      padding: 16px;
+      text-align: center;
+      color: var(--muted);
+      background: #0b1220;
+      margin-bottom: 10px;
+    }
+    @media (max-width: 1100px) {
+      .app { grid-template-columns: 1fr; grid-template-rows: 58px auto auto auto; }
+      header, aside, main, section.right { grid-column: 1; border: 0; }
+      .metric-grid { grid-template-columns: 1fr; }
+    }
+  </style>
+</head>
+<body>
+  <div class="app">
+    <header>
+      <div class="brand"><div class="brand-mark">AI</div><div>商用航空发动机情报工作台</div></div>
+      <div class="status"><span><i class="dot"></i>本地服务在线</span><span>Local Docs: 1666 篇论文</span><span>User Docs: 12 份资料</span></div>
+    </header>
+    <aside>
+      <div class="block">
+        <h2>任务配置</h2>
+        <label>情报任务描述</label>
+        <textarea>航空发动机适航安全性分析，重点关注 FADEC、CCAR-33、安全性评估和维修保障影响。</textarea>
+        <div class="row" style="margin-top:10px;">
+          <div><label>报告类型</label><select><option>技术动态研报</option><option>专题快报</option></select></div>
+          <div><label>检索范围</label><select><option>论文库 + 用户资料</option><option>仅论文库</option><option>仅用户资料</option></select></div>
+        </div>
+        <button class="primary" style="margin-top:14px;">启动情报任务</button>
+      </div>
+      <div class="block">
+        <h2>检索策略</h2>
+        <label><input type="checkbox" checked /> 论文库：先查索引再精读</label>
+        <label><input type="checkbox" checked /> 用户资料库：查 user_docs_index</label>
+        <label><input type="checkbox" checked /> Embedding 失败时关键词兜底</label>
+      </div>
+    </aside>
+    <main>
+      <div class="metric-grid">
+        <div class="metric"><span>已筛论文</span><b>5</b></div>
+        <div class="metric"><span>命中用户资料</span><b>3</b></div>
+        <div class="metric"><span>预计耗时</span><b>8m</b></div>
+      </div>
+      <div class="tabs"><div class="tab active">执行进度</div><div class="tab">报告预览</div><div class="tab">证据片段</div></div>
+      <div class="timeline">
+        <div class="event"><div class="time">09:12:04</div><div><strong>Librarian Agent</strong><p>已从 papers_index.json 筛出 5 篇相关论文，送入临时精读目录。</p></div></div>
+        <div class="event"><div class="time">09:12:18</div><div><strong>User Docs Retriever</strong><p>从 user_docs_index.json 命中 3 份用户资料：适航审定说明、FADEC 测试记录、维修安全分析。</p></div></div>
+        <div class="event"><div class="time">09:13:02</div><div><strong>Research Agent</strong><p>正在抽取 CCAR-33、FADEC 限时派遣、安全性评估相关证据片段。</p></div></div>
+      </div>
+    </main>
+    <section class="right">
+      <div class="block">
+        <h2>本地资料管理</h2>
+        <div class="upload-target">拖入文件或点击上传<br />保存到 local_docs/user_docs 或 all_papers_pool</div>
+        <div class="row">
+          <button class="ghost">保存到用户资料库</button>
+          <button class="ghost">保存到论文池</button>
+        </div>
+      </div>
+      <div class="block">
+        <h2>用户资料库</h2>
+        <div class="file-list">
+          <div class="file"><div>适航审定流程说明.docx<small>已索引 | 2026-07-14</small></div><span class="pill">user_docs</span></div>
+          <div class="file"><div>FADEC测试记录.pdf<small>已索引 | 命中 12 次</small></div><span class="pill">user_docs</span></div>
+          <div class="file"><div>维修安全性分析.txt<small>已索引 | 3.2 MB</small></div><span class="pill">user_docs</span></div>
+        </div>
+      </div>
+      <div class="block">
+        <h2>论文池概览</h2>
+        <div class="file-list">
+          <div class="file"><div>FADEC系统适航安全性分析.pdf<small>来自 all_papers_pool</small></div><span class="pill">论文</span></div>
+        </div>
+      </div>
+    </section>
+  </div>
+</body>
+</html>

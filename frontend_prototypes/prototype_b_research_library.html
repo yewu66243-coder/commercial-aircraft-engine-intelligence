@@ -1,0 +1,122 @@
+<!doctype html>
+<html lang="zh-CN">
+<head>
+  <meta charset="utf-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1" />
+  <title>方案B - 科研文献管理风格</title>
+  <style>
+    :root {
+      --bg: #f8fafc;
+      --text: #0f172a;
+      --muted: #64748b;
+      --line: #dbe3ef;
+      --panel: #ffffff;
+      --blue: #2563eb;
+      --teal: #0f766e;
+      --amber: #b45309;
+      --green: #15803d;
+      --radius: 8px;
+    }
+    * { box-sizing: border-box; }
+    body { margin: 0; font-family: "Microsoft YaHei", "Segoe UI", Arial, sans-serif; background: var(--bg); color: var(--text); letter-spacing: 0; }
+    header { height: 64px; display: flex; align-items: center; justify-content: space-between; padding: 0 28px; background: var(--panel); border-bottom: 1px solid var(--line); }
+    .brand { font-weight: 700; font-size: 18px; }
+    .nav { display: flex; gap: 8px; }
+    .nav button { border: 1px solid var(--line); background: var(--panel); padding: 8px 12px; border-radius: 6px; color: var(--muted); }
+    .nav button.active { color: white; background: var(--blue); border-color: var(--blue); }
+    .wrap { max-width: 1240px; margin: 0 auto; padding: 24px; }
+    .grid { display: grid; grid-template-columns: 360px 1fr; gap: 18px; align-items: start; }
+    .panel { background: var(--panel); border: 1px solid var(--line); border-radius: var(--radius); padding: 18px; margin-bottom: 18px; }
+    h1, h2, h3, p { margin: 0; }
+    h1 { font-size: 26px; margin-bottom: 6px; }
+    h2 { font-size: 16px; margin-bottom: 14px; }
+    p { color: var(--muted); line-height: 1.5; }
+    label { display: block; font-size: 12px; color: var(--muted); margin-bottom: 6px; }
+    input, select, textarea { width: 100%; border: 1px solid var(--line); border-radius: 6px; padding: 10px; background: #fff; font: inherit; }
+    textarea { min-height: 150px; resize: vertical; }
+    .primary { background: var(--blue); color: white; border: 0; border-radius: 6px; width: 100%; height: 42px; font-weight: 700; cursor: pointer; }
+    .toolbar { display: flex; justify-content: space-between; gap: 12px; align-items: center; margin-bottom: 14px; }
+    .seg { display: inline-flex; border: 1px solid var(--line); border-radius: 6px; overflow: hidden; }
+    .seg span { padding: 8px 12px; color: var(--muted); border-right: 1px solid var(--line); font-size: 13px; }
+    .seg span:last-child { border-right: 0; }
+    .seg .active { background: #eff6ff; color: var(--blue); font-weight: 700; }
+    table { width: 100%; border-collapse: collapse; }
+    th, td { border-bottom: 1px solid var(--line); padding: 12px 10px; text-align: left; font-size: 13px; vertical-align: top; }
+    th { color: var(--muted); font-weight: 600; background: #f8fafc; }
+    .tag { display: inline-flex; border-radius: 999px; padding: 3px 8px; font-size: 12px; background: #ecfeff; color: var(--teal); }
+    .tag.paper { background: #eff6ff; color: var(--blue); }
+    .tag.warn { background: #fff7ed; color: var(--amber); }
+    .cards { display: grid; grid-template-columns: repeat(3, 1fr); gap: 14px; margin-bottom: 18px; }
+    .stat { background: var(--panel); border: 1px solid var(--line); border-radius: var(--radius); padding: 16px; }
+    .stat span { color: var(--muted); font-size: 12px; }
+    .stat b { display: block; font-size: 28px; margin-top: 6px; }
+    .drop { border: 1px dashed var(--line); border-radius: var(--radius); padding: 22px; text-align: center; color: var(--muted); background: #f8fafc; }
+    .two { display: grid; grid-template-columns: 1fr 1fr; gap: 10px; }
+    .outline { border: 1px solid var(--line); background: white; color: var(--text); border-radius: 6px; padding: 10px; cursor: pointer; }
+    @media (max-width: 980px) { .grid, .cards { grid-template-columns: 1fr; } }
+  </style>
+</head>
+<body>
+  <header>
+    <div class="brand">航空发动机情报文献工作区</div>
+    <div class="nav"><button class="active">任务</button><button>资料库</button><button>报告</button><button>设置</button></div>
+  </header>
+  <div class="wrap">
+    <h1>情报任务与资料管理</h1>
+    <p>论文库和用户资料库分开管理，检索时统一纳入证据来源。</p>
+    <div class="cards">
+      <div class="stat"><span>论文索引</span><b>1609</b></div>
+      <div class="stat"><span>用户资料</span><b>24</b></div>
+      <div class="stat"><span>本次命中</span><b>8</b></div>
+    </div>
+    <div class="grid">
+      <aside>
+        <div class="panel">
+          <h2>新建情报任务</h2>
+          <label>任务描述</label>
+          <textarea>分析航空发动机适航性验证、安全性评估和 FADEC 系统适航审查重点。</textarea>
+          <div class="two" style="margin-top:12px;">
+            <div><label>资料范围</label><select><option>论文库 + 用户资料</option><option>仅论文库</option><option>仅用户资料</option></select></div>
+            <div><label>报告类型</label><select><option>技术研报</option><option>专题快报</option></select></div>
+          </div>
+          <button class="primary" style="margin-top:14px;">开始分析</button>
+        </div>
+        <div class="panel">
+          <h2>上传资料</h2>
+          <div class="drop">选择或拖入 PDF / Word / TXT / Excel</div>
+          <div class="two" style="margin-top:10px;">
+            <button class="outline">保存到 user_docs</button>
+            <button class="outline">保存到 all_papers_pool</button>
+          </div>
+        </div>
+      </aside>
+      <main>
+        <div class="panel">
+          <div class="toolbar">
+            <h2>本地资料列表</h2>
+            <div class="seg"><span class="active">用户资料</span><span>论文池</span><span>命中结果</span></div>
+          </div>
+          <table>
+            <thead><tr><th>文件名</th><th>保存位置</th><th>索引状态</th><th>摘要/说明</th><th>操作</th></tr></thead>
+            <tbody>
+              <tr><td>发动机适航审定流程.docx</td><td><span class="tag">user_docs</span></td><td>已索引</td><td>适航审定、CCAR-33、验证试验流程</td><td>删除</td></tr>
+              <tr><td>FADEC限时派遣分析.pdf</td><td><span class="tag paper">all_papers_pool</span></td><td>进入论文索引</td><td>FADEC、TLD、适航安全性</td><td>查看</td></tr>
+              <tr><td>维修保障访谈记录.txt</td><td><span class="tag">user_docs</span></td><td><span class="tag warn">待重建</span></td><td>维修任务、隐蔽失效、安全性分析</td><td>重建索引</td></tr>
+            </tbody>
+          </table>
+        </div>
+        <div class="panel">
+          <h2>本次任务证据来源</h2>
+          <table>
+            <thead><tr><th>来源</th><th>类型</th><th>命中原因</th><th>相关度</th></tr></thead>
+            <tbody>
+              <tr><td>航空发动机FADEC系统适航安全性分析方法研究.pdf</td><td>论文</td><td>标题命中 FADEC / 适航安全性</td><td>92</td></tr>
+              <tr><td>发动机适航审定流程.docx</td><td>用户资料</td><td>摘要命中 CCAR-33 / 验证试验</td><td>81</td></tr>
+            </tbody>
+          </table>
+        </div>
+      </main>
+    </div>
+  </div>
+</body>
+</html>

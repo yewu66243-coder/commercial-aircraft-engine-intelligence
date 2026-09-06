@@ -1,0 +1,105 @@
+@page {
+    size: A4;
+    margin: 25mm;
+    @top-center {
+        content: string(report-title);
+        font-family: "Times New Roman", "SimSun", serif;
+        font-size: 9pt;
+        color: #000;
+    }
+    @bottom-center {
+        content: "第 " counter(page) " 页";
+        font-family: "Times New Roman", "SimSun", serif;
+        font-size: 9pt;
+        color: #000;
+    }
+}
+* { box-sizing: border-box; }
+body {
+    font-family: "Times New Roman", "SimSun", "Noto Serif CJK SC", serif;
+    font-size: 12pt;
+    line-height: 1.5;
+    color: #000;
+    background: #fff;
+    margin: 0;
+    padding: 0;
+    text-align: justify;
+}
+h1, h2, h3, h4, h5, h6 {
+    font-family: "Times New Roman", "SimHei", "SimSun", serif;
+    color: #000;
+    line-height: 1.25;
+    text-align: left;
+    font-weight: bold;
+    margin: 12pt 0 6pt;
+    break-after: avoid;
+    break-inside: avoid;
+}
+h1.title {
+    font-size: 18pt;
+    text-align: center;
+    margin: 0 0 16pt;
+    string-set: report-title attr(data-short-title);
+}
+h2 { font-size: 15pt; }
+h3 { font-size: 13pt; }
+h4, h5, h6 { font-size: 12pt; }
+p {
+    margin: 0 0 6pt;
+    orphans: 2;
+    widows: 2;
+    overflow-wrap: anywhere;
+}
+p.body { text-indent: 2em; }
+a { color: #000; text-decoration: none; overflow-wrap: anywhere; }
+.abstract, .keywords, .caption, .source, .toc { text-indent: 0; }
+.keywords { margin-bottom: 10pt; }
+.toc { list-style: none; padding-left: 0; text-align: left; }
+.toc li { margin: 0 0 4pt; }
+.toc ul { list-style: none; padding-left: 1em; }
+.references { text-indent: -2em; padding-left: 2em; text-align: left; }
+figure { margin: 10pt 0 6pt; break-inside: avoid; break-after: avoid; }
+img {
+    display: block;
+    max-width: 100%;
+    max-height: 175mm;
+    width: auto;
+    height: auto;
+    object-fit: contain;
+    margin: 0 auto 6pt;
+}
+figcaption, .caption { text-align: center; font-size: 10.5pt; text-indent: 0; }
+.caption { break-after: avoid; margin-top: 8pt; }
+.source { font-size: 10.5pt; line-height: 1.25; text-align: left; }
+.source.figure-source { text-align: center; }
+table {
+    border-collapse: collapse;
+    table-layout: fixed;
+    width: 100%;
+    max-width: 100%;
+    border-top: 1.25pt solid #000;
+    border-bottom: 1.25pt solid #000;
+    margin: 6pt 0 10pt;
+    font-size: 10.5pt;
+    line-height: 1.25;
+    break-inside: avoid;
+}
+thead { display: table-header-group; border-bottom: 0.75pt solid #000; }
+table.long-table { break-inside: auto; }
+tbody { display: table-row-group; }
+tr { break-inside: avoid; }
+th, td {
+    border: 0;
+    padding: 4pt;
+    vertical-align: middle;
+    text-align: left;
+    white-space: normal;
+    overflow-wrap: anywhere;
+    word-break: normal;
+}
+th { color: #000; font-weight: bold; background: #fff; }
+ul, ol { padding-left: 1.5em; }
+li { margin-bottom: 4pt; }
+blockquote { margin: 6pt 0 6pt 2em; font-style: normal; }
+pre { white-space: pre-wrap; overflow-wrap: anywhere; font-size: 10.5pt; }
+code { font-family: "Times New Roman", "SimSun", serif; }

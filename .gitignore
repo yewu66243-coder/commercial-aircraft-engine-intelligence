@@ -1,0 +1,65 @@
+#Ignore env containing secrets
+.env
+.venv
+.envrc
+
+#Ignore Virtual Env
+env/
+venv/
+.venv/
+
+# Other Environments
+ENV/
+env.bak/
+venv.bak/
+
+#Ignore generated outputs
+outputs/
+*.lock
+dist/
+gpt_researcher.egg-info/
+
+#Ignore my local docs
+my-docs/
+
+# Workbench-local runtimes, research data and model files
+/portable_python/
+/dependencies/
+/local_docs/
+/temp_docs/
+/ollama_models/
+
+# Local MCP connections may contain machine-specific settings
+/.mcp.json
+
+#Ignore pycache
+**/__pycache__/
+
+#Ignore mypy cache
+.mypy_cache/
+.pytest_cache/
+node_modules
+.idea
+.DS_Store
+.docusaurus
+build
+docs/build
+
+.vscode/launch.json
+.langgraph-data/
+.next/
+package-lock.json
+
+#Vim swp files
+*.swp
+
+# Log files
+logs/
+*.orig
+*.log
+server_log.txt
+
+#Cursor Rules
+.cursorrules
+CURSOR_RULES.md
+/.history

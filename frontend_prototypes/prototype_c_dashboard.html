@@ -1,0 +1,135 @@
+<!doctype html>
+<html lang="zh-CN">
+<head>
+  <meta charset="utf-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1" />
+  <title>方案C - 企业级仪表盘风格</title>
+  <style>
+    :root {
+      --bg: #eef2f7;
+      --side: #172033;
+      --panel: #ffffff;
+      --text: #111827;
+      --muted: #667085;
+      --line: #d8dee8;
+      --blue: #1d4ed8;
+      --teal: #0d9488;
+      --green: #16a34a;
+      --amber: #d97706;
+      --red: #dc2626;
+      --radius: 8px;
+    }
+    * { box-sizing: border-box; }
+    body { margin: 0; font-family: "Microsoft YaHei", "Segoe UI", Arial, sans-serif; background: var(--bg); color: var(--text); letter-spacing: 0; }
+    .layout { min-height: 100vh; display: grid; grid-template-columns: 248px 1fr; }
+    nav { background: var(--side); color: #dbeafe; padding: 20px 16px; }
+    .logo { font-weight: 700; font-size: 18px; margin-bottom: 28px; }
+    .menu { display: grid; gap: 6px; }
+    .menu div { padding: 10px 12px; border-radius: 6px; color: #cbd5e1; }
+    .menu .active { background: rgba(59,130,246,.22); color: white; }
+    main { padding: 22px; overflow: auto; }
+    .top { display: flex; justify-content: space-between; align-items: center; margin-bottom: 18px; }
+    h1, h2, h3, p { margin: 0; }
+    h1 { font-size: 24px; }
+    h2 { font-size: 16px; margin-bottom: 12px; }
+    p { color: var(--muted); line-height: 1.45; }
+    .actions { display: flex; gap: 10px; }
+    button { font: inherit; border-radius: 6px; padding: 9px 12px; cursor: pointer; }
+    .primary { background: var(--blue); color: white; border: 1px solid var(--blue); }
+    .secondary { background: white; color: var(--text); border: 1px solid var(--line); }
+    .grid { display: grid; grid-template-columns: 1.1fr .9fr; gap: 16px; }
+    .panel { background: var(--panel); border: 1px solid var(--line); border-radius: var(--radius); padding: 16px; margin-bottom: 16px; }
+    .stats { display: grid; grid-template-columns: repeat(4, 1fr); gap: 12px; margin-bottom: 16px; }
+    .stat { background: white; border: 1px solid var(--line); border-radius: var(--radius); padding: 15px; }
+    .stat span { color: var(--muted); font-size: 12px; }
+    .stat b { display: block; font-size: 26px; margin-top: 6px; }
+    .task-box { display: grid; gap: 12px; }
+    label { color: var(--muted); font-size: 12px; display: block; margin-bottom: 6px; }
+    textarea, select, input { width: 100%; border: 1px solid var(--line); border-radius: 6px; padding: 10px; font: inherit; background: white; }
+    textarea { min-height: 138px; resize: vertical; }
+    .row { display: grid; grid-template-columns: repeat(3, 1fr); gap: 10px; }
+    .pipeline { display: grid; gap: 10px; }
+    .step { display: grid; grid-template-columns: 30px 1fr auto; gap: 10px; align-items: center; border: 1px solid var(--line); border-radius: 6px; padding: 10px; }
+    .num { width: 28px; height: 28px; border-radius: 6px; display: grid; place-items: center; color: white; background: var(--teal); font-size: 13px; font-weight: 700; }
+    .step small { color: var(--muted); display: block; margin-top: 3px; }
+    .badge { border-radius: 999px; padding: 4px 8px; font-size: 12px; background: #e0f2fe; color: #0369a1; }
+    .badge.ok { background: #dcfce7; color: var(--green); }
+    .badge.warn { background: #fef3c7; color: var(--amber); }
+    .library { display: grid; gap: 8px; }
+    .file { display: grid; grid-template-columns: 1fr auto; gap: 8px; padding: 10px; border: 1px solid var(--line); border-radius: 6px; }
+    .file small { display: block; color: var(--muted); margin-top: 3px; }
+    .upload { border: 1px dashed var(--line); border-radius: var(--radius); padding: 18px; text-align: center; color: var(--muted); margin-bottom: 10px; }
+    .split { display: grid; grid-template-columns: 1fr 1fr; gap: 10px; }
+    @media (max-width: 1050px) { .layout, .grid, .stats, .row { grid-template-columns: 1fr; } nav { display: none; } }
+  </style>
+</head>
+<body>
+  <div class="layout">
+    <nav>
+      <div class="logo">情报系统控制台</div>
+      <div class="menu">
+        <div class="active">任务中心</div>
+        <div>资料管理</div>
+        <div>论文索引</div>
+        <div>报告归档</div>
+        <div>系统设置</div>
+      </div>
+    </nav>
+    <main>
+      <div class="top">
+        <div><h1>任务中心</h1><p>统一管理情报任务、论文池和用户查阅资料。</p></div>
+        <div class="actions"><button class="secondary">导入资料</button><button class="primary">新建任务</button></div>
+      </div>
+      <div class="stats">
+        <div class="stat"><span>论文池文件</span><b>1666</b></div>
+        <div class="stat"><span>用户资料</span><b>18</b></div>
+        <div class="stat"><span>索引健康度</span><b>98%</b></div>
+        <div class="stat"><span>今日报告</span><b>4</b></div>
+      </div>
+      <div class="grid">
+        <div>
+          <div class="panel">
+            <h2>创建情报任务</h2>
+            <div class="task-box">
+              <div><label>任务描述</label><textarea>围绕商用航空发动机适航审查，梳理 FADEC 系统、安全性评估、验证试验和适航条款。</textarea></div>
+              <div class="row">
+                <div><label>资料来源</label><select><option>论文索引 + 用户资料索引</option><option>仅论文索引</option><option>仅用户资料索引</option></select></div>
+                <div><label>Top-K 文献</label><select><option>5</option><option>8</option><option>10</option></select></div>
+                <div><label>报告模板</label><select><option>技术动态</option><option>专题快报</option><option>型号跟踪</option></select></div>
+              </div>
+              <button class="primary">执行分析</button>
+            </div>
+          </div>
+          <div class="panel">
+            <h2>检索流水线</h2>
+            <div class="pipeline">
+              <div class="step"><div class="num">1</div><div>论文库索引检索<small>papers_index.json → 选出相关论文</small></div><span class="badge ok">稳定</span></div>
+              <div class="step"><div class="num">2</div><div>用户资料索引检索<small>user_docs_index.json → 选出相关资料</small></div><span class="badge warn">新增</span></div>
+              <div class="step"><div class="num">3</div><div>精读与证据压缩<small>PDF / Word / TXT 正文片段筛选</small></div><span class="badge">RAG</span></div>
+              <div class="step"><div class="num">4</div><div>报告生成与导出<small>Markdown / PDF / Word</small></div><span class="badge ok">可用</span></div>
+            </div>
+          </div>
+        </div>
+        <div>
+          <div class="panel">
+            <h2>资料上传</h2>
+            <div class="upload">拖入资料文件<br />选择保存到 user_docs 或 all_papers_pool</div>
+            <div class="split">
+              <button class="secondary">保存到用户资料库</button>
+              <button class="secondary">保存到论文池</button>
+            </div>
+          </div>
+          <div class="panel">
+            <h2>本地资料概览</h2>
+            <div class="library">
+              <div class="file"><div>适航审定流程.docx<small>user_docs | 已增量索引</small></div><span class="badge ok">已索引</span></div>
+              <div class="file"><div>FADEC安全性论文.pdf<small>all_papers_pool | papers_index</small></div><span class="badge">论文</span></div>
+              <div class="file"><div>维修保障记录.xlsx<small>user_docs | 待解析</small></div><span class="badge warn">待处理</span></div>
+            </div>
+          </div>
+        </div>
+      </div>
+    </main>
+  </div>
+</body>
+</html>

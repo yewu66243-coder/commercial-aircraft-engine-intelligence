@@ -1,0 +1,693 @@
+<!doctype html>
+<html lang="zh-CN">
+<head>
+  <meta charset="utf-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1" />
+  <title>方案A2 - 紧凑型专业情报工作台</title>
+  <style>
+    :root {
+      --bg: #0f172a;
+      --shell: #0b1220;
+      --panel: #111827;
+      --panel-2: #182235;
+      --line: #314158;
+      --text: #e5e7eb;
+      --muted: #94a3b8;
+      --accent: #14b8a6;
+      --blue: #38bdf8;
+      --warn: #f59e0b;
+      --ok: #22c55e;
+      --danger: #ef4444;
+      --radius: 8px;
+    }
+    * { box-sizing: border-box; }
+    body {
+      margin: 0;
+      font-family: "Microsoft YaHei", "Segoe UI", Arial, sans-serif;
+      background: var(--bg);
+      color: var(--text);
+      letter-spacing: 0;
+      font-size: 15px;
+    }
+    button, input, textarea, select { font: inherit; }
+    .app {
+      min-height: 100vh;
+      display: grid;
+      grid-template-rows: 62px 1fr;
+    }
+    header {
+      display: flex;
+      align-items: center;
+      justify-content: space-between;
+      padding: 0 20px;
+      border-bottom: 1px solid var(--line);
+      background: var(--shell);
+    }
+    .brand { display: flex; align-items: center; gap: 12px; font-weight: 700; font-size: 16px; }
+    .brand-mark {
+      width: 30px;
+      height: 30px;
+      border: 1px solid var(--accent);
+      display: grid;
+      place-items: center;
+      border-radius: 6px;
+      color: var(--accent);
+      font-weight: 800;
+    }
+    .status { display: flex; align-items: center; gap: 16px; color: var(--muted); font-size: 14px; }
+    .dot { width: 8px; height: 8px; background: var(--ok); border-radius: 999px; display: inline-block; margin-right: 6px; }
+    .workspace {
+      padding: 14px;
+      display: grid;
+      grid-template-columns: minmax(280px, 0.8fr) minmax(520px, 1.25fr) minmax(300px, 0.78fr) minmax(430px, 1fr);
+      gap: 14px;
+      align-items: stretch;
+    }
+    h1, h2, h3, p { margin: 0; }
+    h2 { font-size: 16px; margin-bottom: 11px; }
+    h3 { font-size: 14px; color: var(--muted); margin-bottom: 8px; font-weight: 600; }
+    .panel {
+      background: var(--panel);
+      border: 1px solid var(--line);
+      border-radius: var(--radius);
+      padding: 14px;
+    }
+    .stack { display: grid; gap: 12px; align-content: start; }
+    label { display: block; color: var(--muted); font-size: 14px; margin-bottom: 7px; }
+    textarea, input, select {
+      width: 100%;
+      border: 1px solid var(--line);
+      background: var(--shell);
+      color: var(--text);
+      border-radius: 6px;
+      padding: 11px 12px;
+      outline: none;
+    }
+    input[type="checkbox"] {
+      width: 16px;
+      height: 16px;
+      padding: 0;
+      accent-color: var(--accent);
+    }
+    textarea { min-height: 112px; resize: vertical; line-height: 1.55; }
+    .row { display: grid; grid-template-columns: 1fr 1fr; gap: 8px; }
+    .primary {
+      width: 100%;
+      height: 46px;
+      border: 0;
+      color: white;
+      background: var(--accent);
+      border-radius: 6px;
+      cursor: pointer;
+      font-weight: 700;
+    }
+    .ghost {
+      border: 1px solid var(--line);
+      color: var(--text);
+      background: transparent;
+      border-radius: 6px;
+      padding: 10px 12px;
+      cursor: pointer;
+    }
+    .metric-grid {
+      display: grid;
+      grid-template-columns: repeat(4, 1fr);
+      gap: 8px;
+    }
+    .metric {
+      border: 1px solid var(--line);
+      border-radius: var(--radius);
+      background: var(--panel);
+      padding: 10px;
+      min-height: 74px;
+    }
+    .metric span { color: var(--muted); font-size: 14px; }
+    .metric b { display: block; font-size: 24px; margin-top: 5px; }
+    .flow-grid {
+      display: grid;
+      grid-template-columns: repeat(2, minmax(0, 1fr));
+      gap: 8px;
+    }
+    .flow-card {
+      border: 1px solid var(--line);
+      border-radius: var(--radius);
+      background: var(--panel);
+      padding: 12px;
+      min-height: 112px;
+      display: grid;
+      grid-template-columns: 40px 1fr;
+      gap: 10px;
+    }
+    .step-no {
+      width: 34px;
+      height: 34px;
+      display: grid;
+      place-items: center;
+      border-radius: 6px;
+      background: rgba(20,184,166,.16);
+      color: var(--accent);
+      font-weight: 800;
+      border: 1px solid rgba(20,184,166,.38);
+    }
+    .flow-card strong { display: block; font-size: 15px; margin-bottom: 5px; }
+    .flow-card p { color: var(--muted); font-size: 13px; line-height: 1.45; }
+    .flow-card .hint { display: inline-block; margin-top: 7px; color: var(--blue); font-size: 13px; }
+    .split-panel {
+      display: grid;
+      grid-template-columns: 1fr;
+      gap: 10px;
+    }
+    .split-panel .panel:nth-child(2) { display: none; }
+    .table {
+      width: 100%;
+      border-collapse: collapse;
+      font-size: 14px;
+    }
+    .table th, .table td {
+      border-bottom: 1px solid var(--line);
+      padding: 9px 8px;
+      text-align: left;
+      vertical-align: top;
+    }
+    .table th { color: var(--muted); font-weight: 600; }
+    .tabs { display: flex; gap: 6px; margin-bottom: 10px; }
+    .tab {
+      padding: 7px 10px;
+      border: 1px solid var(--line);
+      border-radius: 6px;
+      color: var(--muted);
+      background: var(--shell);
+      font-size: 14px;
+    }
+    .tab.active { color: var(--text); border-color: var(--accent); }
+    .file-list { display: grid; gap: 8px; }
+    .file {
+      display: grid;
+      grid-template-columns: 1fr auto;
+      gap: 8px;
+      align-items: center;
+      border: 1px solid var(--line);
+      border-radius: 6px;
+      padding: 8px;
+      background: var(--panel-2);
+      font-size: 14px;
+    }
+    .file small { display: block; color: var(--muted); margin-top: 4px; font-size: 12.5px; }
+    .pill {
+      display: inline-flex;
+      align-items: center;
+      height: 26px;
+      padding: 0 10px;
+      border-radius: 999px;
+      background: rgba(20,184,166,.14);
+      color: var(--accent);
+      font-size: 13px;
+      white-space: nowrap;
+    }
+    .pill.paper { background: rgba(56,189,248,.14); color: var(--blue); }
+    .pill.warn { background: rgba(245,158,11,.14); color: var(--warn); }
+    .upload-target {
+      border: 1px dashed var(--line);
+      border-radius: var(--radius);
+      padding: 12px;
+      text-align: center;
+      color: var(--muted);
+      background: var(--shell);
+      margin-bottom: 10px;
+      font-size: 14px;
+    }
+    .compact-checks {
+      display: grid;
+      gap: 8px;
+      color: var(--muted);
+      font-size: 14px;
+    }
+    .domain-list {
+      display: grid;
+      gap: 8px;
+    }
+    .domain-item {
+      display: grid;
+      grid-template-columns: auto 1fr auto;
+      gap: 9px;
+      align-items: center;
+      border: 1px solid var(--line);
+      border-radius: 6px;
+      padding: 9px 10px;
+      background: var(--shell);
+      font-size: 14px;
+    }
+    .domain-item span {
+      color: var(--muted);
+      font-size: 12.5px;
+      white-space: nowrap;
+    }
+    .domain-actions {
+      display: grid;
+      grid-template-columns: 1fr 1fr;
+      gap: 8px;
+      margin-top: 10px;
+    }
+    .mini-list {
+      display: grid;
+      gap: 7px;
+    }
+    .mini-item {
+      display: grid;
+      grid-template-columns: 1fr auto;
+      gap: 8px;
+      align-items: center;
+      padding: 8px;
+      border: 1px solid var(--line);
+      border-radius: 6px;
+      background: var(--shell);
+      font-size: 14px;
+    }
+    .mini-item small {
+      display: block;
+      margin-top: 2px;
+      color: var(--muted);
+      font-size: 12.5px;
+    }
+    .entity-grid {
+      display: grid;
+      grid-template-columns: repeat(3, 1fr);
+      gap: 8px;
+    }
+    .entity-card {
+      border: 1px solid var(--line);
+      border-radius: 6px;
+      background: var(--shell);
+      padding: 11px;
+      min-height: 84px;
+    }
+    .entity-card span {
+      color: var(--muted);
+      font-size: 13px;
+    }
+    .entity-card b {
+      display: block;
+      margin-top: 4px;
+      font-size: 15px;
+    }
+    .progress-line {
+      height: 5px;
+      border-radius: 999px;
+      background: #223047;
+      overflow: hidden;
+      margin-top: 8px;
+    }
+    .progress-line i {
+      display: block;
+      height: 100%;
+      background: var(--accent);
+      border-radius: 999px;
+    }
+    .qa-grid {
+      display: grid;
+      grid-template-columns: repeat(4, 1fr);
+      gap: 8px;
+    }
+    .qa {
+      border: 1px solid var(--line);
+      border-radius: 6px;
+      padding: 11px;
+      background: var(--shell);
+    }
+    .qa span { display: block; color: var(--muted); font-size: 13px; }
+    .qa b { display: block; margin-top: 4px; font-size: 15px; }
+    .coverage-grid {
+      display: grid;
+      grid-template-columns: repeat(3, 1fr);
+      gap: 10px;
+    }
+    .coverage-card {
+      border: 1px solid var(--line);
+      border-radius: 6px;
+      padding: 12px;
+      background: var(--shell);
+    }
+    .coverage-card span {
+      display: block;
+      color: var(--muted);
+      font-size: 13px;
+      margin-bottom: 8px;
+    }
+    .coverage-card b {
+      display: block;
+      font-size: 17px;
+      margin-bottom: 9px;
+    }
+    .bar-chart {
+      display: grid;
+      gap: 9px;
+      margin-top: 8px;
+    }
+    .bar {
+      display: grid;
+      grid-template-columns: 92px 1fr 44px;
+      gap: 10px;
+      align-items: center;
+      color: var(--muted);
+      font-size: 13px;
+    }
+    .bar div {
+      height: 8px;
+      border-radius: 999px;
+      background: #223047;
+      overflow: hidden;
+    }
+    .bar i {
+      display: block;
+      height: 100%;
+      border-radius: 999px;
+      background: var(--accent);
+    }
+    .bar strong {
+      color: var(--text);
+      font-size: 13px;
+      text-align: right;
+    }
+    .health-grid {
+      display: grid;
+      grid-template-columns: repeat(2, 1fr);
+      gap: 8px;
+    }
+    .health-card {
+      border: 1px solid var(--line);
+      border-radius: 6px;
+      padding: 10px;
+      background: var(--shell);
+    }
+    .health-card span {
+      display: block;
+      color: var(--muted);
+      font-size: 12.5px;
+    }
+    .health-card b {
+      display: block;
+      font-size: 16px;
+      margin-top: 4px;
+    }
+    .report-preview {
+      background: var(--shell);
+      border: 1px solid var(--line);
+      border-radius: var(--radius);
+      padding: 14px;
+      min-height: 190px;
+      color: var(--muted);
+      font-size: 15px;
+      line-height: 1.68;
+    }
+    .report-rail .panel {
+      min-height: calc(100vh - 90px);
+      display: flex;
+      flex-direction: column;
+    }
+    .report-rail .report-preview {
+      flex: 1;
+      overflow: auto;
+      min-height: 0;
+    }
+    .report-actions {
+      display: grid;
+      grid-template-columns: repeat(3, 1fr);
+      gap: 8px;
+      margin-top: 10px;
+    }
+    @media (max-width: 1650px) {
+      .workspace { grid-template-columns: 1fr; }
+      .metric-grid { grid-template-columns: repeat(2, 1fr); }
+      .entity-grid { grid-template-columns: repeat(2, 1fr); }
+      .qa-grid { grid-template-columns: repeat(2, 1fr); }
+      .coverage-grid { grid-template-columns: 1fr; }
+      .health-grid { grid-template-columns: repeat(2, 1fr); }
+      .split-panel { grid-template-columns: 1fr; }
+      .split-panel .panel:nth-child(2) { display: block; }
+      .report-rail .panel { min-height: auto; }
+    }
+  </style>
+</head>
+<body>
+  <div class="app">
+    <header>
+      <div class="brand"><div class="brand-mark">AI</div><div>商用航空发动机情报工作台</div></div>
+      <div class="status"><span><i class="dot"></i>本地服务在线</span><span>论文池 1666</span><span>用户资料 24</span><span>索引健康 98%</span></div>
+    </header>
+
+    <div class="workspace">
+      <aside class="stack">
+        <div class="panel">
+          <h2>任务配置</h2>
+          <label>情报任务描述</label>
+          <textarea>航空发动机适航安全性分析，重点关注 FADEC、CCAR-33、安全性评估和维修保障影响。</textarea>
+          <div class="row" style="margin-top:10px;">
+            <div><label>报告类型</label><select><option>技术动态研报</option><option>专题快报</option><option>型号跟踪</option></select></div>
+            <div><label>检索范围</label><select><option>论文库 + 用户资料</option><option>仅论文库</option><option>仅用户资料</option></select></div>
+          </div>
+          <button class="primary" style="margin-top:12px;">启动情报任务</button>
+        </div>
+
+        <div class="panel">
+          <h2>资料上传</h2>
+          <div class="upload-target">拖入或选择资料文件<br />保存到 local_docs/user_docs 或 all_papers_pool</div>
+          <div class="row">
+            <button class="ghost">用户资料库</button>
+            <button class="ghost">论文池</button>
+          </div>
+        </div>
+
+        <div class="panel">
+          <h2>检索策略</h2>
+          <div class="compact-checks">
+            <label><input type="checkbox" checked /> 论文库：先查 papers_index，再精读</label>
+            <label><input type="checkbox" checked /> 用户资料库：先查 user_docs_index</label>
+            <label><input type="checkbox" checked /> Embedding 失败时关键词兜底</label>
+          </div>
+        </div>
+
+        <div class="panel">
+          <h2>优先搜索网址</h2>
+          <div class="domain-list">
+            <div class="domain-item"><input type="checkbox" checked /><div>caac.gov.cn</div><span>适航规章</span></div>
+            <div class="domain-item"><input type="checkbox" checked /><div>easa.europa.eu</div><span>审定资料</span></div>
+            <div class="domain-item"><input type="checkbox" /><div>faa.gov</div><span>补充检索</span></div>
+          </div>
+          <div class="domain-actions">
+            <button class="ghost">新增网址</button>
+            <button class="ghost">排序管理</button>
+          </div>
+        </div>
+
+        <div class="panel">
+          <h2>最近任务</h2>
+          <div class="mini-list">
+            <div class="mini-item"><div>适航安全性分析<small>本地资料 + 论文库 | 8 分钟前</small></div><span class="pill">完成</span></div>
+            <div class="mini-item"><div>LEAP 发动机维修动态<small>Web + 论文库 | 昨日</small></div><span class="pill paper">归档</span></div>
+            <div class="mini-item"><div>CJ-1000A 技术跟踪<small>持续监测任务 | 3 天前</small></div><span class="pill warn">待复核</span></div>
+          </div>
+        </div>
+
+        <div class="panel">
+          <h2>资料入库队列</h2>
+          <div class="mini-list">
+            <div class="mini-item"><div>适航审定流程说明.docx<small>已生成 user_docs_index 条目</small></div><span class="pill">已入库</span></div>
+            <div class="mini-item"><div>FADEC 测试记录.pdf<small>等待正文预览抽取</small></div><span class="pill warn">处理中</span></div>
+          </div>
+        </div>
+      </aside>
+
+      <main class="stack">
+        <div class="metric-grid">
+          <div class="metric"><span>本次筛中论文</span><b>5</b></div>
+          <div class="metric"><span>命中用户资料</span><b>3</b></div>
+          <div class="metric"><span>证据片段</span><b>28</b></div>
+          <div class="metric"><span>预计耗时</span><b>8m</b></div>
+        </div>
+
+        <div class="flow-grid">
+          <div class="flow-card">
+            <div class="step-no">1</div>
+            <div><strong>论文索引检索</strong><p>查询 papers_index.json，按标题、摘要、文件名筛选高相关论文。</p><span class="hint">已筛出 5 篇</span></div>
+          </div>
+          <div class="flow-card">
+            <div class="step-no">2</div>
+            <div><strong>用户资料检索</strong><p>查询 user_docs_index.json，避免每次全量读取用户上传文件。</p><span class="hint">命中 3 份资料</span></div>
+          </div>
+          <div class="flow-card">
+            <div class="step-no">3</div>
+            <div><strong>正文精读与证据压缩</strong><p>只读取命中文件的正文片段，进入报告写作上下文。</p><span class="hint">28 个片段</span></div>
+          </div>
+          <div class="flow-card">
+            <div class="step-no">4</div>
+            <div><strong>Writer Agent 汇总</strong><p>生成报告，并在末尾列出本次精读文献清单。</p><span class="hint">等待生成</span></div>
+          </div>
+        </div>
+
+        <div class="split-panel">
+          <div class="panel">
+            <div class="tabs"><div class="tab active">证据来源</div><div class="tab">报告预览</div><div class="tab">运行日志</div></div>
+            <table class="table">
+              <thead><tr><th>来源文件</th><th>类型</th><th>命中原因</th><th>分数</th></tr></thead>
+              <tbody>
+                <tr><td>FADEC系统适航安全性分析.pdf</td><td>论文</td><td>标题命中 FADEC / 适航安全性</td><td>92</td></tr>
+                <tr><td>发动机适航审定流程.docx</td><td>用户资料</td><td>摘要命中 CCAR-33 / 验证试验</td><td>81</td></tr>
+                <tr><td>维修安全性分析.txt</td><td>用户资料</td><td>正文预览命中隐蔽失效</td><td>74</td></tr>
+              </tbody>
+            </table>
+          </div>
+          <div class="panel">
+            <h2>报告预览</h2>
+            <div class="report-preview">
+              一、执行摘要<br />
+              本报告围绕航空发动机适航安全性展开，重点关注 FADEC、限时派遣、CCAR-33 条款和维修保障中的隐蔽失效风险。<br /><br />
+              二、分主题发现<br />
+              系统将结合论文库与用户资料库证据片段生成完整研报。
+            </div>
+          </div>
+        </div>
+
+        <div class="panel">
+          <h2>实体参数追踪</h2>
+          <div class="entity-grid">
+            <div class="entity-card"><span>核心系统</span><b>FADEC</b><div class="progress-line"><i style="width: 88%"></i></div></div>
+            <div class="entity-card"><span>适航条款</span><b>CCAR-33</b><div class="progress-line"><i style="width: 74%"></i></div></div>
+            <div class="entity-card"><span>风险模式</span><b>隐蔽失效</b><div class="progress-line"><i style="width: 68%"></i></div></div>
+            <div class="entity-card"><span>控制策略</span><b>限时派遣</b><div class="progress-line"><i style="width: 61%"></i></div></div>
+            <div class="entity-card"><span>验证对象</span><b>传感器异常</b><div class="progress-line"><i style="width: 55%"></i></div></div>
+            <div class="entity-card"><span>维修任务</span><b>安全性分析</b><div class="progress-line"><i style="width: 79%"></i></div></div>
+          </div>
+        </div>
+
+        <div class="panel">
+          <h2>报告质量检查</h2>
+          <div class="qa-grid">
+            <div class="qa"><span>来源覆盖</span><b>论文 5 / 资料 3</b></div>
+            <div class="qa"><span>溯源完整度</span><b>待生成</b></div>
+            <div class="qa"><span>实体抽取</span><b>6 类</b></div>
+            <div class="qa"><span>风险提示</span><b>已启用</b></div>
+          </div>
+        </div>
+
+        <div class="panel">
+          <h2>检索覆盖可视化</h2>
+          <div class="coverage-grid">
+            <div class="coverage-card">
+              <span>本地论文库</span>
+              <b>5 / 1609</b>
+              <div class="progress-line"><i style="width: 72%"></i></div>
+            </div>
+            <div class="coverage-card">
+              <span>用户资料库</span>
+              <b>3 / 24</b>
+              <div class="progress-line"><i style="width: 64%"></i></div>
+            </div>
+            <div class="coverage-card">
+              <span>优先网址</span>
+              <b>2 / 3</b>
+              <div class="progress-line"><i style="width: 58%"></i></div>
+            </div>
+          </div>
+          <div class="bar-chart">
+            <div class="bar"><span>适航安全</span><div><i style="width: 86%"></i></div><strong>86</strong></div>
+            <div class="bar"><span>FADEC</span><div><i style="width: 78%"></i></div><strong>78</strong></div>
+            <div class="bar"><span>维修保障</span><div><i style="width: 62%"></i></div><strong>62</strong></div>
+          </div>
+        </div>
+      </main>
+
+      <section class="stack">
+        <div class="panel">
+          <h2>用户资料库</h2>
+          <div class="file-list">
+            <div class="file"><div>适航审定流程说明.docx<small>已索引 | user_docs</small></div><span class="pill">资料</span></div>
+            <div class="file"><div>FADEC测试记录.pdf<small>已索引 | 命中 12 次</small></div><span class="pill">资料</span></div>
+            <div class="file"><div>维修安全性分析.txt<small>已索引 | 3.2 MB</small></div><span class="pill">资料</span></div>
+          </div>
+        </div>
+
+        <div class="panel">
+          <h2>论文池概览</h2>
+          <div class="file-list">
+            <div class="file"><div>FADEC系统适航安全性分析.pdf<small>all_papers_pool | papers_index</small></div><span class="pill paper">论文</span></div>
+            <div class="file"><div>隐蔽失效安全性分析.pdf<small>all_papers_pool | 已命中</small></div><span class="pill paper">论文</span></div>
+          </div>
+        </div>
+
+        <div class="panel">
+          <h2>索引维护</h2>
+          <div class="file-list">
+            <div class="file"><div>user_docs_index.json<small>增量更新 | 24 条</small></div><span class="pill">正常</span></div>
+            <div class="file"><div>papers_index.json<small>1609 条 | 需手动/批量重建</small></div><span class="pill warn">论文索引</span></div>
+          </div>
+        </div>
+
+        <div class="panel">
+          <h2>本次精读清单</h2>
+          <div class="mini-list">
+            <div class="mini-item"><div>FADEC系统适航安全性分析.pdf<small>相关度 92 | 论文</small></div><span class="pill paper">精读</span></div>
+            <div class="mini-item"><div>发动机适航审定流程.docx<small>相关度 81 | 用户资料</small></div><span class="pill">精读</span></div>
+            <div class="mini-item"><div>隐蔽失效安全性分析.pdf<small>相关度 76 | 论文</small></div><span class="pill paper">精读</span></div>
+          </div>
+        </div>
+
+        <div class="panel">
+          <h2>索引任务队列</h2>
+          <div class="mini-list">
+            <div class="mini-item"><div>user_docs 增量索引<small>新增文件后自动更新</small></div><span class="pill">自动</span></div>
+            <div class="mini-item"><div>papers_index 重建<small>批量导入论文后手动触发</small></div><span class="pill warn">手动</span></div>
+          </div>
+        </div>
+
+        <div class="panel">
+          <h2>资料类型分布</h2>
+          <div class="bar-chart">
+            <div class="bar"><span>PDF 论文</span><div><i style="width: 82%"></i></div><strong>1609</strong></div>
+            <div class="bar"><span>用户文档</span><div><i style="width: 46%"></i></div><strong>24</strong></div>
+            <div class="bar"><span>待索引</span><div><i style="width: 18%"></i></div><strong>2</strong></div>
+          </div>
+        </div>
+
+        <div class="panel">
+          <h2>索引健康状态</h2>
+          <div class="health-grid">
+            <div class="health-card"><span>文件可读率</span><b>98%</b></div>
+            <div class="health-card"><span>摘要覆盖率</span><b>91%</b></div>
+            <div class="health-card"><span>最近更新</span><b>今日</b></div>
+            <div class="health-card"><span>异常文件</span><b>2 个</b></div>
+          </div>
+        </div>
+      </section>
+
+      <section class="report-rail">
+        <div class="panel">
+          <h2>报告预览</h2>
+          <div class="report-preview">
+            <strong>一、执行摘要</strong><br />
+            本报告围绕航空发动机适航安全性展开，重点关注 FADEC、限时派遣、CCAR-33 条款、验证试验和维修保障中的隐蔽失效风险。系统将结合论文库与用户资料库证据片段生成完整研报。<br /><br />
+
+            <strong>二、分主题发现</strong><br />
+            1. 适航审查方面，FADEC 系统需要围绕控制律、故障检测、降级模式和限时派遣策略建立可追溯证据链。<br />
+            2. 安全性分析方面，需将单粒子效应、隐蔽失效、传感器异常和维修任务制定纳入统一评估框架。<br />
+            3. 维修保障方面，用户资料库中的审定流程说明和测试记录可作为论文结论的补充证据。<br /><br />
+
+            <strong>三、实体与参数清单</strong><br />
+            - FADEC：全权限数字发动机控制系统<br />
+            - CCAR-33：航空发动机适航规定<br />
+            - TLD：限时派遣策略<br />
+            - 隐蔽失效：维修任务制定中的关键安全风险<br /><br />
+
+            <strong>四、精读文献清单</strong><br />
+            报告生成后，此处将列出本次筛入精读的论文和用户资料，包括文件名、题名、作者、相关度分数和保存位置。
+          </div>
+          <div class="report-actions">
+            <button class="ghost">Markdown</button>
+            <button class="ghost">Word</button>
+            <button class="ghost">PDF</button>
+          </div>
+        </div>
+      </section>
+    </div>
+  </div>
+</body>
+</html>

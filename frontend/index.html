@@ -1,0 +1,275 @@
+<!doctype html>
+<html lang="zh-CN">
+<head>
+    <meta charset="utf-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1" />
+    <title>商用航空发动机情报工作台</title>
+    <link rel="icon" href="./static/favicon.ico" />
+    <link rel="stylesheet" href="https://cdnjs.cloudflare.com/ajax/libs/font-awesome/6.5.1/css/all.min.css" />
+    <link rel="stylesheet" href="/site/styles.css?v=academic-report-20260904-source-center" />
+</head>
+<body>
+    <div class="app-shell">
+        <header class="topbar">
+            <div class="brand">
+                <div class="brand-mark">AI</div>
+                <div>
+                    <strong>商用航空发动机情报工作台</strong>
+                    <span>3-Agent 协同研判</span>
+                </div>
+            </div>
+            <div class="top-status">
+                <span><i class="status-dot"></i>本地服务在线</span>
+                <span>论文池 <b id="paperPoolCount">--</b></span>
+                <span>专利池 <b id="patentPoolCount">--</b></span>
+                <span>用户资料 <b id="userDocCount">--</b></span>
+                <span>索引健康 <b id="indexHealth">--</b></span>
+            </div>
+            <div class="nav-buttons">
+                <button id="websocketPanelOpenBtn" class="top-icon-btn" type="button"><i class="fas fa-network-wired"></i> 状态</button>
+                <button id="historyPanelOpenBtn" class="top-icon-btn" type="button"><i class="fas fa-history"></i> 历史</button>
+            </div>
+        </header>
+
+        <main class="workspace">
+            <aside class="stack">
+                <form method="POST" id="researchForm" class="panel task-panel">
+                    <h2>任务配置</h2>
+                    <label for="task">情报任务描述</label>
+                    <textarea id="task" name="task" placeholder="例如：航空发动机适航安全性分析，重点关注 FADEC、CCAR-33、安全性评估和维修保障影响。" required autocomplete="on"></textarea>
+                    <div class="form-row template-row">
+                        <div>
+                            <label for="taskTemplateSelect">任务模板库</label>
+                            <select id="taskTemplateSelect" name="task_template_id">
+                                <option value="">不使用模板</option>
+                            </select>
+                        </div>
+                        <div>
+                            <label for="demandModelSelect">领域需求模型</label>
+                            <select id="demandModelSelect" name="demand_model_id">
+                                <option value="">自动匹配</option>
+                            </select>
+                        </div>
+                    </div>
+                    <input type="radio" name="agent" id="autoAgent" value="Auto Agent" checked hidden />
+                    <select name="tone" id="tone" hidden>
+                        <option value="Objective" selected>Objective</option>
+                    </select>
+                    <div class="form-row">
+                        <div>
+                            <label for="report_type">报告类型</label>
+                            <select name="report_type" id="report_type" required>
+                                <option value="research_report">专题快报</option>
+                                <option value="detailed_report" selected>技术动态研报</option>
+                                <option value="resource_report">型号跟踪</option>
+                            </select>
+                        </div>
+                        <div>
+                            <label>检索范围</label>
+                            <div class="scope-selector" id="searchScopes">
+                                <label class="scope-item"><input type="checkbox" name="search_scope" value="papers" checked /><span>论文库</span></label>
+                                <label class="scope-item"><input type="checkbox" name="search_scope" value="patents" checked /><span>专利池</span></label>
+                                <label class="scope-item"><input type="checkbox" name="search_scope" value="user_docs" checked /><span>用户资料</span></label>
+                                <label class="scope-item"><input type="checkbox" name="search_scope" value="web" checked /><span>Web</span></label>
+                            </div>
+                            <input type="hidden" name="report_source" id="report_source" value="hybrid" />
+                        </div>
+                    </div>
+                    <div class="form-row">
+                        <div>
+                            <label for="maxSearchResults">精读/抓取上限</label>
+                            <input type="number" id="maxSearchResults" name="max_search_results" min="1" max="20" value="5" />
+                        </div>
+                        <div>
+                            <label for="llmProviderSelect">生成大模型</label>
+                            <select id="llmProviderSelect" name="llm_provider">
+                                <option value="deepseek" selected>DeepSeek</option>
+                                <option value="qwen">千问（Qwen Plus）</option>
+                            </select>
+                            <p class="hint-text model-provider-status" id="modelProviderStatus">正在读取模型配置…</p>
+                        </div>
+                    </div>
+                    <input type="submit" value="启动情报任务" class="primary-button" id="submitButton" />
+                </form>
+
+                <section class="panel">
+                    <h2>优先搜索网址</h2>
+                    <label class="select-all"><input type="checkbox" id="selectAllDomains" /> 全选 / 取消全选</label>
+                    <div class="domain-list" id="presetDomains">
+                        <div class="empty-state">正在读取源站模板库...</div>
+                    </div>
+                    <input type="text" id="queryDomains" name="query_domains" placeholder="补充域名，多个用逗号分隔，如：boeing.com" autocomplete="on" />
+                    <p class="hint-text" id="templateStatus">源站将按类别、权重与可信度参与 Web 检索排序。</p>
+                </section>
+
+            </aside>
+
+            <section class="stack">
+                <section class="panel">
+                    <h2>资料上传</h2>
+                    <div class="upload-target" id="uploadDropZone">
+                        <input type="file" id="localFileInput" />
+                        <span>选择本地资料文件</span>
+                        <small>支持 PDF、DOCX、TXT、MD、XLSX；上传后自动写入索引</small>
+                    </div>
+                    <div class="upload-target-row">
+                        <button class="ghost-button upload-target-btn active" type="button" data-target="user_docs">用户资料库</button>
+                        <button class="ghost-button upload-target-btn" type="button" data-target="all_papers_pool">论文池</button>
+                        <button class="ghost-button upload-target-btn" type="button" data-target="all_patent_pool">专利池</button>
+                    </div>
+                    <button class="ghost-button full-width" id="uploadLocalFileBtn" type="button">上传并加入检索范围</button>
+                    <p class="hint-text" id="uploadStatus">保存路径：local_docs/user_docs、local_docs/all_papers_pool 或 local_docs/all_patent_pool</p>
+                </section>
+
+                <section class="panel research-output-container">
+                    <h2><div id="modernSpinner" class="modern-spinner"></div>运行日志 <button id="expandOutputBtn" class="expand-button" title="展开"><i class="fas fa-expand-alt"></i></button></h2>
+                    <div id="output"></div>
+                </section>
+
+                <section class="panel">
+                    <h2>检索覆盖可视化</h2>
+                    <div class="coverage-grid">
+                        <div class="coverage-card"><span>本地论文库</span><b id="paperCoverage">--</b><div class="progress-line"><i id="paperCoverageBar" style="width:0"></i></div></div>
+                        <div class="coverage-card"><span>本地专利池</span><b id="patentCoverage">--</b><div class="progress-line"><i id="patentCoverageBar" style="width:0"></i></div></div>
+                        <div class="coverage-card"><span>用户资料库</span><b id="userCoverage">--</b><div class="progress-line"><i id="userCoverageBar" style="width:0"></i></div></div>
+                        <div class="coverage-card"><span>优先网址</span><b id="domainCoverage">--</b><div class="progress-line"><i id="domainCoverageBar" style="width:0"></i></div></div>
+                    </div>
+                    <div class="bar-chart">
+                        <div class="bar"><span>适航安全</span><div><i style="width:86%"></i></div><strong>86</strong></div>
+                        <div class="bar"><span>FADEC</span><div><i style="width:78%"></i></div><strong>78</strong></div>
+                        <div class="bar"><span>维修保障</span><div><i style="width:62%"></i></div><strong>62</strong></div>
+                    </div>
+                </section>
+            </section>
+
+            <section class="stack library-column">
+                <section class="panel library-panel">
+                    <h2>用户资料库</h2>
+                    <div class="library-toolbar">
+                        <input type="search" id="userDocsSearch" placeholder="搜索用户资料文件名、题名或摘要..." />
+                        <span id="userDocsVisibleCount">--</span>
+                    </div>
+                    <div class="file-list library-list" id="userDocsList">
+                        <div class="empty-state">正在读取 local_docs/user_docs...</div>
+                    </div>
+                </section>
+
+                <section class="panel library-panel">
+                    <h2>论文池概览</h2>
+                    <div class="library-toolbar">
+                        <input type="search" id="paperPoolSearch" placeholder="搜索论文文件名、题名或摘要..." />
+                        <span id="paperPoolVisibleCount">--</span>
+                    </div>
+                    <div class="file-list library-list" id="paperPoolList">
+                        <div class="empty-state">正在读取 all_papers_pool...</div>
+                    </div>
+                </section>
+
+                <section class="panel library-panel">
+                    <h2>专利池概览</h2>
+                    <div class="library-toolbar">
+                        <input type="search" id="patentPoolSearch" placeholder="搜索专利文件名、题名、申请人或摘要..." />
+                        <span id="patentPoolVisibleCount">--</span>
+                    </div>
+                    <div class="file-list library-list" id="patentPoolList">
+                        <div class="empty-state">正在读取 all_patent_pool...</div>
+                    </div>
+                </section>
+
+            </section>
+
+            <aside class="report-rail">
+                <section class="panel report-container">
+                    <h2>报告预览
+                        <button id="copyToClipboardTop" class="icon-button" title="复制" style="display:none"><i class="fas fa-copy"></i></button>
+                        <button id="expandReportBtn" class="expand-button" title="展开"><i class="fas fa-expand-alt"></i></button>
+                    </h2>
+                    <div class="report-actions">
+                        <a id="downloadLinkMdTop" href="#" class="report-action-btn disabled"><i class="fas fa-file-lines"></i> Markdown</a>
+                        <a id="downloadLinkWordTop" href="#" class="report-action-btn disabled"><i class="fas fa-file-word"></i> Word</a>
+                        <a id="downloadLinkTop" href="#" class="report-action-btn disabled"><i class="fas fa-file-pdf"></i> PDF</a>
+                    </div>
+                    <p id="reportQualityStatus" class="report-quality-status" role="status" aria-live="polite">中文研究报告：摘要、正文、参考文献；Word / PDF 统一论文式排版。</p>
+                    <div id="reportContainer">
+                        <p class="empty-state">报告生成后可在此审阅摘要、研究方法、专题分析与结论，并下载 Word 或 PDF。</p>
+                    </div>
+                    <div id="reportActions" style="display:none"><div class="alert alert-info" id="status"></div></div>
+                </section>
+            </aside>
+        </main>
+
+        <footer class="institution-footer" aria-label="合作机构">
+            <div class="institution-logo xmu-logo" aria-label="厦门大学">
+                <img src="/static/xiamen-university-logo.jpg" alt="厦门大学 logo" />
+                <span class="logo-name">厦门大学</span>
+            </div>
+            <div class="institution-divider"></div>
+            <div class="institution-logo aecc-logo" aria-label="中国航发商发">
+                <img src="/static/aecc-cae-logo.png" alt="中国航发商发 logo" />
+                <span class="logo-name">中国航发商发</span>
+            </div>
+        </footer>
+    </div>
+
+    <div class="images_div"><div id="selectedImagesContainer" style="display:none"></div></div>
+
+    <div class="chat-container" id="chatContainer" style="display:none">
+        <h2>报告问答 <button id="expandChatBtn" class="expand-button" title="展开"><i class="fas fa-expand-alt"></i></button></h2>
+        <div id="chatMessages" class="chat-messages"></div>
+        <div class="chat-input-container">
+            <textarea id="chatInput" class="chat-input" placeholder="围绕当前报告继续提问..." rows="2"></textarea>
+            <button id="voiceInputBtn" class="ghost-button" type="button"><i class="fas fa-microphone"></i></button>
+            <button id="sendChatBtn" class="primary-button" type="button"><i class="fas fa-paper-plane"></i> 发送</button>
+        </div>
+    </div>
+
+    <div class="websocket-panel" id="websocketPanel">
+        <div class="websocket-panel-header">
+            <h3><i class="fas fa-plug"></i> 连接状态</h3>
+            <button id="websocketPanelToggle" class="websocket-action-btn" title="关闭"><i class="fas fa-chevron-left"></i></button>
+        </div>
+        <div class="websocket-status">
+            <div class="status-item"><span class="status-label">Connection:</span><span class="status-value" id="connectionStatus">Checking</span><span class="status-indicator connecting" id="connectionIndicator"></span></div>
+            <div class="status-item"><span class="status-label">Research:</span><span class="status-value" id="researchStatus">Inactive</span></div>
+            <div class="status-item"><span class="status-label">Task elapsed:</span><span class="status-value" id="taskElapsed">-</span></div>
+            <div class="status-item"><span class="status-label">Stage:</span><span class="status-value" id="taskStage">-</span></div>
+            <div class="status-item"><span class="status-label">Review round:</span><span class="status-value" id="taskRound">-</span></div>
+            <div class="status-item"><span class="status-label">Est. remaining:</span><span class="status-value" id="taskEta">-</span></div>
+            <div class="status-item"><span class="status-label">API online for:</span><span class="status-value" id="connectionDuration">-</span></div>
+            <div class="status-item"><span class="status-label">Last activity:</span><span class="status-value" id="lastActivity">-</span></div>
+            <div class="status-item"><span class="status-label">Channel:</span><span class="status-value" id="readyState">HTTP API (Checking)</span></div>
+            <div class="status-divider"></div>
+            <div class="status-item"><span class="status-label">Health checks:</span><span class="status-value" id="connectionAttempts">0</span></div>
+            <div class="status-item"><span class="status-label">Responses:</span><span class="status-value" id="messagesReceived">0</span></div>
+            <div class="status-divider"></div>
+            <div class="status-item"><span class="status-label">Current task:</span><span class="status-value" id="currentTask">-</span></div>
+            <div class="status-item"><span class="status-label">Current model:</span><span class="status-value" id="currentModel">DeepSeek</span></div>
+        </div>
+    </div>
+
+    <div class="history-panel" id="historyPanel">
+        <div class="history-panel-header">
+            <h3><i class="fas fa-history"></i> 历史报告</h3>
+            <button id="historyPanelToggle" class="history-action-btn" title="关闭"><i class="fas fa-times"></i></button>
+        </div>
+        <div class="history-panel-search">
+            <input type="text" id="historySearch" placeholder="搜索历史任务..." />
+            <button id="historySearchBtn" class="history-action-btn" title="搜索"><i class="fas fa-search"></i></button>
+        </div>
+        <div class="history-panel-filters">
+            <select id="historySortOrder">
+                <option value="newest">最新优先</option>
+                <option value="oldest">最早优先</option>
+            </select>
+            <button id="historyClearBtn" class="history-action-btn" title="清空历史"><i class="fas fa-trash-alt"></i></button>
+        </div>
+        <div class="history-panel-entries" id="historyEntries"></div>
+    </div>
+
+    <script src="https://cdnjs.cloudflare.com/ajax/libs/showdown/1.9.1/showdown.min.js"></script>
+    <script src="https://cdnjs.cloudflare.com/ajax/libs/dompurify/3.2.6/purify.min.js"></script>
+    <script src="/site/scripts.js?v=dual-model-selector-20260906"></script>
+</body>
+</html>
+
+
