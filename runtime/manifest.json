@@ -1,0 +1,21 @@
+{
+  "name": "commercial-aircraft-engine-runtime-win-x64-py311",
+  "platform": "Windows x64",
+  "python": "3.11.9",
+  "archive": "commercial-aircraft-engine-runtime-win-x64-py311.zip",
+  "archive_bytes": 237024511,
+  "archive_sha256": "70f340520f12f83557f464a5cf3f8000aefba7dc6f285a5619c74f15224345b8",
+  "archive_entries": 21086,
+  "includes": [
+    "portable_python",
+    "dependencies"
+  ],
+  "excludes": [
+    ".env and credentials",
+    "local_docs",
+    "outputs",
+    "ollama_models",
+    "Python bytecode caches",
+    "third-party test directories"
+  ]
+}
