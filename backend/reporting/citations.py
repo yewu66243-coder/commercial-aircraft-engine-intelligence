@@ -3,6 +3,7 @@ from __future__ import annotations
 
 import re
 from dataclasses import asdict, is_dataclass
+from datetime import datetime
 from urllib.parse import quote, unquote, urlsplit
 
 
@@ -19,6 +20,114 @@ def source_dict(source):
 
 def _key(label):
     return re.sub(r"\s+", "", label).replace('url', 'URL')
+
+
+def _clean_author(author: str) -> str:
+    author = re.sub(r'\s+', ' ', str(author or '')).strip(' ;-，,。.')
+    if not author or author.lower() == 'nan':
+        return ''
+    parts = [item.strip() for item in re.split(r'[;；、]', author) if item.strip()]
+    return ','.join(parts) if parts else author.replace('，', ',')
+
+
+def _clean_reference_text(text: str) -> str:
+    text = re.sub(r'\s*\[查看原始资料\]\([^)]+\)', '', str(text or ''))
+    text = re.sub(r'\s*\[本地资料\]\([^)]+\)', '', text)
+    text = text.replace('nan．', '').replace('nan. ', '')
+    text = re.sub(r'\s+', ' ', text).strip(' 。.')
+    return text
+
+
+def _extract_reference_date(text: str) -> tuple[str, str]:
+    match = re.search(r'\b(?:19|20)\d{2}(?:-\d{1,2}(?:-\d{1,2})?)?\b', text or '')
+    if not match:
+        return '', text
+    date = match[0]
+    rest = (text[:match.start()] + text[match.end():]).strip(' 。.,，')
+    return date, rest
+
+
+def _split_reference_description(description: str, url: str) -> dict:
+    body = _clean_reference_text(description)
+    if url:
+        body = body.replace(url, '').strip(' 。.')
+    date, body_without_date = _extract_reference_date(body)
+    first_split = re.match(r'^(.{1,80}?)[.．。]\s*(.+)$', body_without_date)
+    if first_split:
+        author = _clean_author(first_split[1])
+        remainder = first_split[2].strip(' 。.')
+        second_split = re.match(r'^(.+?)[.．。]\s*(.+)$', remainder)
+        title = (second_split[1] if second_split else remainder).strip(' 。.')
+        source = (second_split[2] if second_split else '').strip(' 。.')
+    else:
+        author = ''
+        title = body_without_date or (f'网页资料（{urlsplit(url).netloc}）' if url else body)
+        source = ''
+    return {'author': author, 'title': title.strip(' 。.'), 'source': source.strip(' 。.'), 'date': date}
+
+
+def _reference_marker(item: dict, description: str, has_url: bool) -> str:
+    source_type = str(item.get('source_type') or item.get('type') or '')
+    probe = f'{source_type} {description} {item.get("title", "")} {item.get("url", "")}'
+    if not has_url and re.search(r'报告|资料|用户|report', source_type, re.I):
+        return '[R]'
+    if re.search(r'专利|patent', probe, re.I):
+        return '[P]'
+    if has_url and re.search(r'doi\.org|论文|期刊|journal|学报|计算机集成制造系统', probe, re.I):
+        return '[J/OL]'
+    if not has_url and re.search(r'论文|期刊|journal|学报', source_type, re.I):
+        return '[J]'
+    if re.search(r'学位|dissertation|thesis', probe, re.I):
+        return '[D]'
+    return '[EB/OL]' if has_url else '[R]'
+
+
+def _format_gbt_reference(item: dict) -> str:
+    url = item.get('url') or ''
+    local_url = item.get('local_url') or ''
+    link = url or local_url
+    parsed = _split_reference_description(item.get('description', ''), url)
+    author = _clean_author(item.get('author') or parsed['author'])
+    title = _clean_reference_text(item.get('title') or parsed['title'])
+    marker = _reference_marker(item, item.get('description', ''), bool(url))
+    date = parsed['date']
+    source = _clean_reference_text(parsed['source'])
+    accessed = datetime.now().strftime('%Y-%m-%d')
+
+    if not title:
+        title = f'网页资料（{urlsplit(url).netloc}）' if url else '来源信息缺失，待补充'
+    prefix = f'{author}.' if author else ''
+
+    if marker == '[P]':
+        body = f'{prefix}{title}{marker}.'
+        if date:
+            body = f'{prefix}{title}{marker}.{date}.'
+    elif marker in {'[J]', '[J/OL]'}:
+        body = f'{prefix}{title}{marker}.'
+        if source:
+            body += f'{source}'
+            if date:
+                body += f',{date}'
+            body += '.'
+        elif date:
+            body += f'{date}.'
+    elif marker == '[EB/OL]':
+        body = f'{prefix}{title}{marker}.'
+        if date:
+            body += f'{date}'
+        body += f'[{accessed}].'
+    else:
+        body = f'{prefix}{title}{marker}.本地资料.'
+
+    if marker in {'[J/OL]', '[EB/OL]'} and url:
+        if f'[{accessed}]' not in body:
+            body = body.rstrip('.') + f'[{accessed}].'
+        body += f' [{url}]({url}).'
+    elif local_url and marker not in {'[R]', '[J]', '[D]', '[P]'}:
+        body = body.rstrip('.') + f'. [本地资料]({local_url}).'
+    elif url and marker != '[R]':
+        body = body.rstrip('.') + f'. {url}.'
+    return re.sub(r'\s+', ' ', body).replace('. ', '.').strip()
 
 
 class CitationRegistry:
@@ -117,26 +226,7 @@ class CitationRegistry:
     def bibliography(self):
         lines = ['## 参考文献', '']
         for label, item in self.public.items():
-            link = item['url'] or item['local_url']
-            if item['title']:
-                author = item['author'].strip(' ;-')
-                title = item['title'].removesuffix('_' + author) if author else item['title']
-                author = '' if author.lower() == 'nan' else author
-                description = ((author + '. ') if author else '') + title.rstrip('。. ')
-            else:
-                description = item['description']
-                description = re.sub(r'\s*\[查看原始资料\]\([^)]+\)', '', description).strip()
-                description = description.replace('nan．', '').replace('nan. ', '')
-                if item['url'] and description == item['url']:
-                    description = f'网页资料（{urlsplit(item["url"]).netloc}）'
-            description = description.rstrip('。. ')
-            if item['url']:
-                description += f'. [EB/OL]. [{item["url"]}]({item["url"]}).'
-            elif link:
-                description += f'. [R]. [本地资料]({link}).'
-            else:
-                description += '. [R]. 本地资料.'
-            lines += [f'<a id="ref-{label[1:-1]}"></a>', f'{label} {description}', '']
+            lines += [f'<a id="ref-{label[1:-1]}"></a>', f'{label}{_format_gbt_reference(item)}', '']
         if not self.public:
             lines.append('本次材料未提供可对应的正文引文，参考资料需要补充核对。')
         return '\n'.join(lines)

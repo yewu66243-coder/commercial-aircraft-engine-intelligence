@@ -73,12 +73,22 @@ class FormalReportTests(unittest.TestCase):
         self.assertNotIn('## 本次运行统计', result.markdown)
 
     def test_local_source_metadata_and_link_are_preserved(self):
-        result = self.prepare(sources=[{'file_name': '原始论文.pdf', 'title': '发动机维修研究', 'author': '张某', 'source_type': '论文'}])
+        result = self.prepare(sources=[{'file_name': '原始论文.pdf', 'title': '发动机维修研究', 'author': '张某', 'source_type': '报告'}])
         self.assertIn('张某', result.markdown)
         self.assertIn('发动机维修研究', result.markdown)
         self.assertIn('[R]', result.markdown)
-        self.assertIn('/api/local-library/papers/', result.markdown)
+        self.assertIn('[R].本地资料.', result.markdown)
+        self.assertNotIn('/api/local-library/papers/', result.markdown)
         self.assertNotIn('2024', result.markdown)
+
+    def test_online_journal_reference_uses_gbt_7714_2025_shape(self):
+        text = BASE.replace(
+            '- [URL8] https://example.org/source',
+            '- [URL8] 张骁雄,丁松,范强,等. 多分支特征增强的航空发动机剩余寿命预测方法. 计算机集成制造系统,1-27. https://doi.org/10.13196/j.cims.2026.0129',
+        )
+        result = self.prepare(text)
+        self.assertIn('张骁雄,丁松,范强,等.多分支特征增强的航空发动机剩余寿命预测方法[J/OL].计算机集成制造系统,1-27[', result.markdown)
+        self.assertIn('[https://doi.org/10.13196/j.cims.2026.0129](https://doi.org/10.13196/j.cims.2026.0129).', result.markdown)
 
     def test_inline_source_forms_become_numbered_references(self):
         result = self.prepare(BASE.replace('[URL8]', '[来源URL: https://example.org/source]', 1).replace('[原文2]', '[原文: 原始论文.pdf]', 1))

@@ -75,6 +75,8 @@ CITED_SAMPLE = """# 来源追溯检查
 class FormalExportTests(unittest.TestCase):
     def setUp(self):
         self.previous_cwd = Path.cwd()
+        self.previous_update_fields = os.environ.get("REPORT_EXPORT_UPDATE_WORD_FIELDS")
+        os.environ["REPORT_EXPORT_UPDATE_WORD_FIELDS"] = "0"
         self.temp_dir = tempfile.TemporaryDirectory()
         os.chdir(self.temp_dir.name)
         Path("outputs/report_images").mkdir(parents=True)
@@ -82,6 +84,10 @@ class FormalExportTests(unittest.TestCase):
 
     def tearDown(self):
         os.chdir(self.previous_cwd)
+        if self.previous_update_fields is None:
+            os.environ.pop("REPORT_EXPORT_UPDATE_WORD_FIELDS", None)
+        else:
+            os.environ["REPORT_EXPORT_UPDATE_WORD_FIELDS"] = self.previous_update_fields
         self.temp_dir.cleanup()
 
     def make_doc(self):

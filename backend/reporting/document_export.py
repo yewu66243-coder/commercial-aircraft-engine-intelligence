@@ -415,6 +415,46 @@ def _add_word_toc(doc):
     doc.add_page_break()
 
 
+def _update_word_fields(path: Path) -> bool:
+    """Materialize TOC/page fields in local Windows exports when Word is available."""
+    if sys.platform != "win32" or os.environ.get("REPORT_EXPORT_UPDATE_WORD_FIELDS") == "0":
+        return False
+    try:
+        import pythoncom
+        import win32com.client
+    except Exception:
+        return False
+    word = doc = None
+    try:
+        pythoncom.CoInitialize()
+        word = win32com.client.DispatchEx("Word.Application")
+        word.Visible = False
+        doc = word.Documents.Open(str(path.resolve()))
+        for toc in doc.TablesOfContents:
+            toc.Update()
+        for field in doc.Fields:
+            field.Update()
+        doc.Save()
+        return True
+    except Exception:
+        return False
+    finally:
+        try:
+            if doc is not None:
+                doc.Close(False)
+        except Exception:
+            pass
+        try:
+            if word is not None:
+                word.Quit()
+        except Exception:
+            pass
+        try:
+            pythoncom.CoUninitialize()
+        except Exception:
+            pass
+
+
 def _configure_document(doc, title):
     from docx.enum.text import WD_ALIGN_PARAGRAPH as Align
     from docx.enum.style import WD_STYLE_TYPE
@@ -650,6 +690,7 @@ def render_word(text: str, destination: str | Path, base_path: Path | str | None
     path = Path(destination)
     path.parent.mkdir(parents=True, exist_ok=True)
     doc.save(path)
+    _update_word_fields(path)
 
 
 def render_pdf(text: str, destination: str | Path, base_path: Path | str | None = None) -> None:
