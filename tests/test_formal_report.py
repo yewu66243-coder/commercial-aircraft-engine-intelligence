@@ -46,8 +46,10 @@ class FormalReportTests(unittest.TestCase):
         self.assertIn('PW1100G[[2]]', result.markdown)
         self.assertIn('[1]', result.citation_map)
         self.assertEqual(result.citation_map['[1]']['original_ids'], ['[URL8]'])
+        self.assertIn('[EB/OL]', result.markdown)
         self.assertIn('https://example.org/source', result.markdown)
         self.assertNotIn('[URL8]', result.markdown)
+        self.assertNotIn('查看原始资料', result.markdown)
 
     def test_duplicate_urls_share_a_reference(self):
         text = BASE.replace('型号PW1100G[原文2]', '型号PW1100G[URL9]')
@@ -74,6 +76,7 @@ class FormalReportTests(unittest.TestCase):
         result = self.prepare(sources=[{'file_name': '原始论文.pdf', 'title': '发动机维修研究', 'author': '张某', 'source_type': '论文'}])
         self.assertIn('张某', result.markdown)
         self.assertIn('发动机维修研究', result.markdown)
+        self.assertIn('[R]', result.markdown)
         self.assertIn('/api/local-library/papers/', result.markdown)
         self.assertNotIn('2024', result.markdown)
 

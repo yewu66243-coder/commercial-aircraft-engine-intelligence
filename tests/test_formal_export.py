@@ -96,7 +96,9 @@ class FormalExportTests(unittest.TestCase):
         self.assertAlmostEqual(section.page_height, Mm(297), delta=635)
         self.assertAlmostEqual(section.top_margin, Mm(25), delta=635)
         self.assertAlmostEqual(section.left_margin, Mm(25), delta=635)
-        self.assertEqual(doc.paragraphs[0].style.name, "Title")
+        self.assertTrue(section.different_first_page_header_footer)
+        self.assertEqual(doc.paragraphs[4].style.name, "Title")
+        self.assertIn("规范论文格式报告", "\n".join(p.text for p in doc.paragraphs[:8]))
         self.assertEqual(doc.styles["Normal"].font.size, Pt(12))
         self.assertEqual(doc.styles["Normal"].paragraph_format.line_spacing, 1.5)
         self.assertEqual(doc.styles["Normal"].paragraph_format.first_line_indent, Pt(24))
@@ -106,9 +108,11 @@ class FormalExportTests(unittest.TestCase):
         self.assertEqual(fonts.get(qn("w:eastAsia")), "SimSun")
         self.assertEqual(fonts.get(qn("w:ascii")), "Times New Roman")
         xml = doc._element.xml
-        self.assertIn('w:anchor="sec-1"', xml)
         self.assertIn('w:name="sec-1"', xml)
-        self.assertNotIn('TOC \\', xml)
+        self.assertIn('TOC \\o "1-2" \\h \\z \\u', xml)
+        update_fields = doc.settings._element.find(qn("w:updateFields"))
+        self.assertIsNotNone(update_fields)
+        self.assertEqual(update_fields.get(qn("w:val")), "true")
         self.assertTrue(any("PAGE" in element.text for element in section.footer._element.iter(qn("w:instrText"))))
         self.assertTrue(section.header.paragraphs[0].text)
 
@@ -125,7 +129,11 @@ class FormalExportTests(unittest.TestCase):
         self.assertEqual(table.cell(1, 1).text, "按照文献要求开展检查，保留实际条件与研究边界。")
         borders = table._tbl.tblPr.find(qn("w:tblBorders"))
         self.assertIsNotNone(borders)
-        self.assertEqual(borders.find(qn("w:insideV")).get(qn("w:val")), "nil")
+        self.assertEqual(borders.find(qn("w:insideV")).get(qn("w:val")), "single")
+        self.assertEqual(borders.find(qn("w:insideV")).get(qn("w:color")), "D9D9D9")
+        header_shading = table.cell(0, 0)._tc.tcPr.find(qn("w:shd"))
+        self.assertIsNotNone(header_shading)
+        self.assertEqual(header_shading.get(qn("w:fill")), "D9EAF7")
         captions = [p for p in doc.paragraphs if p.text.startswith("图 1")]
         self.assertEqual(len(captions), 1)
         self.assertEqual(captions[0].paragraph_format.first_line_indent, 0)
@@ -194,7 +202,7 @@ class FormalExportTests(unittest.TestCase):
 
     def test_heading_runs_inherit_their_real_heading_sizes_and_fonts(self):
         doc = self.make_doc()
-        for name, size in (("Title", 18), ("Heading 1", 15), ("Heading 2", 13)):
+        for name, size in (("Title", 22), ("Heading 1", 15), ("Heading 2", 13)):
             heading = next(p for p in doc.paragraphs if p.style.name == name)
             self.assertEqual(heading.style.font.size, Pt(size))
             self.assertEqual(heading.style._element.rPr.rFonts.get(qn("w:eastAsia")), "SimHei")
@@ -228,8 +236,9 @@ class FormalExportTests(unittest.TestCase):
         text = "# 换行检查\n\n第一行\n续写内容。\n\n强制换行  \n保留下一行。"
         path = asyncio.run(write_md_to_word(text, "breaks"))
         doc = Document(path)
-        self.assertEqual(doc.paragraphs[1].text, "第一行 续写内容。")
-        self.assertEqual(doc.paragraphs[2].text, "强制换行\n保留下一行。")
+        paragraphs = [p.text for p in doc.paragraphs if p.text.strip()]
+        self.assertIn("第一行 续写内容。", paragraphs)
+        self.assertIn("强制换行\n保留下一行。", paragraphs)
 
     def test_pdf_short_table_moves_together_and_long_table_still_flows(self):
         from pypdf import PdfReader

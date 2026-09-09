@@ -13,6 +13,7 @@ from pathlib import Path
 import re
 import sys
 import unicodedata
+from datetime import datetime
 from urllib.parse import unquote, urlparse
 
 import mistune
@@ -323,6 +324,97 @@ def _word_bookmarks(paragraph, anchors, known_anchors):
         paragraph._p.append(end)
 
 
+def _field(paragraph, instruction: str, placeholder: str = ""):
+    from docx.oxml import OxmlElement
+    from docx.oxml.ns import qn
+    run = paragraph.add_run()
+    begin = OxmlElement("w:fldChar")
+    begin.set(qn("w:fldCharType"), "begin")
+    instr = OxmlElement("w:instrText")
+    instr.set(qn("xml:space"), "preserve")
+    instr.text = instruction
+    separate = OxmlElement("w:fldChar")
+    separate.set(qn("w:fldCharType"), "separate")
+    if placeholder:
+        text = OxmlElement("w:t")
+        text.text = placeholder
+    end = OxmlElement("w:fldChar")
+    end.set(qn("w:fldCharType"), "end")
+    run._r.append(begin)
+    run._r.append(instr)
+    run._r.append(separate)
+    if placeholder:
+        run._r.append(text)
+    run._r.append(end)
+    return run
+
+
+def _display_heading(doc, text: str, size: int = 15):
+    from docx.enum.text import WD_ALIGN_PARAGRAPH as Align
+    from docx.shared import Pt
+    paragraph = doc.add_paragraph()
+    paragraph.alignment = Align.LEFT
+    paragraph.paragraph_format.first_line_indent = Pt(0)
+    paragraph.paragraph_format.space_before = Pt(8)
+    paragraph.paragraph_format.space_after = Pt(12)
+    run = paragraph.add_run(text)
+    _font(run.font, "SimHei", size, True)
+    return paragraph
+
+
+def _add_cover(doc, title: str):
+    from docx.enum.text import WD_ALIGN_PARAGRAPH as Align
+    from docx.shared import Pt
+    section = doc.sections[0]
+    section.different_first_page_header_footer = True
+    for _ in range(3):
+        doc.add_paragraph()
+    subtitle = doc.add_paragraph()
+    subtitle.alignment = Align.CENTER
+    subtitle.paragraph_format.first_line_indent = Pt(0)
+    run = subtitle.add_run("商用航空发动机情报研究报告")
+    _font(run.font, "SimHei", 16, True)
+
+    heading = doc.add_paragraph(style="Title")
+    heading.alignment = Align.CENTER
+    heading.paragraph_format.first_line_indent = Pt(0)
+    heading.paragraph_format.space_before = Pt(24)
+    heading.paragraph_format.space_after = Pt(12)
+    heading.add_run(title)
+
+    sample = doc.add_paragraph()
+    sample.alignment = Align.CENTER
+    sample.paragraph_format.first_line_indent = Pt(0)
+    sample.paragraph_format.space_before = Pt(18)
+    run = sample.add_run("规范论文格式报告")
+    _font(run.font, "SimSun", 14, False)
+
+    for _ in range(5):
+        doc.add_paragraph()
+    for label, value in [
+        ("课题名称", title),
+        ("报告类型", "技术情报研究报告"),
+        ("生成机构", "商用航空发动机情报工作台"),
+        ("成文日期", datetime.now().strftime("%Y年%m月%d日")),
+    ]:
+        paragraph = doc.add_paragraph()
+        paragraph.alignment = Align.CENTER
+        paragraph.paragraph_format.first_line_indent = Pt(0)
+        paragraph.paragraph_format.space_after = Pt(8)
+        run = paragraph.add_run(f"{label}：{value}")
+        _font(run.font, "SimSun", 12, False)
+    doc.add_page_break()
+
+
+def _add_word_toc(doc):
+    from docx.shared import Pt
+    _display_heading(doc, "目录", 15)
+    paragraph = doc.add_paragraph()
+    paragraph.paragraph_format.first_line_indent = Pt(0)
+    _field(paragraph, 'TOC \\o "1-2" \\h \\z \\u', "目录将在 Word 中自动更新")
+    doc.add_page_break()
+
+
 def _configure_document(doc, title):
     from docx.enum.text import WD_ALIGN_PARAGRAPH as Align
     from docx.enum.style import WD_STYLE_TYPE
@@ -333,6 +425,7 @@ def _configure_document(doc, title):
     section.page_width, section.page_height = Mm(210), Mm(297)
     section.top_margin = section.bottom_margin = section.left_margin = section.right_margin = Mm(25)
     section.header_distance = section.footer_distance = Mm(12.5)
+    section.different_first_page_header_footer = True
     for grid in list(section._sectPr.findall(qn("w:docGrid"))):
         section._sectPr.remove(grid)
     # The bundled Word template contains a blue rule in Title. Eliminate
@@ -348,6 +441,11 @@ def _configure_document(doc, title):
         no_expand = OxmlElement("w:doNotExpandShiftReturn")
         compat.insert(0, no_expand)
     no_expand.set(qn("w:val"), "1")
+    update_fields = doc.settings._element.find(qn("w:updateFields"))
+    if update_fields is None:
+        update_fields = OxmlElement("w:updateFields")
+        doc.settings._element.append(update_fields)
+    update_fields.set(qn("w:val"), "true")
     normal = doc.styles["Normal"]
     _font(normal.font)
     pf = normal.paragraph_format
@@ -361,7 +459,7 @@ def _configure_document(doc, title):
         "w:suppressOverlap", "w:jc", "w:textDirection", "w:textAlignment",
         "w:textboxTightWrap", "w:outlineLvl", "w:divId", "w:cnfStyle",
         "w:rPr", "w:sectPr", "w:pPrChange")
-    for name, size in (("Title", 18), ("Heading 1", 15), ("Heading 2", 13), ("Heading 3", 12), ("Heading 4", 12), ("Heading 5", 12)):
+    for name, size in (("Title", 22), ("Heading 1", 15), ("Heading 2", 13), ("Heading 3", 12), ("Heading 4", 12), ("Heading 5", 12)):
         style = doc.styles[name]
         _font(style.font, "SimHei", size, True)
         sf = style.paragraph_format
@@ -385,13 +483,7 @@ def _configure_document(doc, title):
     footer = section.footer.paragraphs[0]
     footer.alignment = Align.CENTER
     footer.add_run("第 ")
-    for tag, value in (("begin", None), ("instruction", " PAGE "), ("separate", None), ("text", "1"), ("end", None)):
-        element = OxmlElement("w:instrText" if tag == "instruction" else "w:t" if tag == "text" else "w:fldChar")
-        if tag in {"instruction", "text"}:
-            element.text = value
-        else:
-            element.set(qn("w:fldCharType"), tag)
-        footer.add_run()._r.append(element)
+    _field(footer, " PAGE ", "1")
     footer.add_run(" 页")
     doc.core_properties.title, doc.core_properties.subject, doc.core_properties.author = title, "中文专题研究报告", ""
 
@@ -410,9 +502,9 @@ def _word_table(doc, token):
     borders = OxmlElement("w:tblBorders")
     for edge in ("top", "left", "bottom", "right", "insideH", "insideV"):
         border = OxmlElement("w:" + edge)
-        border.set(qn("w:val"), "single" if edge in {"top", "bottom"} else "nil")
-        border.set(qn("w:sz"), "10")
-        border.set(qn("w:color"), "000000")
+        border.set(qn("w:val"), "single")
+        border.set(qn("w:sz"), "6")
+        border.set(qn("w:color"), "D9D9D9")
         borders.append(border)
     table._tbl.tblPr.append(borders)
     margins = OxmlElement("w:tblCellMar")
@@ -429,6 +521,10 @@ def _word_table(doc, token):
         for col, cell in enumerate(row.cells):
             cell.width = Mm(160 * widths[col])
             cell.vertical_alignment = WD_CELL_VERTICAL_ALIGNMENT.CENTER
+            if index == 0 or index % 2 == 0:
+                shade = OxmlElement("w:shd")
+                shade.set(qn("w:fill"), "D9EAF7" if index == 0 else "F7F9FB")
+                cell._tc.get_or_add_tcPr().append(shade)
             p = cell.paragraphs[0]
             p.style = doc.styles["Report Table"]
             p.paragraph_format.first_line_indent = Pt(0)
@@ -445,7 +541,7 @@ def _word_table(doc, token):
                 cb, bottom = OxmlElement("w:tcBorders"), OxmlElement("w:bottom")
                 bottom.set(qn("w:val"), "single")
                 bottom.set(qn("w:sz"), "6")
-                bottom.set(qn("w:color"), "000000")
+                bottom.set(qn("w:color"), "D9D9D9")
                 cb.append(bottom)
                 cell._tc.get_or_add_tcPr().append(cb)
 
@@ -460,15 +556,31 @@ def render_word(text: str, destination: str | Path, base_path: Path | str | None
     title = next((b["plain"] for b in blocks if b["role"] == "title"), "研究报告")
     doc = Document()
     _configure_document(doc, title)
+    _add_cover(doc, title)
     known_anchors = set()
     styles = {"abstract": "Report Abstract", "keywords": "Report Keywords", "caption": "Report Caption", "source": "Report Source", "references": "Report Reference", "toc": "Report Contents"}
+    skipping_toc = False
     for index, token in enumerate(blocks):
         kind, role = token["type"], token["role"]
         if kind == "heading":
+            plain = token.get("plain", "")
+            if role == "title":
+                continue
+            if plain == "目录":
+                doc.add_page_break()
+                _add_word_toc(doc)
+                skipping_toc = True
+                continue
+            if skipping_toc:
+                skipping_toc = False
+            if plain == "参考文献":
+                doc.add_page_break()
             style = "Title" if role == "title" else "Heading " + str(min(5, max(1, token.get("attrs", {}).get("level", 2) - 1)))
             paragraph = doc.add_paragraph(style=style)
             _word_inline(paragraph, token.get("children", []), bold=True)
             _word_bookmarks(paragraph, token.get("anchors", []), known_anchors)
+        elif skipping_toc:
+            continue
         elif kind == "table":
             _word_table(doc, token)
         elif role == "figure":
@@ -525,6 +637,8 @@ def render_word(text: str, destination: str | Path, base_path: Path | str | None
             paragraph = doc.add_paragraph(style=styles.get(role, "Normal"))
             _word_inline(paragraph, token.get("children", []))
             _word_bookmarks(paragraph, token.get("anchors", []), known_anchors)
+            if role == "keywords" and index + 1 < len(blocks) and blocks[index + 1].get("plain") == "目录":
+                paragraph.paragraph_format.keep_with_next = False
             if token.get("figure_source"):
                 paragraph.alignment = Align.CENTER
             elif role == "references":

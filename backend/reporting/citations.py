@@ -117,17 +117,25 @@ class CitationRegistry:
     def bibliography(self):
         lines = ['## 参考文献', '']
         for label, item in self.public.items():
+            link = item['url'] or item['local_url']
             if item['title']:
                 author = item['author'].strip(' ;-')
                 title = item['title'].removesuffix('_' + author) if author else item['title']
-                description = ((author + '．') if author else '') + title.rstrip('。．') + '．'
-                link = item['url'] or item['local_url']
-                if link:
-                    description += f' [查看原始资料]({link})'
+                author = '' if author.lower() == 'nan' else author
+                description = ((author + '. ') if author else '') + title.rstrip('。. ')
             else:
                 description = item['description']
+                description = re.sub(r'\s*\[查看原始资料\]\([^)]+\)', '', description).strip()
+                description = description.replace('nan．', '').replace('nan. ', '')
                 if item['url'] and description == item['url']:
-                    description = f'网页资料（{urlsplit(item["url"]).netloc}）．[原始网页]({item["url"]})'
+                    description = f'网页资料（{urlsplit(item["url"]).netloc}）'
+            description = description.rstrip('。. ')
+            if item['url']:
+                description += f'. [EB/OL]. [{item["url"]}]({item["url"]}).'
+            elif link:
+                description += f'. [R]. [本地资料]({link}).'
+            else:
+                description += '. [R]. 本地资料.'
             lines += [f'<a id="ref-{label[1:-1]}"></a>', f'{label} {description}', '']
         if not self.public:
             lines.append('本次材料未提供可对应的正文引文，参考资料需要补充核对。')
