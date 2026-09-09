@@ -1,9 +1,15 @@
 from dotenv import load_dotenv
 import logging
 import mimetypes
+import sys
 from pathlib import Path
+from typing import Any
 from fastapi import File, Form, HTTPException, Query, UploadFile
 from fastapi.responses import FileResponse
+
+PROJECT_ROOT = Path(__file__).resolve().parent
+if str(PROJECT_ROOT) not in sys.path:
+    sys.path.insert(0, str(PROJECT_ROOT))
 
 # Create logs directory if it doesn't exist
 logs_dir = Path("logs")
@@ -49,7 +55,11 @@ from gpt_researcher.document.local_library import (
     resolve_local_library_file,
     save_local_library_file,
 )
-from gpt_researcher.intelligence_templates import get_template_catalog
+from gpt_researcher.intelligence_templates import (
+    delete_intelligence_template,
+    get_template_catalog,
+    save_intelligence_template,
+)
 
 # 注册师兄的 POST 接口
 @app.post("/api/three-agent-report")
@@ -95,6 +105,30 @@ async def get_local_library(
 @app.get("/api/intelligence-templates")
 async def get_intelligence_templates():
     return get_template_catalog()
+
+
+@app.post("/api/intelligence-templates/{template_type}")
+async def save_intelligence_templates(template_type: str, payload: dict[str, Any]):
+    try:
+        result = save_intelligence_template(template_type, payload)
+        return {"success": True, **result, "catalog": get_template_catalog()}
+    except ValueError as exc:
+        raise HTTPException(status_code=400, detail=str(exc)) from exc
+    except Exception as exc:
+        logger.exception("保存情报模板失败")
+        raise HTTPException(status_code=500, detail=f"保存失败：{exc}") from exc
+
+
+@app.delete("/api/intelligence-templates/{template_type}/{template_id}")
+async def delete_intelligence_templates(template_type: str, template_id: str):
+    try:
+        result = delete_intelligence_template(template_type, template_id)
+        return {"success": True, **result, "catalog": get_template_catalog()}
+    except ValueError as exc:
+        raise HTTPException(status_code=400, detail=str(exc)) from exc
+    except Exception as exc:
+        logger.exception("删除情报模板失败")
+        raise HTTPException(status_code=500, detail=f"删除失败：{exc}") from exc
 
 
 @app.post("/api/local-library/upload")
