@@ -103,6 +103,155 @@ const GPTResearcher = (() => {
     addAgentResponse({ output: '等待提交任务；启动后将按后台实际阶段逐步显示运行信息。' });
   };
 
+  const statusCodeHelp = {
+    400: {
+      title: '请求参数不正确',
+      message: '提交的任务配置或模型配置不符合后台要求。',
+      suggestion: '请检查任务描述、检索范围、模型选择和 .env 配置后重试。'
+    },
+    401: {
+      title: '认证失败',
+      message: '模型服务或外部检索服务拒绝了当前凭证。',
+      suggestion: '请检查 API Key 是否正确、是否过期，以及是否配置到对应的模型服务。'
+    },
+    403: {
+      title: '权限不足',
+      message: '当前账号或密钥没有访问该模型、文件或外部来源的权限。',
+      suggestion: '请确认模型权限、账号额度、本地文件权限和目标目录写入权限。'
+    },
+    404: {
+      title: '资源不存在',
+      message: '后台没有找到需要的任务记录、资料文件、模板或接口。',
+      suggestion: '请刷新页面后重试；如果是资料文件，请重新上传或重建索引。'
+    },
+    408: {
+      title: '请求等待超时',
+      message: '后台等待模型、网络来源或本地处理结果过久。',
+      suggestion: '建议减少检索范围或精读/抓取上限，然后重新提交。'
+    },
+    413: {
+      title: '请求内容过大',
+      message: '提交的任务、资料或上下文内容超过后台可处理范围。',
+      suggestion: '请减少上传资料量、缩短任务描述，或降低精读/抓取上限。'
+    },
+    422: {
+      title: '表单字段校验失败',
+      message: '后台无法识别某些请求字段或字段格式。',
+      suggestion: '请检查必填项是否完整，刷新页面后重新提交。'
+    },
+    429: {
+      title: '服务限流或额度不足',
+      message: '模型或检索服务返回调用频率限制。',
+      suggestion: '请稍后重试，或切换模型、降低精读/抓取上限。'
+    },
+    500: {
+      title: '后台处理异常',
+      message: '任务已经到达后台，但 3-Agent 报告流程内部某一步失败。',
+      suggestion: '请查看运行日志中最后一个阶段；若重复出现，请保留报错详情用于排查。'
+    },
+    502: {
+      title: '上游服务异常',
+      message: '模型服务、搜索服务或转换服务返回了无效响应。',
+      suggestion: '请稍后重试，或切换模型/关闭 Web 检索后确认是否恢复。'
+    },
+    503: {
+      title: '服务暂不可用',
+      message: '后台依赖的模型、检索或文件转换服务暂时不可用。',
+      suggestion: '请稍后重试；如果刚修改 .env，请重启工作台。'
+    },
+    504: {
+      title: '上游响应超时',
+      message: '后台等待模型或外部来源响应超时。',
+      suggestion: '请降低精读/抓取上限，或暂时取消 Web 检索后重试。'
+    }
+  };
+
+  const classifyClientError = (status, detailText = '') => {
+    const text = String(detailText || '').toLowerCase();
+    if (text.includes('api key') || text.includes('dashscope') || text.includes('qwen') || text.includes('deepseek')) {
+      return {
+        code: 'MODEL_CONFIG_ERROR',
+        title: '模型配置异常',
+        message: '当前选择的大模型不可用，通常是 API Key、模型名或接口地址配置有误。',
+        suggestion: '请检查 .env 中对应模型的 API Key、BASE_URL 和模型名称，保存后重启工作台。'
+      };
+    }
+    if (text.includes('timeout') || text.includes('timed out')) {
+      return {
+        code: 'TIMEOUT',
+        title: '请求超时',
+        message: '后台等待模型、网络来源或资料处理结果过久。',
+        suggestion: '请减少检索范围或精读/抓取上限，再重新提交。'
+      };
+    }
+    if (text.includes('network') || text.includes('connection') || text.includes('ssl') || text.includes('certificate')) {
+      return {
+        code: 'NETWORK_ERROR',
+        title: '网络或证书异常',
+        message: '后台访问模型服务或 Web 来源时出现网络连接问题。',
+        suggestion: '请确认网络、代理和证书环境；只用本地资料时可先取消 Web 检索。'
+      };
+    }
+    if (text.includes('permission') || text.includes('access is denied') || text.includes('winerror 5')) {
+      return {
+        code: 'FILE_PERMISSION_ERROR',
+        title: '文件权限异常',
+        message: '后台读写资料或导出报告时被系统拒绝。',
+        suggestion: '请关闭已打开的 Word/PDF 文件，确认 outputs 和 local_docs 可写。'
+      };
+    }
+    return statusCodeHelp[status] || {
+      title: '未知请求异常',
+      message: `请求失败，HTTP 状态码为 ${status || '未知'}。`,
+      suggestion: '请刷新页面后重试；如果持续失败，请保留运行日志用于定位。'
+    };
+  };
+
+  const buildReportErrorInfo = (response, errorBody = null) => {
+    const status = response?.status || 0;
+    const rawDetail = errorBody?.detail ?? errorBody?.error ?? errorBody?.message ?? '';
+    const structured = rawDetail && typeof rawDetail === 'object' ? rawDetail : null;
+    const detailText = structured
+      ? (structured.technical_detail || structured.message || structured.title || '')
+      : String(rawDetail || '');
+    const fallback = classifyClientError(status, detailText);
+
+    return {
+      status,
+      code: structured?.code || fallback.code || `HTTP_${status}`,
+      title: structured?.title || fallback.title,
+      message: structured?.message || detailText || fallback.message,
+      suggestion: structured?.suggestion || fallback.suggestion,
+      technicalDetail: structured?.technical_detail || detailText || `HTTP ${status}`,
+    };
+  };
+
+  const formatReportErrorText = (info) => {
+    const statusText = info.status ? `HTTP ${info.status}` : '网络请求未完成';
+    return `${info.title}（${statusText}）：${info.message} 建议：${info.suggestion}`;
+  };
+
+  const renderReportError = (info) => {
+    const statusText = info.status ? `HTTP ${info.status}` : '未收到状态码';
+    const title = escapeHtml(info.title || '未知异常');
+    const message = escapeHtml(info.message || '任务执行失败。');
+    const code = escapeHtml(info.code || '');
+    const suggestion = escapeHtml(info.suggestion || '请刷新后重试。');
+    const technicalDetail = escapeHtml(info.technicalDetail || '');
+    return `
+      <div class="error-diagnosis">
+        <strong>生成报告时出错：${title}</strong>
+        <p>${message}</p>
+        <p><b>状态码：</b>${escapeHtml(statusText)}${code ? ` · ${code}` : ''}</p>
+        <p><b>建议处理：</b>${suggestion}</p>
+        <details>
+          <summary>查看技术详情</summary>
+          <code>${technicalDetail}</code>
+        </details>
+      </div>
+    `;
+  };
+
   const init = () => {
     // Check if cookies are enabled
     checkCookiesEnabled();
@@ -1822,14 +1971,16 @@ const startResearch = async () => {
         });
 
         if (!response.ok) {
-            let detail = '';
+            let errorBody = null;
             try {
-                const errorBody = await response.json();
-                detail = errorBody.detail || '';
+                errorBody = await response.json();
             } catch (_) {
                 // Preserve the HTTP status fallback for non-JSON failures.
             }
-            throw new Error(detail || `请求失败，状态码: ${response.status}`);
+            const errorInfo = buildReportErrorInfo(response, errorBody);
+            const requestError = new Error(formatReportErrorText(errorInfo));
+            requestError.reportErrorInfo = errorInfo;
+            throw requestError;
         }
 
         // 拿到后端返回的干净 JSON 数据
@@ -1924,6 +2075,9 @@ const startResearch = async () => {
 
     } catch (error) {
         console.error("生成报告错误:", error);
+        const errorInfo = error.reportErrorInfo || buildReportErrorInfo(null, {
+          detail: error.message || '请求未完成，请检查后台服务是否仍在运行。'
+        });
         lastTaskDurationSeconds = taskStartTime
             ? Math.max(0, Math.floor((Date.now() - taskStartTime) / 1000))
             : lastTaskDurationSeconds;
@@ -1932,9 +2086,9 @@ const startResearch = async () => {
         updateState('error');
         if (qualityStatus) {
             qualityStatus.dataset.state = 'error';
-            qualityStatus.textContent = '报告生成失败：' + error.message;
+            qualityStatus.textContent = '报告生成失败：' + formatReportErrorText(errorInfo);
         }
-        addAgentResponse({ output: '❌ 生成报告时出错: ' + error.message });
+        addAgentResponse({ output: renderReportError(errorInfo) });
     }
   }
 
