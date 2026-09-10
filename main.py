@@ -4,6 +4,7 @@ import mimetypes
 import sys
 from pathlib import Path
 from typing import Any
+from dotenv import load_dotenv
 from fastapi import File, Form, HTTPException, Query, UploadFile
 from fastapi.responses import FileResponse
 
@@ -61,6 +62,96 @@ from gpt_researcher.intelligence_templates import (
     save_intelligence_template,
 )
 
+
+def explain_report_exception(exc: Exception) -> dict[str, Any]:
+    """Translate backend failures into user-facing diagnostics."""
+    technical_detail = f"{type(exc).__name__}: {exc}"
+    text = technical_detail.lower()
+
+    if isinstance(exc, ModelProviderConfigurationError) or any(
+        marker in text
+        for marker in ("api key", "apikey", "dashscope_api_key", "qwen_api_key", "deepseek_api_key", "unauthorized")
+    ):
+        return {
+            "code": "MODEL_CONFIG_ERROR",
+            "title": "模型配置异常",
+            "message": "当前选择的大模型不可用，通常是 API Key、模型名称或接口地址未配置正确。",
+            "suggestion": "请检查 .env 中对应模型的 API Key、BASE_URL 和模型名，保存后重启工作台再试。",
+            "technical_detail": technical_detail,
+        }
+
+    if any(marker in text for marker in ("rate limit", "too many requests", "429", "quota", "insufficient_quota")):
+        return {
+            "code": "MODEL_RATE_LIMIT",
+            "title": "模型调用受限",
+            "message": "模型服务返回限流或额度不足，报告生成被中断。",
+            "suggestion": "请稍后重试，或更换模型、降低精读/抓取上限，必要时检查模型账号额度。",
+            "technical_detail": technical_detail,
+        }
+
+    if any(marker in text for marker in ("timeout", "timed out", "read timed", "connect timeout")):
+        return {
+            "code": "TIMEOUT",
+            "title": "请求超时",
+            "message": "后台在检索、精读资料或调用模型时等待过久，任务没有在限定时间内完成。",
+            "suggestion": "建议减少检索范围或精读/抓取上限，也可以稍后在网络稳定时重新提交。",
+            "technical_detail": technical_detail,
+        }
+
+    if any(marker in text for marker in ("connection", "network", "dns", "name resolution", "max retries", "ssl", "certificate")):
+        return {
+            "code": "NETWORK_ERROR",
+            "title": "网络或证书异常",
+            "message": "后台访问模型服务、Web 来源或在线文献时出现网络连接问题。",
+            "suggestion": "请确认网络、代理和证书环境正常；如果只需要本地资料，可先取消 Web 检索后重试。",
+            "technical_detail": technical_detail,
+        }
+
+    if any(marker in text for marker in ("permission", "access is denied", "permission denied", "winerror 5")):
+        return {
+            "code": "FILE_PERMISSION_ERROR",
+            "title": "文件权限异常",
+            "message": "后台写入报告、读取资料或修改文件时没有足够权限。",
+            "suggestion": "请关闭正在占用的 Word/PDF 文件，确认 outputs 与 local_docs 目录可写，然后重新生成。",
+            "technical_detail": technical_detail,
+        }
+
+    if any(marker in text for marker in ("no such file", "filenotfound", "not found", "cannot find")):
+        return {
+            "code": "FILE_NOT_FOUND",
+            "title": "文件或路径不存在",
+            "message": "后台需要读取的资料、模板或导出路径不存在。",
+            "suggestion": "请检查本地资料库文件是否被移动或删除，必要时重新上传资料或重建索引。",
+            "technical_detail": technical_detail,
+        }
+
+    if any(marker in text for marker in ("pdf", "docx", "word", "export", "convert", "pandoc", "libreoffice")):
+        return {
+            "code": "EXPORT_ERROR",
+            "title": "报告导出异常",
+            "message": "正文可能已经生成，但 Word/PDF/Markdown 导出阶段出现问题。",
+            "suggestion": "请检查导出依赖和目标文件是否被占用；也可以先下载已成功生成的其他格式。",
+            "technical_detail": technical_detail,
+        }
+
+    if any(marker in text for marker in ("json", "decode", "validation", "pydantic", "valueerror")):
+        return {
+            "code": "DATA_VALIDATION_ERROR",
+            "title": "数据格式异常",
+            "message": "任务参数、模型输出或中间研究记录格式不符合系统预期。",
+            "suggestion": "请简化任务描述后重试；如果持续出现，请保留运行日志便于定位是哪一步输出格式异常。",
+            "technical_detail": technical_detail,
+        }
+
+    return {
+        "code": "INTERNAL_ERROR",
+        "title": "后台处理异常",
+        "message": "后台服务在执行 3-Agent 报告流程时遇到未分类异常。",
+        "suggestion": "请先查看运行日志中最后一个阶段；若重复出现，请把报错详情和任务描述一起用于排查。",
+        "technical_detail": technical_detail,
+    }
+
+
 # 注册师兄的 POST 接口
 @app.post("/api/three-agent-report")
 async def generate_three_agent_report(request_data: ThreeAgentRequestData):
@@ -70,15 +161,18 @@ async def generate_three_agent_report(request_data: ThreeAgentRequestData):
         service = ThreeAgentService(request_data)
         return await service.run()
     except ModelProviderConfigurationError as exc:
+        diagnosis = explain_report_exception(exc)
         if service is not None:
             update_report_progress(
-                service.task_id, "System", f"报告生成失败：{exc}", status="failed")
-        raise HTTPException(status_code=400, detail=str(exc)) from exc
+                service.task_id, "System", f"报告生成失败：{diagnosis['message']}", status="failed")
+        raise HTTPException(status_code=400, detail=diagnosis) from exc
     except Exception as exc:
+        logger.exception("3-Agent 报告生成失败")
+        diagnosis = explain_report_exception(exc)
         if service is not None:
             update_report_progress(
-                service.task_id, "System", f"报告生成失败：{type(exc).__name__}。", status="failed")
-        raise
+                service.task_id, "System", f"报告生成失败：{diagnosis['message']}", status="failed")
+        raise HTTPException(status_code=500, detail=diagnosis) from exc
 
 
 @app.get("/api/model-providers")
