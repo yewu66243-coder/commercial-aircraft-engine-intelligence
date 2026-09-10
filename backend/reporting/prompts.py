@@ -1,4 +1,13 @@
 """Evidence-based writing contract for the Chinese research report workflow."""
+from pathlib import Path
+
+
+def _load_academic_report_skill() -> str:
+    path = Path(__file__).resolve().parents[2] / "skills" / "gpt-researcher" / "references" / "academic-report-format.md"
+    try:
+        return path.read_text(encoding="utf-8").strip()
+    except OSError:
+        return ""
 
 
 def build_writer_prompt(*, task, tone, report_type, sources_text, demand_text,
@@ -9,9 +18,13 @@ def build_writer_prompt(*, task, tone, report_type, sources_text, demand_text,
         'detailed_report': '正文建议5000–8000字，展开跨来源比较与技术、运营影响分析。',
         'resource_report': '正文建议3000–5000字，突出型号、时间线与同口径对照。',
     }.get(report_type, '正文建议2500–4000字。')
+    academic_format_skill = _load_academic_report_skill()
     return f'''请将研究材料整合为接近综述论文的中文专题研究报告。
 课题：{task}
 语气：{tone}。{length} 篇幅服从证据，不靠重复和无来源内容凑字数。
+
+项目内报告格式Skill：
+{academic_format_skill or '按规范论文格式输出：封面、摘要、目录、引言、连续编号章节、结论与建议、参考文献。'}
 
 写作结构：
 # 简洁学术题名（通常不超过35字，不复制任务中的“重点关注”等要求）

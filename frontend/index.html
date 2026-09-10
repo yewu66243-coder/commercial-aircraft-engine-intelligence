@@ -32,7 +32,7 @@
         </header>
 
         <main class="workspace">
-            <aside class="stack">
+            <aside class="stack task-column">
                 <form method="POST" id="researchForm" class="panel task-panel">
                     <h2>任务配置</h2>
                     <label for="task">情报任务描述</label>
@@ -66,16 +66,19 @@
                         </div>
                         <div>
                             <label>检索范围</label>
-                            <div class="scope-selector" id="searchScopes">
+                            <details class="scope-dropdown" id="scopeDropdown">
+                                <summary id="scopeSummary">论文库、专利池、用户资料、Web</summary>
+                                <div class="scope-selector" id="searchScopes">
                                 <label class="scope-item"><input type="checkbox" name="search_scope" value="papers" checked /><span>论文库</span></label>
                                 <label class="scope-item"><input type="checkbox" name="search_scope" value="patents" checked /><span>专利池</span></label>
                                 <label class="scope-item"><input type="checkbox" name="search_scope" value="user_docs" checked /><span>用户资料</span></label>
                                 <label class="scope-item"><input type="checkbox" name="search_scope" value="web" checked /><span>Web</span></label>
-                            </div>
+                                </div>
+                            </details>
                             <input type="hidden" name="report_source" id="report_source" value="hybrid" />
                         </div>
                     </div>
-                    <div class="form-row">
+                    <div class="form-row model-settings-row">
                         <div>
                             <label for="maxSearchResults">精读/抓取上限</label>
                             <input type="number" id="maxSearchResults" name="max_search_results" min="1" max="20" value="5" />
@@ -92,19 +95,53 @@
                     <input type="submit" value="启动情报任务" class="primary-button" id="submitButton" />
                 </form>
 
-                <section class="panel">
+                <section class="panel priority-sites-panel">
                     <h2>优先搜索网址</h2>
                     <label class="select-all"><input type="checkbox" id="selectAllDomains" /> 全选 / 取消全选</label>
                     <div class="domain-list" id="presetDomains">
                         <div class="empty-state">正在读取源站模板库...</div>
                     </div>
                     <input type="text" id="queryDomains" name="query_domains" placeholder="补充域名，多个用逗号分隔，如：boeing.com" autocomplete="on" />
+                    <details class="template-manager" id="templateManager">
+                        <summary>模板库管理</summary>
+                        <div class="template-manager-grid">
+                            <form class="template-editor" id="taskTemplateForm">
+                                <h3>任务模板</h3>
+                                <input type="text" id="taskTemplateName" placeholder="模板名称" autocomplete="off" />
+                                <textarea id="taskTemplateText" placeholder="任务描述，例如：A320neo 系列发动机适航与维修动态跟踪"></textarea>
+                                <input type="text" id="taskTemplateScopes" placeholder="检索范围：papers, patents, user_docs, web" autocomplete="off" />
+                                <input type="text" id="taskTemplateCategories" placeholder="源站类别：regulator, oem, airframer, market" autocomplete="off" />
+                                <button type="submit" class="ghost-button">保存任务模板</button>
+                                <div class="template-manage-list" id="taskTemplateManageList"></div>
+                            </form>
+                            <form class="template-editor" id="sourceTemplateForm">
+                                <h3>源站模板</h3>
+                                <input type="text" id="sourceTemplateName" placeholder="站点名称，如 Boeing" autocomplete="off" />
+                                <input type="text" id="sourceTemplateDomain" placeholder="域名，如 boeing.com" autocomplete="off" />
+                                <select id="sourceTemplateCategory">
+                                    <option value="airframer">飞机制造商</option>
+                                    <option value="oem">发动机/系统 OEM</option>
+                                    <option value="regulator">适航监管/事故调查</option>
+                                    <option value="maintenance">维修保障</option>
+                                    <option value="market">市场与财报</option>
+                                    <option value="academic">论文资料</option>
+                                    <option value="patent">专利来源</option>
+                                    <option value="user">自定义来源</option>
+                                </select>
+                                <input type="text" id="sourceTemplateKeywords" placeholder="关键词，多个用逗号分隔" autocomplete="off" />
+                                <label class="inline-check"><input type="checkbox" id="sourceTemplateDefault" /> 默认优先搜索</label>
+                                <button type="submit" class="ghost-button">保存源站模板</button>
+                                <div class="template-manage-list" id="sourceTemplateManageList"></div>
+                            </form>
+                        </div>
+                        <p class="hint-text" id="templateManagerStatus">新增或删除后会立即写入 local_docs 模板库。</p>
+                    </details>
                     <p class="hint-text" id="templateStatus">源站将按类别、权重与可信度参与 Web 检索排序。</p>
                 </section>
 
             </aside>
 
-            <section class="stack">
+            <section class="stack workbench-column">
                 <section class="panel">
                     <h2>资料上传</h2>
                     <div class="upload-target" id="uploadDropZone">

@@ -29,6 +29,7 @@ const GPTResearcher = (() => {
   let currentTaskId = null;
   let taskProgress = null;
   let taskProgressPollInterval = null;
+  let lastLoggedTaskProgressKey = null;
   let dispose_socket = null; // Re-add dispose_socket
   let reconnectAttempts = 0;
   let maxReconnectAttempts = 5;
@@ -96,6 +97,12 @@ const GPTResearcher = (() => {
     }
   };
 
+  const seedRunLog = () => {
+    const output = document.getElementById('output');
+    if (!output || output.children.length > 0) return;
+    addAgentResponse({ output: '等待提交任务；启动后将按后台实际阶段逐步显示运行信息。' });
+  };
+
   const init = () => {
     // Check if cookies are enabled
     checkCookiesEnabled();
@@ -140,6 +147,7 @@ const GPTResearcher = (() => {
 
     // Initialize demand model, task template and source template panels
     initIntelligenceTemplates();
+    initTemplateManager();
 
     // Load request-scoped report model choices and availability.
     loadModelProviders();
@@ -152,6 +160,7 @@ const GPTResearcher = (() => {
     // No need to set display property here
 
     updateState('initial');
+    seedRunLog();
 
     // Initialize research icon to not spinning
     updateResearchIcon(false);
@@ -981,6 +990,24 @@ const GPTResearcher = (() => {
       });
       if (!response.ok) return;
       taskProgress = await response.json();
+      const progressKey = [
+        taskProgress.stage || '',
+        taskProgress.current_round || 0,
+        taskProgress.progress_percent || 0
+      ].join('|');
+      if (taskProgress.stage && progressKey !== lastLoggedTaskProgressKey) {
+        lastLoggedTaskProgressKey = progressKey;
+        const roundText = taskProgress.current_round
+          ? `；校订轮次 ${taskProgress.current_round}/${taskProgress.max_rounds || '-'}`
+          : '';
+        const estimate = taskProgress.estimated_remaining_minutes;
+        const etaText = estimate && estimate.max
+          ? `；预计剩余 ${estimate.min}-${estimate.max} 分钟`
+          : '';
+        addAgentResponse({
+          output: `后台进度：${taskProgress.stage}（${taskProgress.progress_percent || 0}%）${roundText}${etaText}`
+        });
+      }
       updateWebSocketStatus();
     } catch (error) {
       console.debug('Task progress is temporarily unavailable:', error);
@@ -991,6 +1018,7 @@ const GPTResearcher = (() => {
     if (taskProgressPollInterval) clearInterval(taskProgressPollInterval);
     currentTaskId = taskId;
     taskProgress = null;
+    lastLoggedTaskProgressKey = null;
     fetchTaskProgress(taskId);
     taskProgressPollInterval = setInterval(() => fetchTaskProgress(taskId), 2000);
   };
@@ -1021,6 +1049,18 @@ const GPTResearcher = (() => {
     return scopes.length ? [...new Set(scopes)] : ['web'];
   };
 
+  const scopeLabelMap = {
+    papers: '论文库',
+    patents: '专利池',
+    user_docs: '用户资料',
+    web: 'Web'
+  };
+
+  const updateScopeSummary = () => {
+    const labels = getSelectedSearchScopes().map((scope) => scopeLabelMap[scope] || scope);
+    setText('scopeSummary', labels.join('、') || 'Web');
+  };
+
   const deriveReportSourceFromScopes = (scopes) => {
     const selected = scopes || getSelectedSearchScopes();
     const hasWeb = selected.includes('web');
@@ -1035,6 +1075,7 @@ const GPTResearcher = (() => {
     if (hiddenReportSource) {
       hiddenReportSource.value = deriveReportSourceFromScopes();
     }
+    updateScopeSummary();
     setText('domainCoverage', getSelectedSearchScopes().includes('web') ? `${getSelectedDomains().length} 个` : '未启用');
   };
 
@@ -1069,6 +1110,108 @@ const GPTResearcher = (() => {
 
   const getSourceTemplateById = (id) => {
     return (intelligenceTemplateCache.source_templates || []).find((item) => item.id === id);
+  };
+
+  const splitTemplateInput = (value) => {
+    return String(value || '')
+      .split(/[,，;；\n]+/)
+      .map((item) => item.trim())
+      .filter(Boolean);
+  };
+
+  const sourceCategoryLabels = {
+    airframer: '飞机制造商',
+    oem: '发动机/系统 OEM',
+    regulator: '适航监管/事故调查',
+    maintenance: '维修保障',
+    market: '市场与财报',
+    academic: '论文资料',
+    patent: '专利来源',
+    user: '自定义来源'
+  };
+
+  const refreshTemplateCatalog = (catalog, message = '') => {
+    if (catalog) {
+      renderIntelligenceTemplates(catalog);
+    }
+    if (message) {
+      setText('templateManagerStatus', message);
+      showToast(message);
+    }
+  };
+
+  const saveTemplate = async (templateType, payload) => {
+    const response = await fetch(`/api/intelligence-templates/${encodeURIComponent(templateType)}`, {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify(payload)
+    });
+    const data = await response.json();
+    if (!response.ok) {
+      throw new Error(data.detail || `状态码 ${response.status}`);
+    }
+    refreshTemplateCatalog(data.catalog, '模板已保存');
+    return data.template;
+  };
+
+  const deleteTemplate = async (templateType, templateId) => {
+    const response = await fetch(`/api/intelligence-templates/${encodeURIComponent(templateType)}/${encodeURIComponent(templateId)}`, {
+      method: 'DELETE'
+    });
+    const data = await response.json();
+    if (!response.ok) {
+      throw new Error(data.detail || `状态码 ${response.status}`);
+    }
+    refreshTemplateCatalog(data.catalog, '模板已删除');
+  };
+
+  const renderTemplateManageList = (containerId, templateType, items, renderMeta) => {
+    const container = document.getElementById(containerId);
+    if (!container) return;
+    const visibleItems = Array.isArray(items) ? items : [];
+    if (!visibleItems.length) {
+      container.innerHTML = '<div class="empty-state">暂无模板</div>';
+      return;
+    }
+    container.innerHTML = visibleItems.map((item) => `
+      <div class="template-manage-row">
+        <div>
+          <strong>${escapeHtml(item.name || item.domain || item.id || '未命名模板')}</strong>
+          <small>${escapeHtml(renderMeta(item))}</small>
+        </div>
+        <button type="button" class="delete-template-btn" data-template-type="${templateType}" data-template-id="${escapeHtml(item.id || '')}" title="删除">×</button>
+      </div>
+    `).join('');
+
+    container.querySelectorAll('.delete-template-btn').forEach((button) => {
+      button.addEventListener('click', async (event) => {
+        const type = event.currentTarget.dataset.templateType;
+        const id = event.currentTarget.dataset.templateId;
+        if (!id || !confirm('确定删除这个模板吗？')) return;
+        try {
+          await deleteTemplate(type, id);
+        } catch (error) {
+          console.error('删除模板失败:', error);
+          setText('templateManagerStatus', `删除失败：${error.message}`);
+          showToast(`删除失败：${error.message}`);
+        }
+      });
+    });
+  };
+
+  const renderTemplateManager = () => {
+    renderTemplateManageList(
+      'taskTemplateManageList',
+      'task_templates',
+      intelligenceTemplateCache.task_templates,
+      (item) => `${item.id || '-'} | ${(item.source_categories || []).join(', ')}`
+    );
+    renderTemplateManageList(
+      'sourceTemplateManageList',
+      'source_templates',
+      intelligenceTemplateCache.source_templates,
+      (item) => `${item.domain || '-'} | ${item.category_label || item.category || '来源'}`
+    );
   };
 
   const renderSourceTemplates = (sources, preferredCategories = null) => {
@@ -1146,7 +1289,7 @@ const GPTResearcher = (() => {
       taskSelect.innerHTML = '<option value="">不使用模板</option>' + intelligenceTemplateCache.task_templates.map((item) => `
         <option value="${escapeHtml(item.id || '')}">${escapeHtml(item.name || item.id || '未命名模板')}</option>
       `).join('');
-      taskSelect.addEventListener('change', () => applyTaskTemplate(taskSelect.value));
+      taskSelect.onchange = () => applyTaskTemplate(taskSelect.value);
     }
 
     const demandSelect = document.getElementById('demandModelSelect');
@@ -1157,6 +1300,7 @@ const GPTResearcher = (() => {
     }
 
     renderSourceTemplates(intelligenceTemplateCache.source_templates);
+    renderTemplateManager();
     setText('templateStatus', `已加载 ${intelligenceTemplateCache.demand_models.length} 个领域模型、${intelligenceTemplateCache.task_templates.length} 个任务模板、${intelligenceTemplateCache.source_templates.length} 个源站模板。`);
   };
 
@@ -1450,6 +1594,64 @@ const GPTResearcher = (() => {
     syncScopes();
   };
 
+  const initTemplateManager = () => {
+    const taskForm = document.getElementById('taskTemplateForm');
+    if (taskForm) {
+      taskForm.addEventListener('submit', async (event) => {
+        event.preventDefault();
+        const taskText = document.getElementById('taskTemplateText')?.value.trim() || '';
+        const payload = {
+          name: document.getElementById('taskTemplateName')?.value.trim() || '',
+          task_text: taskText,
+          demand_model_id: document.getElementById('demandModelSelect')?.value || 'commercial_aero_engine_general',
+          recommended_scopes: splitTemplateInput(document.getElementById('taskTemplateScopes')?.value || 'papers, patents, user_docs, web'),
+          source_categories: splitTemplateInput(document.getElementById('taskTemplateCategories')?.value || 'regulator, oem, airframer, market')
+        };
+        if (!payload.name || !payload.task_text) {
+          showToast('请填写任务模板名称和任务描述');
+          return;
+        }
+        try {
+          await saveTemplate('task_templates', payload);
+          taskForm.reset();
+        } catch (error) {
+          console.error('保存任务模板失败:', error);
+          setText('templateManagerStatus', `保存失败：${error.message}`);
+          showToast(`保存失败：${error.message}`);
+        }
+      });
+    }
+
+    const sourceForm = document.getElementById('sourceTemplateForm');
+    if (sourceForm) {
+      sourceForm.addEventListener('submit', async (event) => {
+        event.preventDefault();
+        const category = document.getElementById('sourceTemplateCategory')?.value || 'user';
+        const payload = {
+          name: document.getElementById('sourceTemplateName')?.value.trim() || '',
+          domain: document.getElementById('sourceTemplateDomain')?.value.trim() || '',
+          category,
+          category_label: sourceCategoryLabels[category] || '自定义来源',
+          keywords: splitTemplateInput(document.getElementById('sourceTemplateKeywords')?.value || ''),
+          default_enabled: Boolean(document.getElementById('sourceTemplateDefault')?.checked),
+          topics: [category]
+        };
+        if (!payload.domain) {
+          showToast('请填写源站域名');
+          return;
+        }
+        try {
+          await saveTemplate('source_templates', payload);
+          sourceForm.reset();
+        } catch (error) {
+          console.error('保存源站模板失败:', error);
+          setText('templateManagerStatus', `保存失败：${error.message}`);
+          showToast(`保存失败：${error.message}`);
+        }
+      });
+    }
+  };
+
   const initLocalLibraryPanel = () => {
     document.querySelectorAll('.upload-target-btn').forEach((button) => {
       button.addEventListener('click', () => {
@@ -1599,6 +1801,15 @@ const startResearch = async () => {
     };
 
     requestData.query_domains = getSelectedDomains();
+    addAgentResponse({
+      output: `本轮配置：模型 ${selectedProvider?.name || requestData.llm_provider}，检索范围 ${getSelectedSearchScopes().map((scope) => scopeLabelMap[scope] || scope).join('、')}，优先网址 ${requestData.query_domains.length} 个。`
+    });
+    addAgentResponse({
+      output: '下一步：本地论文库、专利池和用户资料会先做索引筛选；Web 检索会优先访问已勾选的航空官方与高可信源站。'
+    });
+    addAgentResponse({
+      output: '随后进入 3-Agent 流程：检索规划、资料精读、报告撰写、自动校订与 Word/PDF 导出。'
+    });
     setText('currentModel', `${selectedProvider?.name || requestData.llm_provider}（${selectedProvider?.model || '-'}）`);
     startTaskProgressPolling(requestData.client_task_id);
 

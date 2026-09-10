@@ -12,6 +12,7 @@ TEMPLATE_FILE_NAMES = {
     "task_templates": "task_templates.json",
     "source_templates": "source_templates.json",
 }
+MUTABLE_TEMPLATE_TYPES = {"task_templates", "source_templates"}
 
 
 def get_project_root() -> Path:
@@ -35,6 +36,14 @@ def _read_json_list(path: Path) -> list[dict[str, Any]]:
     return [item for item in data if isinstance(item, dict)]
 
 
+def _write_json_list(path: Path, data: list[dict[str, Any]]) -> None:
+    path.parent.mkdir(parents=True, exist_ok=True)
+    path.write_text(
+        json.dumps(data, ensure_ascii=False, indent=2) + "\n",
+        encoding="utf-8",
+    )
+
+
 def _normalize_text(value: Any) -> str:
     text = str(value or "").lower()
     return re.sub(r"\s+", " ", text).strip()
@@ -50,6 +59,140 @@ def _unique(values: list[str]) -> list[str]:
             seen.add(key)
             result.append(item)
     return result
+
+
+def _split_list(value: Any) -> list[str]:
+    if isinstance(value, list):
+        raw_items = value
+    else:
+        raw_items = re.split(r"[,，;；\n]+", str(value or ""))
+    return _unique([str(item).strip() for item in raw_items if str(item).strip()])
+
+
+def _slug(value: Any, fallback: str) -> str:
+    text = str(value or "").strip().lower()
+    text = re.sub(r"https?://", "", text)
+    text = re.sub(r"[^0-9a-zA-Z\u4e00-\u9fff]+", "_", text)
+    text = re.sub(r"_+", "_", text).strip("_")
+    return text or fallback
+
+
+def _normalize_domain(value: Any) -> str:
+    text = str(value or "").strip().lower()
+    text = re.sub(r"^https?://", "", text)
+    text = text.split("/", 1)[0]
+    text = text.split("?", 1)[0]
+    text = text.strip().strip(".")
+    if not text or "." not in text or any(char.isspace() for char in text):
+        raise ValueError("源站模板必须填写有效域名，例如 boeing.com")
+    return text
+
+
+def _template_path(template_type: str) -> Path:
+    if template_type not in MUTABLE_TEMPLATE_TYPES:
+        raise ValueError("仅支持管理任务模板和源站模板")
+    return get_local_docs_root() / TEMPLATE_FILE_NAMES[template_type]
+
+
+def _unique_id(base_id: str, items: list[dict[str, Any]], current_id: str | None = None) -> str:
+    existing = {
+        str(item.get("id"))
+        for item in items
+        if item.get("id") and str(item.get("id")) != str(current_id or "")
+    }
+    candidate = base_id
+    index = 2
+    while candidate in existing:
+        candidate = f"{base_id}_{index}"
+        index += 1
+    return candidate
+
+
+def _sanitize_task_template(payload: dict[str, Any], items: list[dict[str, Any]]) -> dict[str, Any]:
+    name = str(payload.get("name") or "").strip()
+    task_text = str(payload.get("task_text") or payload.get("task") or "").strip()
+    if not name or not task_text:
+        raise ValueError("任务模板必须填写模板名称和任务描述")
+
+    current_id = str(payload.get("id") or "").strip()
+    template_id = _unique_id(_slug(current_id or name, "task_template"), items, current_id or None)
+    return {
+        "id": template_id,
+        "name": name,
+        "demand_model_id": str(payload.get("demand_model_id") or "commercial_aero_engine_general").strip(),
+        "task_text": task_text,
+        "recommended_scopes": _split_list(payload.get("recommended_scopes")) or ["papers", "patents", "user_docs", "web"],
+        "source_categories": _split_list(payload.get("source_categories")) or ["regulator", "oem", "airframer", "market"],
+        "user_created": bool(payload.get("user_created", True)),
+    }
+
+
+def _sanitize_source_template(payload: dict[str, Any], items: list[dict[str, Any]]) -> dict[str, Any]:
+    domain = _normalize_domain(payload.get("domain"))
+    name = str(payload.get("name") or domain).strip()
+    current_id = str(payload.get("id") or "").strip()
+    template_id = _unique_id(_slug(current_id or domain, "source_template"), items, current_id or None)
+    category = str(payload.get("category") or "user").strip()
+    category_label = str(payload.get("category_label") or payload.get("categoryLabel") or "自定义源站").strip()
+
+    try:
+        weight = max(0.0, min(float(payload.get("weight", 0.72)), 1.0))
+    except (TypeError, ValueError):
+        weight = 0.72
+    try:
+        credibility = max(0.0, min(float(payload.get("credibility", 0.78)), 1.0))
+    except (TypeError, ValueError):
+        credibility = 0.78
+
+    return {
+        "id": template_id,
+        "domain": domain,
+        "name": name,
+        "category": category,
+        "category_label": category_label,
+        "weight": round(weight, 2),
+        "credibility": round(credibility, 2),
+        "default_enabled": bool(payload.get("default_enabled", False)),
+        "topics": _split_list(payload.get("topics")),
+        "keywords": _split_list(payload.get("keywords")) or [name, domain],
+        "user_created": bool(payload.get("user_created", True)),
+    }
+
+
+def save_intelligence_template(template_type: str, payload: dict[str, Any]) -> dict[str, Any]:
+    path = _template_path(template_type)
+    items = _read_json_list(path)
+    if template_type == "task_templates":
+        item = _sanitize_task_template(payload, items)
+    else:
+        item = _sanitize_source_template(payload, items)
+
+    replaced = False
+    for index, existing in enumerate(items):
+        if str(existing.get("id")) == item["id"]:
+            items[index] = {**existing, **item}
+            replaced = True
+            break
+    if not replaced:
+        items.append(item)
+
+    _write_json_list(path, items)
+    return {"template": item, "action": "updated" if replaced else "created"}
+
+
+def delete_intelligence_template(template_type: str, template_id: str) -> dict[str, Any]:
+    path = _template_path(template_type)
+    items = _read_json_list(path)
+    target_id = str(template_id or "").strip()
+    if not target_id:
+        raise ValueError("缺少模板 ID")
+
+    kept = [item for item in items if str(item.get("id")) != target_id]
+    if len(kept) == len(items):
+        raise ValueError("未找到要删除的模板")
+
+    _write_json_list(path, kept)
+    return {"deleted_id": target_id}
 
 
 def load_intelligence_templates() -> dict[str, list[dict[str, Any]]]:

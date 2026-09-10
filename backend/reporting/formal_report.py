@@ -213,9 +213,8 @@ def prepare_formal_report(markdown, task, sources=(), metadata=None):
     chapters += thematic or [('专题资料分析', '当前尚无足够的专题分析内容。')]
     chapters += [('综合讨论与研究局限', front['discussion']), ('结论与建议', front['conclusion'])]
     parts = [f'# {title}', '', '## 摘要', '', front['abstract'].strip(), '', f'**关键词：** {front["keywords"]}', '']
-    if metadata.get('include_toc') or len(markdown) > 6000:
-        parts += ['## 目录', ''] + [f'- [{i} {name}](#sec-{i})' for i, (name, _) in enumerate(chapters, 1)]
-        parts += ['- [参考文献](#references)', '']
+    parts += ['## 目录', ''] + [f'- [{i} {name}](#sec-{i})' for i, (name, _) in enumerate(chapters, 1)]
+    parts += ['- [参考文献](#references)', '']
     for index, (name, body) in enumerate(chapters, 1):
         parts += [f'<a id="sec-{index}"></a>', f'## {index} {name}', '', _number_subheadings(body.strip(), index), '']
     for index, (name, body) in enumerate(appendices, 1):

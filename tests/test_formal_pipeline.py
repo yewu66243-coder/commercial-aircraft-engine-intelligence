@@ -107,6 +107,9 @@ class FormalPipelineTests(unittest.TestCase):
         prompt = module.build_writer_prompt(task='GTF', tone='objective', report_type='detailed_report', sources_text='', demand_text='', source_template_text='', image_text='', sections_text='', method_context='检索记录时间2026-09-04')
         for required in ('摘要', '关键词', '资料来源与研究方法', '综合讨论与研究局限', '结论与建议', '核心实体与参数清单（内部核验）'):
             self.assertIn(required, prompt)
+        self.assertIn('项目内报告格式Skill', prompt)
+        self.assertIn('规范论文格式报告参考', prompt)
+        self.assertIn('[EB/OL]', prompt)
         self.assertIn('检索记录时间2026-09-04', prompt)
         self.assertNotIn('严格为以下五部分', prompt)
 
