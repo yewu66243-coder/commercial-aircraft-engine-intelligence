@@ -1,0 +1,235 @@
+- generic [active] [ref=e1]:
+  - generic [ref=e2]:
+    - banner [ref=e3]:
+      - generic [ref=e4]:
+        - img "商用航空发动机情报工作台图标" [ref=e5]
+        - generic [ref=e6]:
+          - strong [ref=e7]: 商用航空发动机情报工作台
+          - generic [ref=e8]: 3-Agent 协同研判
+      - generic [ref=e9]:
+        - generic [ref=e10]: 本地服务在线
+        - generic [ref=e12]: 论文池 0
+        - generic [ref=e13]: 专利池 0
+        - generic [ref=e14]: 用户资料 0
+        - generic [ref=e15]: 索引健康 0%
+      - generic [ref=e16]:
+        - button " 状态" [ref=e17] [cursor=pointer]:
+          - generic [ref=e18]: 
+          - text: 状态
+        - button " 历史" [ref=e19] [cursor=pointer]:
+          - generic [ref=e20]: 
+          - text: 历史
+    - main [ref=e21]:
+      - complementary [ref=e22]:
+        - generic [ref=e23]:
+          - heading "任务配置" [level=2] [ref=e24]
+          - generic [ref=e25]: 情报任务描述
+          - textbox "情报任务描述" [ref=e26]:
+            - /placeholder: 例如：航空发动机适航安全性分析，重点关注 FADEC、CCAR-33、安全性评估和维修保障影响。
+          - generic [ref=e27]:
+            - generic [ref=e28]:
+              - generic [ref=e29]: 任务模板库
+              - combobox "任务模板库" [ref=e30]:
+                - option "不使用模板" [selected]
+            - generic [ref=e31]:
+              - generic [ref=e32]: 领域需求模型
+              - combobox "领域需求模型" [ref=e33]:
+                - option "自动匹配" [selected]
+          - generic [ref=e34]:
+            - generic [ref=e35]:
+              - generic [ref=e36]: 报告类型
+              - combobox "报告类型" [ref=e37]:
+                - option "专题快报"
+                - option "技术动态研报" [selected]
+                - option "型号跟踪"
+            - generic [ref=e38]:
+              - generic [ref=e39]: 报告精细程度
+              - combobox "报告精细程度" [ref=e40]:
+                - option "简洁版｜预计 1–2 分钟，最长 5 分钟" [selected]
+                - option "精细版｜预计 15–20 分钟，最长 30 分钟"
+            - generic [ref=e41]:
+              - generic [ref=e42]: 检索范围
+              - group [ref=e43]:
+                - generic "论文库、专利池、用户资料、Web " [ref=e44] [cursor=pointer]
+          - generic [ref=e45]:
+            - generic [ref=e46]:
+              - generic [ref=e47]: 精读/抓取上限
+              - spinbutton "精读/抓取上限" [ref=e48]: "5"
+            - generic [ref=e49]:
+              - generic [ref=e50]: 生成大模型
+              - combobox "生成大模型" [ref=e51]:
+                - option "DeepSeek" [selected]
+                - option "千问（Qwen Plus）"
+              - paragraph [ref=e52]: 正在读取模型配置…
+          - button "启动情报任务" [ref=e53] [cursor=pointer]
+        - generic [ref=e54]:
+          - heading "优先搜索网址" [level=2] [ref=e55]
+          - generic [ref=e56]:
+            - checkbox "全选 / 取消全选" [ref=e57]
+            - text: 全选 / 取消全选
+          - generic [ref=e58]: 正在读取源站模板库...
+          - textbox "补充域名，多个用逗号分隔，如：boeing.com" [ref=e60]
+          - group [ref=e61]:
+            - generic "模板库管理" [ref=e62] [cursor=pointer]
+            - option "飞机制造商" [selected]
+            - option "发动机/系统 OEM"
+            - option "适航监管/事故调查"
+            - option "维修保障"
+            - option "市场与财报"
+            - option "论文资料"
+            - option "专利来源"
+            - option "自定义来源"
+          - paragraph [ref=e63]: 源站将按类别、权重与可信度参与 Web 检索排序。
+      - generic [ref=e64]:
+        - generic [ref=e65]:
+          - heading "资料上传" [level=2] [ref=e66]
+          - generic [ref=e67]:
+            - button "Choose File" [ref=e68] [cursor=pointer]
+            - generic [ref=e69]: 选择本地资料文件
+            - generic [ref=e70]: 支持 PDF、DOCX、TXT、MD、XLSX；上传后自动写入索引
+          - generic [ref=e71]:
+            - button "用户资料库" [ref=e72] [cursor=pointer]
+            - button "论文池" [ref=e73] [cursor=pointer]
+            - button "专利池" [ref=e74] [cursor=pointer]
+          - button "上传并加入检索范围" [ref=e75] [cursor=pointer]
+          - paragraph [ref=e76]: 保存路径：local_docs/user_docs、local_docs/all_papers_pool 或 local_docs/all_patent_pool
+        - generic [ref=e77]:
+          - heading [level=2] [ref=e78]:
+            - text: 运行日志
+            - button "" [ref=e80] [cursor=pointer]
+          - generic [ref=e82]: 等待提交任务；启动后将按后台实际阶段逐步显示运行信息。
+        - generic [ref=e84]:
+          - heading "检索覆盖可视化" [level=2] [ref=e85]
+          - generic [ref=e86]:
+            - generic [ref=e87]:
+              - generic [ref=e88]: 本地论文库
+              - generic [ref=e89]: 0 篇
+            - generic [ref=e91]:
+              - generic [ref=e92]: 本地专利池
+              - generic [ref=e93]: 0 条
+            - generic [ref=e95]:
+              - generic [ref=e96]: 用户资料库
+              - generic [ref=e97]: 0 份
+            - generic [ref=e99]:
+              - generic [ref=e100]: 优先网址
+              - generic [ref=e101]: 0 个
+          - generic [ref=e103]:
+            - generic [ref=e104]:
+              - generic [ref=e105]: 适航安全
+              - strong [ref=e108]: "86"
+            - generic [ref=e109]:
+              - generic [ref=e110]: FADEC
+              - strong [ref=e113]: "78"
+            - generic [ref=e114]:
+              - generic [ref=e115]: 维修保障
+              - strong [ref=e118]: "62"
+      - generic [ref=e119]:
+        - generic [ref=e120]:
+          - heading "用户资料库" [level=2] [ref=e121]
+          - generic [ref=e122]:
+            - searchbox "搜索用户资料文件名、题名或摘要..." [ref=e123]
+            - generic [ref=e124]: 0 项
+          - generic [ref=e125]: 暂无文件，可通过左侧上传加入检索范围。
+        - generic [ref=e127]:
+          - heading "论文池概览" [level=2] [ref=e128]
+          - generic [ref=e129]:
+            - searchbox "搜索论文文件名、题名或摘要..." [ref=e130]
+            - generic [ref=e131]: 0 项
+          - generic [ref=e132]: 暂无文件，可通过左侧上传加入检索范围。
+        - generic [ref=e134]:
+          - heading "专利池概览" [level=2] [ref=e135]
+          - generic [ref=e136]:
+            - searchbox "搜索专利文件名、题名、申请人或摘要..." [ref=e137]
+            - generic [ref=e138]: 0 项
+          - generic [ref=e139]: 暂无文件，可通过左侧上传加入检索范围。
+      - complementary [ref=e141]:
+        - generic [ref=e142]:
+          - heading [level=2] [ref=e143]:
+            - text:  报告预览 
+            - button "" [ref=e144] [cursor=pointer]
+          - generic [ref=e146]:
+            - link " Markdown":
+              - /url: "#"
+              - generic: 
+              - text: Markdown
+            - link " Word":
+              - /url: "#"
+              - generic: 
+              - text: Word
+            - link " PDF":
+              - /url: "#"
+              - generic: 
+              - text: PDF
+          - status [ref=e147]: 中文研究报告：摘要、正文、参考文献；Word / PDF 统一论文式排版。
+          - paragraph [ref=e149]: 报告生成后可在此审阅摘要、研究方法、专题分析与结论，并下载 Word 或 PDF。
+    - contentinfo "合作机构" [ref=e150]:
+      - generic "厦门大学" [ref=e151]:
+        - img "厦门大学 logo" [ref=e152]
+      - generic "中国航发商发" [ref=e155]:
+        - img "中国航发商发 logo" [ref=e156]
+  - text:   
+  - generic [ref=e158]:
+    - generic [ref=e159]:
+      - heading " 连接状态" [level=3] [ref=e160]:
+        - generic [ref=e161]: 
+        - text: 连接状态
+      - button "" [ref=e162] [cursor=pointer]
+    - generic [ref=e164]:
+      - generic [ref=e165]:
+        - generic [ref=e166]: "Connection:"
+        - generic [ref=e167]: Connected
+      - generic [ref=e169]:
+        - generic [ref=e170]: "Research:"
+        - generic [ref=e171]: Inactive
+      - generic [ref=e172]:
+        - generic [ref=e173]: "Task elapsed:"
+        - generic [ref=e174]: "-"
+      - generic [ref=e175]:
+        - generic [ref=e176]: "Stage:"
+        - generic [ref=e177]: "-"
+      - generic [ref=e178]:
+        - generic [ref=e179]: "Review round:"
+        - generic [ref=e180]: "-"
+      - generic [ref=e181]:
+        - generic [ref=e182]: "Est. remaining:"
+        - generic [ref=e183]: "-"
+      - generic [ref=e184]:
+        - generic [ref=e185]: "API online for:"
+        - generic [ref=e186]: 0 sec
+      - generic [ref=e187]:
+        - generic [ref=e188]: "Last activity:"
+        - generic [ref=e189]: 0 sec ago
+      - generic [ref=e190]:
+        - generic [ref=e191]: "Channel:"
+        - generic [ref=e192]: HTTP API (Ready)
+      - generic [ref=e194]:
+        - generic [ref=e195]: "Health checks:"
+        - generic [ref=e196]: "1"
+      - generic [ref=e197]:
+        - generic [ref=e198]: "Responses:"
+        - generic [ref=e199]: "1"
+      - generic [ref=e201]:
+        - generic [ref=e202]: "Current task:"
+        - generic [ref=e203]: "-"
+      - generic [ref=e204]:
+        - generic [ref=e205]: "Current model:"
+        - generic [ref=e206]: DeepSeek
+  - generic [ref=e207]:
+    - generic [ref=e208]:
+      - heading " 历史报告" [level=3] [ref=e209]:
+        - generic [ref=e210]: 
+        - text: 历史报告
+      - button "" [ref=e211] [cursor=pointer]
+    - generic [ref=e213]:
+      - textbox "搜索历史任务..." [ref=e214]
+      - button "" [ref=e215] [cursor=pointer]
+    - generic [ref=e217]:
+      - combobox [ref=e218]:
+        - option "最新优先" [selected]
+        - option "最早优先"
+      - button "" [ref=e219] [cursor=pointer]
+      - generic [ref=e221]:
+        - button "" [ref=e222] [cursor=pointer]
+        - button "" [ref=e224] [cursor=pointer]
+        - button "" [ref=e226] [cursor=pointer]
+    - paragraph [ref=e229]: No research history yet.
