@@ -22,6 +22,42 @@ PAPER_SOURCE_TYPE = "\u8bba\u6587"
 USER_DOC_SOURCE_TYPE = "\u7528\u6237\u8d44\u6599"
 PATENT_SOURCE_TYPE = "\u4e13\u5229"
 FILENAME_FALLBACK_PREFIX = "\u6587\u4ef6\u540d\uff1a"
+PRESET_USER_DOCS_ROOT = "\u603b\u8d44\u6599\u5e93"
+USER_DOC_INDEX_SCHEMA_VERSION = "structured_user_doc_v3"
+STANDARD_CODE_RE = re.compile(
+    r"(?P<code>(?:GB|GB/T|GB\uff0fT|GB/T|MH/T|MH\uff0fT|HB|GJB|JJF|JJG|CCAR|CTSO|AC|AP|AD)\s*[\w.\-\u2014]+)",
+    re.IGNORECASE,
+)
+COMMON_SECTION_RE = re.compile(
+    r"^(?:\d+(?:\.\d+)*\s*)?(范围|规范性引用文件|术语和定义|缩略语|总体要求|一般要求|技术要求|试验方法|检验规则|标志|包装|运输|贮存|附录|参考文献)\b"
+)
+USER_DOC_KEYWORD_LEXICON = [
+    "航空发动机",
+    "商用航空发动机",
+    "民用飞机",
+    "适航",
+    "审定",
+    "取证",
+    "适航指令",
+    "维修",
+    "维护",
+    "MRO",
+    "安全性",
+    "可靠性",
+    "氧气系统",
+    "环境控制系统",
+    "涡轮发动机",
+    "润滑油",
+    "排放",
+    "V2500",
+    "GTF",
+    "LEAP",
+    "CCAR",
+    "CTSO",
+    "FAA",
+    "EASA",
+    "CAAC",
+]
 
 
 def get_project_root() -> Path:
@@ -91,6 +127,51 @@ def _safe_filename(filename: str) -> str:
     return name or f"uploaded_{int(time.time())}.txt"
 
 
+def _safe_relative_library_path(file_name: str) -> Path:
+    normalized = str(file_name or "").replace("\\", "/").strip().lstrip("/")
+    if not normalized:
+        raise ValueError("文件名不能为空")
+    parts = [
+        _safe_filename(part)
+        for part in normalized.split("/")
+        if part and part not in {".", ".."}
+    ]
+    if not parts:
+        raise ValueError("非法文件路径")
+    return Path(*parts)
+
+
+def _iter_supported_files(
+    directory: Path,
+    extensions: set[str] | None = None,
+    recursive: bool = False,
+) -> list[Path]:
+    if not directory.exists():
+        return []
+    allowed_extensions = extensions or SUPPORTED_LIBRARY_EXTENSIONS
+    iterator = directory.rglob("*") if recursive else directory.iterdir()
+    return [
+        path
+        for path in iterator
+        if path.is_file() and path.suffix.lower() in allowed_extensions
+    ]
+
+
+def _relative_library_path(path: Path, directory: Path) -> str:
+    try:
+        return path.resolve().relative_to(directory.resolve()).as_posix()
+    except ValueError:
+        return path.name
+
+
+def _index_identity_for_path(path: Path, directory: Path) -> str:
+    return _relative_library_path(path, directory).lower()
+
+
+def _index_identity_for_item(item: dict[str, Any]) -> str:
+    return str(item.get("relative_path") or item.get("file_name") or "").replace("\\", "/").lower()
+
+
 def _dedupe_path(directory: Path, filename: str) -> Path:
     candidate = directory / filename
     if not candidate.exists():
@@ -137,9 +218,7 @@ def _find_existing_file_by_hash(
         return None
 
     resolved_skip = skip_path.resolve() if skip_path else None
-    for path in directory.iterdir():
-        if not path.is_file() or path.suffix.lower() not in SUPPORTED_LIBRARY_EXTENSIONS:
-            continue
+    for path in _iter_supported_files(directory, recursive=True):
         if resolved_skip and path.resolve() == resolved_skip:
             continue
         if path.stat().st_size != size:
@@ -545,6 +624,21 @@ def _extract_pdf_preview(path: Path, limit: int) -> str:
         return ""
 
 
+def _extract_pdf_outline(path: Path, max_items: int = 18) -> list[str]:
+    try:
+        import fitz  # type: ignore
+
+        with fitz.open(path) as doc:
+            outline = []
+            for item in doc.get_toc(simple=True)[:max_items]:
+                title = re.sub(r"\s+", " ", str(item[1] or "")).strip()
+                if title:
+                    outline.append(title)
+            return outline
+    except Exception:
+        return []
+
+
 def extract_document_preview(path: Path, limit: int = 1200) -> str:
     suffix = path.suffix.lower()
     if suffix in {".txt", ".md"}:
@@ -559,11 +653,186 @@ def extract_document_preview(path: Path, limit: int = 1200) -> str:
     preview = re.sub(r"\s+", " ", preview).strip()
     return preview[:limit] if preview else f"{FILENAME_FALLBACK_PREFIX}{path.stem}"
 
+
+def _parse_title_and_standard(path: Path) -> tuple[str, str, str]:
+    stem = _stem_without_copy_suffix(path)
+    title = stem
+    standard_no = ""
+    year = ""
+
+    if "_" in stem:
+        prefix, suffix = stem.split("_", 1)
+        title = suffix.strip(" _-") or stem
+        code_match = STANDARD_CODE_RE.search(prefix)
+        if code_match:
+            standard_no = re.sub(r"\s+", " ", code_match.group("code")).strip()
+    else:
+        code_match = STANDARD_CODE_RE.search(stem)
+        if code_match:
+            standard_no = re.sub(r"\s+", " ", code_match.group("code")).strip()
+            title = (stem[: code_match.start()] + stem[code_match.end() :]).strip(" _-") or stem
+
+    year_match = re.search(r"(19|20)\d{2}", stem)
+    if year_match:
+        year = year_match.group(0)
+    return title, standard_no, year
+
+
+def _classify_user_doc_path(file_path: Path, directory: Path) -> dict[str, str]:
+    relative_path = _relative_library_path(file_path, directory)
+    parts = Path(relative_path).parts
+    source_library = "用户上传资料"
+    category = ""
+    subcategory = ""
+
+    if parts and parts[0] == PRESET_USER_DOCS_ROOT:
+        source_library = parts[1] if len(parts) > 2 else PRESET_USER_DOCS_ROOT
+        category = source_library
+        if len(parts) > 3:
+            subcategory = "/".join(parts[2:-1])
+    elif len(parts) > 1:
+        source_library = parts[0]
+        category = parts[0]
+        if len(parts) > 2:
+            subcategory = "/".join(parts[1:-1])
+
+    return {
+        "relative_path": relative_path,
+        "source_library": source_library,
+        "category": category,
+        "subcategory": subcategory,
+    }
+
+
+def _extract_scope_sentence(preview: str) -> str:
+    text = re.sub(r"\s+", " ", preview or "").strip()
+    if not text or text.startswith(FILENAME_FALLBACK_PREFIX):
+        return ""
+    match = re.search(r"(本(?:文件|标准|部分)[^。；;]{8,120}[。；;])", text)
+    if match:
+        return match.group(1).strip("。；; ")
+    return ""
+
+
+def _extract_section_keywords(preview: str, outline: list[str]) -> list[str]:
+    candidates: list[str] = []
+    for title in outline:
+        clean = re.sub(r"^\d+(?:\.\d+)*\s*", "", title).strip()
+        if clean and len(clean) <= 30 and clean not in candidates:
+            candidates.append(clean)
+
+    for raw_line in re.split(r"[\r\n]+", preview or ""):
+        line = re.sub(r"\s+", " ", raw_line).strip()
+        if not line or len(line) > 40:
+            continue
+        match = COMMON_SECTION_RE.match(line)
+        if match and match.group(1) not in candidates:
+            candidates.append(match.group(1))
+        if len(candidates) >= 10:
+            break
+    return candidates[:10]
+
+
+def _user_doc_keywords(
+    title: str,
+    standard_no: str,
+    path_info: dict[str, str],
+    sections: list[str],
+    preview: str,
+) -> list[str]:
+    keywords: list[str] = []
+    for value in [standard_no, path_info.get("source_library"), path_info.get("category"), path_info.get("subcategory"), title]:
+        for part in re.split(r"[\s,，、_/\\\-]+", str(value or "")):
+            clean = part.strip(" .;；:：()（）[]【】")
+            if len(clean) >= 2 and clean not in keywords:
+                keywords.append(clean)
+
+    haystack = f"{title} {standard_no} {' '.join(path_info.values())} {' '.join(sections)} {preview}"
+    haystack_lower = haystack.lower()
+    for term in USER_DOC_KEYWORD_LEXICON:
+        if term.lower() in haystack_lower and term not in keywords:
+            keywords.append(term)
+    for section in sections:
+        if section not in keywords:
+            keywords.append(section)
+    return keywords[:30]
+
+
+def _structured_user_doc_entry(
+    file_path: Path,
+    directory: Path,
+    file_hash: str = "",
+) -> dict[str, Any]:
+    now = time.strftime("%Y-%m-%d %H:%M:%S")
+    title, standard_no, year = _parse_title_and_standard(file_path)
+    path_info = _classify_user_doc_path(file_path, directory)
+    preview = extract_document_preview(file_path, limit=1800)
+    outline = _extract_pdf_outline(file_path) if file_path.suffix.lower() == ".pdf" else []
+    sections = _extract_section_keywords(preview, outline)
+    scope_sentence = _extract_scope_sentence(preview)
+    library = path_info["source_library"]
+    subcategory = path_info.get("subcategory") or path_info.get("category") or library
+
+    summary_parts = []
+    if standard_no:
+        summary_parts.append(f"本资料为{standard_no}《{title}》")
+    else:
+        summary_parts.append(f"本资料为《{title}》")
+    if year:
+        summary_parts.append(f"年份标识为{year}")
+    if library:
+        summary_parts.append(f"归入{library}")
+    if subcategory and subcategory != library:
+        summary_parts.append(f"细分路径为{subcategory}")
+    if scope_sentence:
+        summary_parts.append(f"可读范围信息显示：{scope_sentence}")
+    if sections:
+        summary_parts.append(f"主要可识别章节包括：{'、'.join(sections[:8])}")
+    summary_parts.append("可作为情报任务中的本地规范、适航或技术资料来源参与检索与精读。")
+
+    keywords = _user_doc_keywords(title, standard_no, path_info, sections, preview)
+    has_text = bool(preview and not preview.startswith(FILENAME_FALLBACK_PREFIX))
+    confidence = 0.62
+    if standard_no:
+        confidence += 0.12
+    if has_text:
+        confidence += 0.12
+    if sections:
+        confidence += 0.08
+    if scope_sentence:
+        confidence += 0.06
+
+    entry: dict[str, Any] = {
+        "title": title,
+        "author": "",
+        "abstract": "；".join(summary_parts),
+        "file_name": file_path.name,
+        "relative_path": path_info["relative_path"],
+        "source_type": USER_DOC_SOURCE_TYPE,
+        "source_library": library,
+        "category": path_info.get("category") or library,
+        "subcategory": path_info.get("subcategory") or "",
+        "standard_no": standard_no,
+        "year": year,
+        "keywords": "；".join(keywords),
+        "size": file_path.stat().st_size,
+        "sha256": file_hash or _file_sha256(file_path),
+        "index_schema_version": USER_DOC_INDEX_SCHEMA_VERSION,
+        "index_method": "structured_user_doc_summary",
+        "summary_confidence": round(min(confidence, 0.98), 2),
+        "updated_at": now,
+    }
+    return entry
+
 def _index_entry_for_file(
     file_path: Path,
     source_type: str,
+    directory: Path | None = None,
     file_hash: str = "",
 ) -> dict[str, Any]:
+    if source_type == USER_DOC_SOURCE_TYPE:
+        return _structured_user_doc_entry(file_path, directory or file_path.parent, file_hash=file_hash)
+
     now = time.strftime("%Y-%m-%d %H:%M:%S")
     metadata = _find_cnki_metadata(file_path) if source_type == PAPER_SOURCE_TYPE else None
     preview = ""
@@ -582,6 +851,7 @@ def _index_entry_for_file(
         "author": (metadata.get("author") if metadata else "") or _author_from_filename(file_path),
         "abstract": preview,
         "file_name": file_path.name,
+        "relative_path": _relative_library_path(file_path, directory) if directory else file_path.name,
         "source_type": source_type,
         "size": file_path.stat().st_size,
         "sha256": file_hash or _file_sha256(file_path),
@@ -601,11 +871,9 @@ def _normalize_index_items(items: list[dict[str, Any]], directory: Path) -> list
     if not directory.exists():
         return []
 
-    existing_names = {
-        path.name.lower()
-        for path in directory.iterdir()
-        if path.is_file() and path.suffix.lower() in SUPPORTED_LIBRARY_EXTENSIONS
-    }
+    files = _iter_supported_files(directory, recursive=True)
+    existing_ids = {_index_identity_for_path(path, directory) for path in files}
+    existing_names = {path.name.lower() for path in files}
     normalized: list[dict[str, Any]] = []
     seen: set[str] = set()
     for item in items:
@@ -615,10 +883,12 @@ def _normalize_index_items(items: list[dict[str, Any]], directory: Path) -> list
                 seen.add(key)
                 normalized.append(item)
             continue
+        item_id = _index_identity_for_item(item)
         lower_name = str(item.get("file_name", "")).lower()
-        if not lower_name or lower_name not in existing_names or lower_name in seen:
+        exists = item_id in existing_ids or lower_name in existing_names
+        if not exists or not item_id or item_id in seen:
             continue
-        seen.add(lower_name)
+        seen.add(item_id)
         normalized.append(item)
     return normalized
 
@@ -631,12 +901,12 @@ def _upsert_index_entry(
     file_hash: str = "",
 ) -> dict[str, Any]:
     items = _normalize_index_items(_read_json_list(index_path), directory)
-    entry = _index_entry_for_file(file_path, source_type, file_hash=file_hash)
+    entry = _index_entry_for_file(file_path, source_type, directory=directory, file_hash=file_hash)
 
-    lower_name = file_path.name.lower()
+    entry_id = _index_identity_for_path(file_path, directory)
     replaced = False
     for index, item in enumerate(items):
-        if str(item.get("file_name", "")).lower() == lower_name:
+        if _index_identity_for_item(item) == entry_id:
             items[index] = {**item, **entry}
             replaced = True
             break
@@ -645,6 +915,61 @@ def _upsert_index_entry(
 
     _write_json(index_path, items)
     return entry
+
+
+def rebuild_user_docs_index_from_pool(
+    pool_dir: Path | None = None,
+    index_path: Path | None = None,
+) -> dict[str, Any]:
+    ensure_local_library_dirs()
+    target_pool = (pool_dir or get_user_docs_dir()).resolve()
+    target_index = (index_path or get_user_docs_index_path()).resolve()
+    files = sorted(
+        _iter_supported_files(target_pool, recursive=True),
+        key=lambda item: _relative_library_path(item, target_pool).lower(),
+    )
+    previous = {
+        _index_identity_for_item(item): item
+        for item in _read_json_list(target_index)
+        if _index_identity_for_item(item)
+    }
+
+    entries: list[dict[str, Any]] = []
+    reused_count = 0
+    rebuilt_count = 0
+    for path in files:
+        file_hash = _file_sha256(path)
+        identity = _index_identity_for_path(path, target_pool)
+        old = previous.get(identity)
+        if (
+            old
+            and old.get("sha256") == file_hash
+            and old.get("index_method") == "structured_user_doc_summary"
+            and old.get("index_schema_version") == USER_DOC_INDEX_SCHEMA_VERSION
+            and old.get("relative_path")
+        ):
+            entries.append(old)
+            reused_count += 1
+            continue
+        entries.append(
+            _index_entry_for_file(
+                path,
+                USER_DOC_SOURCE_TYPE,
+                directory=target_pool,
+                file_hash=file_hash,
+            )
+        )
+        rebuilt_count += 1
+
+    _write_json(target_index, entries)
+    return {
+        "index_path": str(target_index),
+        "pool_dir": str(target_pool),
+        "file_count": len(files),
+        "entry_count": len(entries),
+        "reused_count": reused_count,
+        "rebuilt_count": rebuilt_count,
+    }
 
 def save_local_library_file(fileobj: BinaryIO, filename: str, target: str) -> dict[str, Any]:
     ensure_local_library_dirs()
@@ -748,7 +1073,6 @@ def save_local_library_file(fileobj: BinaryIO, filename: str, target: str) -> di
 
 def delete_local_library_file(target: str, file_name: str) -> dict[str, Any]:
     ensure_local_library_dirs()
-    safe_name = _safe_filename(file_name)
     if target == "all_papers_pool":
         directory = get_papers_pool_dir()
         index_path = get_papers_index_path()
@@ -761,7 +1085,8 @@ def delete_local_library_file(target: str, file_name: str) -> dict[str, Any]:
     else:
         raise ValueError("target 只能是 user_docs、all_papers_pool 或 all_patent_pool")
 
-    target_path = (directory / safe_name).resolve()
+    relative_path = _safe_relative_library_path(file_name)
+    target_path = (directory / relative_path).resolve()
     if directory.resolve() not in target_path.parents:
         raise ValueError("非法文件路径")
 
@@ -772,18 +1097,19 @@ def delete_local_library_file(target: str, file_name: str) -> dict[str, Any]:
     if target == "all_patent_pool" and target_path.suffix.lower() in SUPPORTED_PATENT_INDEX_TABLE_EXTENSIONS:
         rebuild_patents_index_from_pool(directory, index_path)
     else:
+        target_id = _relative_library_path(target_path, directory).lower()
+        target_name = target_path.name.lower()
         items = [
             item
             for item in _read_json_list(index_path)
-            if str(item.get("file_name", "")).lower() != safe_name.lower()
+            if _index_identity_for_item(item) != target_id and str(item.get("file_name", "")).lower() != target_name
         ]
         _write_json(index_path, items)
-    return {"deleted": existed, "target": target, "file_name": safe_name}
+    return {"deleted": existed, "target": target, "file_name": target_path.name, "relative_path": _relative_library_path(target_path, directory)}
 
 
 def resolve_local_library_file(target: str, file_name: str) -> Path:
     ensure_local_library_dirs()
-    safe_name = _safe_filename(file_name)
     if target == "all_papers_pool":
         directory = get_papers_pool_dir()
     elif target == "user_docs":
@@ -793,25 +1119,27 @@ def resolve_local_library_file(target: str, file_name: str) -> Path:
     else:
         raise ValueError("target 只能是 user_docs、all_papers_pool 或 all_patent_pool")
 
-    target_path = (directory / safe_name).resolve()
+    relative_path = _safe_relative_library_path(file_name)
+    target_path = (directory / relative_path).resolve()
     if directory.resolve() not in target_path.parents:
         raise ValueError("非法文件路径")
     if target_path.suffix.lower() not in SUPPORTED_LIBRARY_EXTENSIONS:
         raise ValueError(f"不支持打开的文件类型：{target_path.suffix or '无扩展名'}")
     if not target_path.exists() or not target_path.is_file():
-        raise FileNotFoundError(safe_name)
+        # Backwards compatibility: older clients only send the basename.
+        matches = [
+            path
+            for path in _iter_supported_files(directory, recursive=True)
+            if path.name.lower() == Path(file_name).name.lower()
+        ]
+        if not matches:
+            raise FileNotFoundError(str(relative_path))
+        target_path = sorted(matches, key=lambda item: len(_relative_library_path(item, directory)))[0].resolve()
     return target_path
 
 
 def _count_supported_files(directory: Path, extensions: set[str] | None = None) -> int:
-    if not directory.exists():
-        return 0
-    allowed_extensions = extensions or SUPPORTED_LIBRARY_EXTENSIONS
-    return sum(
-        1
-        for path in directory.iterdir()
-        if path.is_file() and path.suffix.lower() in allowed_extensions
-    )
+    return len(_iter_supported_files(directory, extensions=extensions, recursive=True))
 
 
 def _count_patent_records(index_path: Path) -> int:
@@ -826,28 +1154,33 @@ def _file_records(
     search: str = "",
     extensions: set[str] | None = None,
 ) -> list[dict[str, Any]]:
-    index_by_name = {
-        str(item.get("file_name", "")).lower(): item
-        for item in _read_json_list(index_path)
-    }
+    index_items = _read_json_list(index_path)
+    index_by_id = {_index_identity_for_item(item): item for item in index_items if _index_identity_for_item(item)}
+    index_by_name = {str(item.get("file_name", "")).lower(): item for item in index_items}
     if not directory.exists():
         return []
 
     records = []
     keyword = search.strip().lower()
     allowed_extensions = extensions or SUPPORTED_LIBRARY_EXTENSIONS
-    for path in sorted(directory.iterdir(), key=lambda item: item.stat().st_mtime, reverse=True):
-        if not path.is_file() or path.suffix.lower() not in allowed_extensions:
-            continue
-        indexed = index_by_name.get(path.name.lower(), {})
+    for path in sorted(
+        _iter_supported_files(directory, extensions=allowed_extensions, recursive=True),
+        key=lambda item: item.stat().st_mtime,
+        reverse=True,
+    ):
+        relative_path = _relative_library_path(path, directory)
+        indexed = index_by_id.get(relative_path.lower()) or index_by_name.get(path.name.lower(), {})
         if keyword:
             haystack = " ".join(
                 [
                     path.name,
+                    relative_path,
                     str(indexed.get("title") or ""),
                     str(indexed.get("abstract") or ""),
                     str(indexed.get("author") or ""),
                     str(indexed.get("applicant") or ""),
+                    str(indexed.get("source_library") or ""),
+                    str(indexed.get("keywords") or ""),
                 ]
             ).lower()
             if keyword not in haystack:
@@ -855,9 +1188,13 @@ def _file_records(
         records.append(
             {
                 "file_name": path.name,
+                "relative_path": relative_path,
+                "file_path": relative_path,
                 "title": indexed.get("title") or path.stem,
                 "abstract": indexed.get("abstract") or "",
                 "applicant": indexed.get("applicant") or "",
+                "source_library": indexed.get("source_library") or "",
+                "category": indexed.get("category") or "",
                 "type": source_type,
                 "size": path.stat().st_size,
                 "updated_at": indexed.get("updated_at") or time.strftime("%Y-%m-%d %H:%M:%S", time.localtime(path.stat().st_mtime)),

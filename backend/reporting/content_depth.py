@@ -99,10 +99,15 @@ def _paragraphs(body):
             yield text
 
 
-def review_content(markdown, report_type='research_report'):
-    minimum = {'research_report': 2500, 'detailed_report': 5000, 'resource_report': 3000}.get(report_type, 2500)
-    section_minimum = 500 if report_type == 'detailed_report' else 350
-    expected_themes = 3 if report_type == 'detailed_report' else 2
+def review_content(markdown, report_type='research_report', detail_profile=None):
+    if detail_profile is not None:
+        minimum = detail_profile.body_min_chars
+        section_minimum = detail_profile.section_min_chars
+        expected_themes = detail_profile.expected_themes
+    else:
+        minimum = {'research_report': 2500, 'detailed_report': 5000, 'resource_report': 3000}.get(report_type, 2500)
+        section_minimum = 500 if report_type == 'detailed_report' else 350
+        expected_themes = 3 if report_type == 'detailed_report' else 2
     seen, duplicates, count, themes, thin = set(), 0, 0, 0, []
     placeholders = 0
     for title, body in _sections(markdown):

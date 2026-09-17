@@ -53,6 +53,7 @@ from gpt_researcher.document.local_library import (
     delete_local_library_file,
     list_local_library,
     rebuild_patents_index_from_pool,
+    rebuild_user_docs_index_from_pool,
     resolve_local_library_file,
     save_local_library_file,
 )
@@ -250,7 +251,17 @@ async def rebuild_local_patents_index():
         raise HTTPException(status_code=500, detail=f"重建专利索引失败：{exc}") from exc
 
 
-@app.get("/api/local-library/{target}/{file_name}/open")
+@app.post("/api/local-library/user-docs/rebuild-index")
+async def rebuild_local_user_docs_index():
+    try:
+        result = rebuild_user_docs_index_from_pool()
+        return {"success": True, **result, "library": list_local_library()}
+    except Exception as exc:
+        logger.exception("重建用户资料索引失败")
+        raise HTTPException(status_code=500, detail=f"重建用户资料索引失败：{exc}") from exc
+
+
+@app.get("/api/local-library/{target}/{file_name:path}/open")
 async def open_local_library_file(target: str, file_name: str):
     try:
         path = resolve_local_library_file(target, file_name)
@@ -270,7 +281,7 @@ async def open_local_library_file(target: str, file_name: str):
         raise HTTPException(status_code=500, detail=f"打开失败：{exc}") from exc
 
 
-@app.delete("/api/local-library/{target}/{file_name}")
+@app.delete("/api/local-library/{target}/{file_name:path}")
 async def delete_local_library(target: str, file_name: str):
     try:
         result = delete_local_library_file(target, file_name)

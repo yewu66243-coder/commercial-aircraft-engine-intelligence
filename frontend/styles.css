@@ -2643,7 +2643,7 @@ select:focus {
 }
 
 .model-settings-row {
-    grid-template-columns: minmax(90px, 0.58fr) minmax(0, 1.42fr);
+    grid-template-columns: 1fr;
 }
 
 #maxSearchResults {

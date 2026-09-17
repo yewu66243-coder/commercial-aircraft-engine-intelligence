@@ -10,7 +10,7 @@ import uuid
 import time
 import ssl
 import logging
-from dataclasses import dataclass
+from dataclasses import dataclass, replace
 from datetime import datetime
 from pathlib import Path
 from typing import Any, Dict, List, Optional
@@ -24,6 +24,12 @@ from backend.utils import write_text_to_md, write_md_to_pdf, write_md_to_word
 from backend.reporting.formal_report import concise_title, prepare_formal_report
 from backend.reporting.prompts import build_writer_prompt, build_enrichment_prompt
 from backend.reporting.content_depth import pack_evidence, review_content, usable_revision, bind_local_source_filenames
+from backend.reporting.detail_profiles import (
+    ReportDetailProfile,
+    profile_with_environment_model,
+    report_detail_catalog,
+    resolve_report_detail_profile,
+)
 from backend.reporting.image_evidence import insert_missing_figures
 from backend.reporting.source_grounding import build_source_catalog, pack_sources
 from backend.reporting.finalization import finalize_report
@@ -123,13 +129,134 @@ def resolve_model_runtime(provider_id: Optional[str], environment=None) -> Model
         f"不支持的生成大模型：{provider_id}。请选择 deepseek 或 qwen。")
 
 
+def _valid_model_choice(model_name: Optional[str]) -> Optional[str]:
+    value = (model_name or "").strip()
+    if not value:
+        return None
+    if any(char.isspace() for char in value):
+        raise ModelProviderConfigurationError("模型 ID 不能包含空白字符。")
+    return _plain_model_name(value, value)
+
+
+def qwen_model_choices(environment=None) -> list[str]:
+    environment = os.environ if environment is None else environment
+    configured = environment.get("QWEN_AVAILABLE_MODELS") or ""
+    candidates = [
+        item.strip()
+        for item in configured.split(",")
+        if item.strip()
+    ] or [
+        environment.get("QWEN_MODEL") or "qwen-plus",
+        environment.get("QWEN_FAST_MODEL"),
+        environment.get("QWEN_STRATEGIC_MODEL"),
+        "qwen-plus",
+        "qwen-turbo",
+        "qwen-max",
+    ]
+    choices: list[str] = []
+    for item in candidates:
+        model = _valid_model_choice(item)
+        if model and model not in choices:
+            choices.append(model)
+    return choices or ["qwen-plus"]
+
+
+def _runtime_with_single_model(runtime: ModelRuntime, model_name: str) -> ModelRuntime:
+    return replace(
+        runtime,
+        fast_model=model_name,
+        smart_model=model_name,
+        strategic_model=model_name,
+    )
+
+
+def resolve_report_detail_model_runtime(
+        report_detail: str,
+        provider_id: Optional[str] = None,
+        model_name: Optional[str] = None,
+        environment=None,
+) -> tuple[ReportDetailProfile, ModelRuntime]:
+    """Resolve the report-detail profile and its permitted generation model."""
+    if environment is None and isinstance(provider_id, dict):
+        environment = provider_id
+        provider_id = None
+    environment = os.environ if environment is None else environment
+    try:
+        profile = resolve_report_detail_profile(report_detail)
+    except ValueError as exc:
+        raise ModelProviderConfigurationError(str(exc)) from exc
+
+    profile = profile_with_environment_model(profile, environment)
+    selected_provider = (provider_id or "deepseek").strip().lower()
+
+    if profile.id == "brief":
+        runtime = resolve_model_runtime("deepseek", environment)
+        return profile, _runtime_with_single_model(runtime, profile.model)
+
+    if selected_provider == "deepseek":
+        runtime = resolve_model_runtime("deepseek", environment)
+        requested = _valid_model_choice(model_name)
+        if requested and requested != profile.model:
+            raise ModelProviderConfigurationError(
+                f"详细报告选择 DeepSeek 时只能使用 {profile.model}。")
+        return profile, _runtime_with_single_model(runtime, profile.model)
+
+    if selected_provider == "qwen":
+        runtime = resolve_model_runtime("qwen", environment)
+        requested = _valid_model_choice(model_name) or runtime.smart_model
+        return profile, _runtime_with_single_model(runtime, requested)
+
+    raise ModelProviderConfigurationError(
+        "详细报告的大模型请选择 DeepSeek V4 Pro 或千问模型。")
+
+
 def get_model_provider_catalog(environment=None) -> Dict[str, Any]:
     """Return the frontend model catalog with availability, never API keys."""
+    environment = os.environ if environment is None else environment
+    deepseek_runtime = resolve_model_runtime("deepseek", environment)
+    qwen_runtime = resolve_model_runtime("qwen", environment)
+    brief_profile = profile_with_environment_model(
+        resolve_report_detail_profile("brief"), environment)
+    detailed_profile = profile_with_environment_model(
+        resolve_report_detail_profile("detailed"), environment)
     return {
         "default": "deepseek",
         "providers": [
-            resolve_model_runtime("deepseek", environment).public_metadata(),
-            resolve_model_runtime("qwen", environment).public_metadata(),
+            deepseek_runtime.public_metadata(),
+            qwen_runtime.public_metadata(),
+        ],
+        "report_details": report_detail_catalog(environment),
+        "generation_models": [
+            {
+                "id": f"deepseek:{brief_profile.model}",
+                "provider_id": "deepseek",
+                "provider_name": deepseek_runtime.provider_name,
+                "name": "DeepSeek Chat",
+                "model": brief_profile.model,
+                "report_details": ["brief"],
+                "configured": deepseek_runtime.configured,
+            },
+            {
+                "id": f"deepseek:{detailed_profile.model}",
+                "provider_id": "deepseek",
+                "provider_name": deepseek_runtime.provider_name,
+                "name": "DeepSeek V4 Pro",
+                "model": detailed_profile.model,
+                "report_details": ["detailed"],
+                "configured": deepseek_runtime.configured,
+            },
+            *[
+                {
+                    "id": f"qwen:{model}",
+                    "provider_id": "qwen",
+                    "provider_name": qwen_runtime.provider_name,
+                    "name": f"千问 {model}",
+                    "model": model,
+                    "report_details": ["detailed"],
+                    "configured": qwen_runtime.configured,
+                }
+                for model in qwen_model_choices(environment)
+            ],
         ],
     }
 
@@ -277,6 +404,8 @@ def clear_report_progress(task_id: str) -> None:
 class ThreeAgentRequestData:
     task: str
     llm_provider: str = "deepseek"
+    llm_model: Optional[str] = None
+    report_detail: Optional[str] = None
     report_source: str = "web"
     tone: str = "objective"
     query_domains: Optional[List[str]] = None
@@ -301,14 +430,19 @@ class ThreeAgentService:
 
     def __init__(self, request: ThreeAgentRequestData):
         self.request = request
-        self.model_runtime = resolve_model_runtime(request.llm_provider)
+        self.detail_profile: Optional[ReportDetailProfile] = None
+        if request.report_detail:
+            self.detail_profile, self.model_runtime = resolve_report_detail_model_runtime(
+                request.report_detail, request.llm_provider, request.llm_model)
+        else:
+            self.model_runtime = resolve_model_runtime(request.llm_provider)
         if self.model_runtime.provider_id == "qwen" and not self.model_runtime.configured:
             raise ModelProviderConfigurationError(
                 "千问尚未配置。请在 .env 中设置 DASHSCOPE_API_KEY 后重启工作台。")
         supplied_task_id = (request.client_task_id or "").strip()
         self.task_id = supplied_task_id[:128] or f"report-{uuid.uuid4().hex}"
         initialize_report_progress(
-            self.task_id, request.task, max_rounds=report_editor_max_rounds())
+            self.task_id, request.task, max_rounds=self.effective_max_review_rounds())
         self.trace: List[Dict[str, str]] = []
         self.local_doc_path: Optional[str] = None
         self.selected_local_papers: List[SelectedLocalPaper] = []
@@ -327,6 +461,11 @@ class ThreeAgentService:
             request.source_categories,
         )
         self.expanded_task_query = build_demand_query(request.task, self.demand_profile)
+
+    def effective_max_review_rounds(self) -> int:
+        if self.detail_profile is not None:
+            return self.detail_profile.max_review_rounds
+        return report_editor_max_rounds()
 
     def _active_model_runtime(self) -> ModelRuntime:
         """Refresh a previously unavailable default runtime for test/late-loaded envs."""
@@ -950,7 +1089,11 @@ class ThreeAgentService:
     def planner_agent(self) -> List[str]:
         task = self.request.task.strip()
         domains = self.effective_query_domains()
-        max_topics = 6 if self.request.report_type == "detailed_report" else 4
+        max_topics = (
+            self.detail_profile.max_topics
+            if self.detail_profile is not None
+            else 6 if self.request.report_type == "detailed_report" else 4
+        )
         subtopics = build_planner_subtopics(task, self.demand_profile, domains, max_topics=max_topics)
         self._log(
             "Planner Agent",
@@ -1005,7 +1148,11 @@ class ThreeAgentService:
             try:
                 model_name = runtime.smart_model
                 client = self._model_client()
-                default_output_tokens = "32768" if model_name.startswith("deepseek-v4-") else "8192"
+                default_output_tokens = str(
+                    self.detail_profile.writer_max_tokens
+                    if self.detail_profile is not None
+                    else 32768 if model_name.startswith("deepseek-v4-") else 8192
+                )
                 output_tokens = max(1024, int(os.getenv("REPORT_WRITER_MAX_TOKENS", default_output_tokens)))
 
                 section_text = "\n\n".join(
@@ -1034,7 +1181,14 @@ class ThreeAgentService:
                     ]
                 ) or "未启用源站模板。"
                 image_candidate_text = self._format_report_image_candidates()
-                packed = pack_evidence(sections, budget=24000 if self.request.report_type == "detailed_report" else 18000)
+                packed = pack_evidence(
+                    sections,
+                    budget=(
+                        self.detail_profile.evidence_budget
+                        if self.detail_profile is not None
+                        else 24000 if self.request.report_type == "detailed_report" else 18000
+                    ),
+                )
                 self.content_enrichment["evidence_pack"] = {key: value for key, value in packed.items() if key != "text"}
 
                 prompt = build_writer_prompt(
@@ -1043,6 +1197,7 @@ class ThreeAgentService:
                     sources_text=selected_source_text, demand_text=matched_topic_text,
                     source_template_text=source_template_text,
                     image_text=image_candidate_text, sections_text=section_text,
+                    detail_profile=self.detail_profile,
                     evidence_text=(pack_sources(self.source_catalog, self.request.task, budget=50000)
                                    or packed["text"]),
                     method_context=(
@@ -1074,7 +1229,8 @@ class ThreeAgentService:
                         self.generation_warning = "模型未完整结束正文输出，已保存现有内容为草稿，请重新生成或人工续写。"
                         self._log("Writer Agent", self.generation_warning)
                         return content
-                    self.content_review = review_content(content, self.request.report_type)
+                    self.content_review = review_content(
+                        content, self.request.report_type, detail_profile=self.detail_profile)
                     if self.content_review["needs_enrichment"] and any(item.get("draft", "").strip() for item in sections):
                         self.content_enrichment["attempted"] = True
                         self.content_enrichment["before"] = self.content_review
@@ -1099,7 +1255,8 @@ class ThreeAgentService:
                         except Exception as exc:
                             self.content_enrichment["reason"] = "补充写作失败，保留已有完整正文。"
                             self._log("Writer Agent", f"{self.content_enrichment['reason']} 原因: {exc}")
-                        self.content_review = review_content(content, self.request.report_type)
+                        self.content_review = review_content(
+                            content, self.request.report_type, detail_profile=self.detail_profile)
                     self.generation_status = "ready"
                     self._log("Writer Agent", "研究报告正文已生成，正在进行结构与证据检查。")
                     return content
@@ -1140,7 +1297,12 @@ class ThreeAgentService:
             self.editorial_review = {"status":"incomplete", "passed":False, "reason":"成稿审校模型不可用"}
             return report
         model_name = runtime.smart_model
-        output_tokens = max(1024, int(os.getenv("REPORT_WRITER_MAX_TOKENS", "32768" if model_name.startswith("deepseek-v4-") else "8192")))
+        default_output_tokens = str(
+            self.detail_profile.writer_max_tokens
+            if self.detail_profile is not None
+            else 32768 if model_name.startswith("deepseek-v4-") else 8192
+        )
+        output_tokens = max(1024, int(os.getenv("REPORT_WRITER_MAX_TOKENS", default_output_tokens)))
         async with self._model_client(timeout=600.0, max_retries=1) as client:
             async def complete(prompt, stage):
                 response = await client.chat.completions.create(
@@ -1159,7 +1321,7 @@ class ThreeAgentService:
                 images=self.report_images, method_context=self.editorial_method_context(),
                 complete=complete, log=self._log,
                 previous_audit=previous_audit,
-                max_rounds=report_editor_max_rounds(),
+                max_rounds=self.effective_max_review_rounds(),
             )
         return report
 
@@ -1169,7 +1331,13 @@ class ThreeAgentService:
         self.started_at = started_at
         started_perf = time.perf_counter()
         runtime = self._active_model_runtime()
-        self._log("System", f"本任务使用生成模型：{runtime.provider_name}（{runtime.smart_model}）。")
+        if self.detail_profile is not None:
+            self._log(
+                "System",
+                f"本任务选择{self.detail_profile.label}，使用生成模型：{runtime.provider_name}（{runtime.smart_model}）。",
+            )
+        else:
+            self._log("System", f"本任务使用生成模型：{runtime.provider_name}（{runtime.smart_model}）。")
         await self.pre_search_abstracts()
         subtopics = self.planner_agent()
         sections = await self.research_agent(subtopics)
@@ -1221,6 +1389,7 @@ class ThreeAgentService:
             "run_id": run_id,
             "task": self.request.task,
             "model_provider": runtime.public_metadata(),
+            "report_detail": self.detail_profile.public_metadata() if self.detail_profile else None,
             "report_source": self.search_scope_label(),
             "effective_report_source": self.effective_report_source(),
             "search_scopes": sorted(self.selected_search_scopes()),
@@ -1276,12 +1445,17 @@ class ThreeAgentService:
                 "generation_status": self.generation_status,
                 "generation_warning": self.generation_warning,
                 "search_scope": self.search_scope_label(), "retrieved_at": started_at,
-                "include_toc": self.request.report_type == "detailed_report",
+                "include_toc": (
+                    self.detail_profile.include_toc
+                    if self.detail_profile is not None
+                    else self.request.report_type == "detailed_report"
+                ),
             },
         )
         final_report = prepared.markdown
         report_quality = prepared.quality
-        self.content_review = review_content(audit_report, self.request.report_type)
+        self.content_review = review_content(
+            audit_report, self.request.report_type, detail_profile=self.detail_profile)
         report_quality["content_depth"] = self.content_review
         report_quality["editorial_review"] = {
             "status":self.editorial_review.get("status"), "passed":self.editorial_review.get("passed", False),
@@ -1306,6 +1480,7 @@ class ThreeAgentService:
         run_stats.update({
             "record_version": "2.0.0", "report_format": "academic-report-v1",
             "report_type": self.request.report_type,
+            "report_detail": self.detail_profile.public_metadata() if self.detail_profile else None,
             "report_quality": report_quality, "citation_map": prepared.citation_map,
             "verification_notes": prepared.verification_notes,
             "evidence_report": audit_report,

@@ -53,6 +53,64 @@ class ModelProviderSelectionTests(unittest.TestCase):
         self.assertEqual(runtime.strategic_model, "qwen-plus")
         self.assertEqual(runtime.base_url, "https://dashscope.aliyuncs.com/compatible-mode/v1")
 
+    def test_report_detail_profiles_select_required_deepseek_models(self):
+        from three_agent_service import resolve_report_detail_model_runtime
+
+        brief, brief_runtime = resolve_report_detail_model_runtime("brief", {
+            "OPENAI_API_KEY": "deep-secret",
+            "SMART_LLM": "openai:some-other-model",
+        })
+        detailed, detailed_runtime = resolve_report_detail_model_runtime("detailed", {
+            "OPENAI_API_KEY": "deep-secret",
+            "SMART_LLM": "openai:deepseek-chat",
+        })
+
+        self.assertEqual(brief.label, "短报告")
+        self.assertEqual(brief_runtime.provider_id, "deepseek")
+        self.assertEqual(brief_runtime.smart_model, "deepseek-chat")
+        self.assertEqual(brief_runtime.fast_model, "deepseek-chat")
+        self.assertEqual(brief.max_topics, detailed.max_topics)
+        self.assertEqual(brief.evidence_budget, detailed.evidence_budget)
+        self.assertEqual(brief.writer_max_tokens, detailed.writer_max_tokens)
+        self.assertEqual(brief.max_review_rounds, detailed.max_review_rounds)
+        self.assertEqual(detailed.label, "详细报告")
+        self.assertEqual(detailed_runtime.smart_model, "deepseek-v4-pro")
+        self.assertEqual(detailed_runtime.strategic_model, "deepseek-v4-pro")
+
+    def test_report_detail_overrides_frontend_provider_to_deepseek(self):
+        from three_agent_service import ThreeAgentRequestData, ThreeAgentService
+
+        with patch.dict("os.environ", {"OPENAI_API_KEY": "deep-secret"}, clear=True):
+            service = ThreeAgentService(ThreeAgentRequestData(
+                task="GTF",
+                llm_provider="qwen",
+                report_detail="brief",
+            ))
+
+        self.assertEqual(service.model_runtime.provider_id, "deepseek")
+        self.assertEqual(service.model_runtime.smart_model, "deepseek-chat")
+        self.assertEqual(service.detail_profile.id, "brief")
+
+    def test_detailed_report_can_select_qwen_model(self):
+        from three_agent_service import ThreeAgentRequestData, ThreeAgentService
+
+        with patch.dict("os.environ", {
+            "OPENAI_API_KEY": "deep-secret",
+            "DASHSCOPE_API_KEY": "qwen-secret",
+            "QWEN_AVAILABLE_MODELS": "qwen-plus,qwen-max",
+        }, clear=True):
+            service = ThreeAgentService(ThreeAgentRequestData(
+                task="GTF",
+                llm_provider="qwen",
+                llm_model="qwen-max",
+                report_detail="detailed",
+            ))
+
+        self.assertEqual(service.model_runtime.provider_id, "qwen")
+        self.assertEqual(service.model_runtime.smart_model, "qwen-max")
+        self.assertEqual(service.model_runtime.fast_model, "qwen-max")
+        self.assertEqual(service.detail_profile.id, "detailed")
+
     def test_missing_qwen_key_and_unknown_provider_are_rejected(self):
         from three_agent_service import (
             ModelProviderConfigurationError,
@@ -263,10 +321,16 @@ class ModelProviderSelectionTests(unittest.TestCase):
         script = (project / "frontend/scripts.js").read_text(encoding="utf-8")
 
         self.assertIn('id="llmProviderSelect"', html)
-        self.assertIn('value="deepseek"', html)
-        self.assertIn('value="qwen"', html)
+        self.assertIn('id="reportDetailSelect"', html)
+        self.assertIn('value="brief"', html)
+        self.assertIn('value="detailed"', html)
+        self.assertIn('value="deepseek:deepseek-chat"', html)
         self.assertIn("/api/model-providers", script)
         self.assertIn("llm_provider:", script)
+        self.assertIn("llm_model:", script)
+        self.assertIn("report_detail:", script)
+        self.assertIn("deepseek-v4-pro", script)
+        self.assertIn("generation_models", script)
 
 
 if __name__ == "__main__":

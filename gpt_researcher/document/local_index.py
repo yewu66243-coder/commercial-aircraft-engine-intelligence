@@ -690,10 +690,25 @@ def _load_index(index_path: Path) -> list[dict[str, Any]]:
 
 
 def _resolve_paper_path(paper: dict[str, Any], pool_files: list[Path]) -> Path | None:
+    source_path = str(paper.get("source_path") or "").strip()
+    if source_path:
+        candidate = Path(source_path)
+        if candidate.exists() and candidate.is_file():
+            return candidate
+
     requested_name = str(paper.get("file_name") or "").strip()
+    relative_path = str(paper.get("relative_path") or "").replace("\\", "/").strip()
     title = str(paper.get("title") or "").strip()
     if not requested_name and title:
         requested_name = f"{title}.pdf"
+
+    if relative_path:
+        for path in pool_files:
+            try:
+                if path.as_posix().lower().endswith(relative_path.lower()):
+                    return path
+            except Exception:
+                continue
 
     by_lower_name = {path.name.lower(): path for path in pool_files}
     exact = by_lower_name.get(requested_name.lower())
@@ -799,7 +814,7 @@ def _select_index_documents(
 
     pool_files = [
         path
-        for path in pool_dir.iterdir()
+        for path in pool_dir.rglob("*")
         if path.is_file() and path.suffix.lower() in SUPPORTED_EXTENSIONS
     ]
     selected: list[SelectedLocalPaper] = []
@@ -824,6 +839,9 @@ def _select_index_documents(
             source_path = destination
         else:
             destination = selected_dir / source_path.name
+            if destination.exists() and source_path.resolve() != destination.resolve():
+                digest = hashlib.md5(str(source_path).encode("utf-8")).hexdigest()[:8]
+                destination = selected_dir / f"{source_path.stem}_{digest}{source_path.suffix}"
             if not destination.exists():
                 shutil.copy2(source_path, destination)
         selected.append(

@@ -66,6 +66,19 @@
                             </select>
                         </div>
                         <div>
+                            <label for="reportDetailSelect">报告长短</label>
+                            <select id="reportDetailSelect" name="report_detail">
+                                <option value="brief" selected>短报告（DeepSeek Chat）</option>
+                                <option value="detailed">详细报告（DeepSeek V4 Pro）</option>
+                            </select>
+                        </div>
+                    </div>
+                    <div class="form-row">
+                        <div>
+                            <label for="maxSearchResults">精读/抓取上限</label>
+                            <input type="number" id="maxSearchResults" name="max_search_results" min="1" max="20" value="5" />
+                        </div>
+                        <div>
                             <label>检索范围</label>
                             <details class="scope-dropdown" id="scopeDropdown">
                                 <summary id="scopeSummary">论文库、专利池、用户资料、Web</summary>
@@ -81,14 +94,9 @@
                     </div>
                     <div class="form-row model-settings-row">
                         <div>
-                            <label for="maxSearchResults">精读/抓取上限</label>
-                            <input type="number" id="maxSearchResults" name="max_search_results" min="1" max="20" value="5" />
-                        </div>
-                        <div>
                             <label for="llmProviderSelect">生成大模型</label>
                             <select id="llmProviderSelect" name="llm_provider">
-                                <option value="deepseek" selected>DeepSeek</option>
-                                <option value="qwen">千问（Qwen Plus）</option>
+                                <option value="deepseek:deepseek-chat" selected>DeepSeek Chat</option>
                             </select>
                             <p class="hint-text model-provider-status" id="modelProviderStatus">正在读取模型配置…</p>
                         </div>
@@ -173,9 +181,9 @@
                         <div class="coverage-card"><span>优先网址</span><b id="domainCoverage">--</b><div class="progress-line"><i id="domainCoverageBar" style="width:0"></i></div></div>
                     </div>
                     <div class="bar-chart">
-                        <div class="bar"><span>适航安全</span><div><i style="width:86%"></i></div><strong>86</strong></div>
-                        <div class="bar"><span>FADEC</span><div><i style="width:78%"></i></div><strong>78</strong></div>
-                        <div class="bar"><span>维修保障</span><div><i style="width:62%"></i></div><strong>62</strong></div>
+                        <div class="bar" id="airworthinessCoverageRow"><span>适航安全</span><div><i id="airworthinessCoverageBar" style="width:0"></i></div><strong id="airworthinessCoverageScore">--</strong></div>
+                        <div class="bar" id="fadecCoverageRow"><span>FADEC</span><div><i id="fadecCoverageBar" style="width:0"></i></div><strong id="fadecCoverageScore">--</strong></div>
+                        <div class="bar" id="maintenanceCoverageRow"><span>维修保障</span><div><i id="maintenanceCoverageBar" style="width:0"></i></div><strong id="maintenanceCoverageScore">--</strong></div>
                     </div>
                 </section>
             </section>

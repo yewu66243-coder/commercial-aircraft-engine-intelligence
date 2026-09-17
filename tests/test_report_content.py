@@ -121,6 +121,14 @@ class ContentReviewTests(unittest.TestCase):
         self.assertEqual(len(topics), 6)
         self.assertIn('主题5', topics[-1])
 
+    def test_brief_report_detail_keeps_full_planner_topics(self):
+        from three_agent_service import ThreeAgentRequestData, ThreeAgentService
+        service = ThreeAgentService(ThreeAgentRequestData(task='GTF技术和市场', report_detail='brief'))
+        service.demand_profile = {'matched_topics': [{'name': f'主题{i}', 'priority_questions': [f'问题{i}']} for i in range(8)]}
+        topics = service.planner_agent()
+        self.assertEqual(len(topics), 6)
+        self.assertIn('主题5', topics[-1])
+
     def test_research_returns_context_and_sources_for_synthesis(self):
         from three_agent_service import ThreeAgentRequestData, ThreeAgentService
         researcher = SimpleNamespace(cfg=SimpleNamespace(), conduct_research=AsyncMock(),

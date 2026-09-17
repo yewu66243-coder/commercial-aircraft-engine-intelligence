@@ -40,6 +40,7 @@ const GPTResearcher = (() => {
     patents: []
   };
   let localLibraryStatsCache = {};
+  let coverageRefreshTimer = null;
   let intelligenceTemplateCache = {
     demand_models: [],
     task_templates: [],
@@ -51,22 +52,92 @@ const GPTResearcher = (() => {
       { id: 'deepseek', name: 'DeepSeek', model: 'deepseek-chat', configured: true },
       { id: 'qwen', name: '千问', model: 'qwen-plus', configured: null },
     ],
+    report_details: [
+      { id: 'brief', label: '短报告', model: 'deepseek-chat' },
+      { id: 'detailed', label: '详细报告', model: 'deepseek-v4-pro' },
+    ],
+    generation_models: [
+      { id: 'deepseek:deepseek-chat', provider_id: 'deepseek', provider_name: 'DeepSeek', name: 'DeepSeek Chat', model: 'deepseek-chat', report_details: ['brief'], configured: true },
+      { id: 'deepseek:deepseek-v4-pro', provider_id: 'deepseek', provider_name: 'DeepSeek', name: 'DeepSeek V4 Pro', model: 'deepseek-v4-pro', report_details: ['detailed'], configured: true },
+      { id: 'qwen:qwen-plus', provider_id: 'qwen', provider_name: '千问', name: '千问 qwen-plus', model: 'qwen-plus', report_details: ['detailed'], configured: null },
+    ],
+  };
+
+  const reportDetailFallbacks = {
+    brief: { id: 'brief', label: '短报告', model: 'deepseek-chat' },
+    detailed: { id: 'detailed', label: '详细报告', model: 'deepseek-v4-pro' },
+  };
+
+  const selectedReportDetail = () => {
+    const value = document.getElementById('reportDetailSelect')?.value || 'brief';
+    return (modelProviderCatalog.report_details || []).find(item => item.id === value)
+      || reportDetailFallbacks[value]
+      || reportDetailFallbacks.brief;
   };
 
   const selectedModelProvider = () => {
     const select = document.getElementById('llmProviderSelect');
+    const selectedModel = selectedGenerationModel();
+    if (selectedModel) {
+      return modelProviderCatalog.providers.find(item => item.id === selectedModel.provider_id);
+    }
     return modelProviderCatalog.providers.find(item => item.id === select?.value);
   };
 
+  const selectedGenerationModel = () => {
+    const select = document.getElementById('llmProviderSelect');
+    return (modelProviderCatalog.generation_models || []).find(item => item.id === select?.value);
+  };
+
+  const modelChoiceFallbacks = {
+    brief: [
+      { id: 'deepseek:deepseek-chat', provider_id: 'deepseek', provider_name: 'DeepSeek', name: 'DeepSeek Chat', model: 'deepseek-chat', report_details: ['brief'], configured: true },
+    ],
+    detailed: [
+      { id: 'deepseek:deepseek-v4-pro', provider_id: 'deepseek', provider_name: 'DeepSeek', name: 'DeepSeek V4 Pro', model: 'deepseek-v4-pro', report_details: ['detailed'], configured: true },
+      { id: 'qwen:qwen-plus', provider_id: 'qwen', provider_name: '千问', name: '千问 qwen-plus', model: 'qwen-plus', report_details: ['detailed'], configured: null },
+    ],
+  };
+
+  const modelChoicesForDetail = (detailId) => {
+    const choices = (modelProviderCatalog.generation_models || [])
+      .filter(item => Array.isArray(item.report_details) && item.report_details.includes(detailId));
+    return choices.length ? choices : (modelChoiceFallbacks[detailId] || modelChoiceFallbacks.brief);
+  };
+
+  const syncReportDetailModel = () => {
+    const select = document.getElementById('llmProviderSelect');
+    if (select) {
+      const detail = selectedReportDetail();
+      const choices = modelChoicesForDetail(detail.id);
+      const previous = select.value;
+      select.innerHTML = '';
+      choices.forEach((item) => {
+        const option = document.createElement('option');
+        option.value = item.id;
+        option.textContent = `${item.name}（${item.model}）${item.configured === false ? ' · 未配置' : ''}`;
+        option.dataset.provider = item.provider_id;
+        option.dataset.model = item.model;
+        option.dataset.configured = String(Boolean(item.configured));
+        select.appendChild(option);
+      });
+      select.value = choices.some(item => item.id === previous) ? previous : choices[0]?.id;
+      select.disabled = choices.length <= 1;
+    }
+    updateModelProviderStatus();
+  };
+
   const updateModelProviderStatus = () => {
+    const detail = selectedReportDetail();
+    const selectedModel = selectedGenerationModel();
     const provider = selectedModelProvider();
     const status = document.getElementById('modelProviderStatus');
-    if (!provider || !status) return;
-    const credentialName = provider.id === 'qwen' ? 'DASHSCOPE_API_KEY' : 'OPENAI_API_KEY';
-    status.textContent = provider.configured === false
-      ? `${provider.name} 尚未配置，请先设置 ${credentialName}。`
-      : `${provider.name} · ${provider.model}${provider.configured === true ? ' · 已就绪' : ''}`;
-    status.dataset.state = provider.configured === false ? 'unavailable' : 'ready';
+    if (!selectedModel || !status) return;
+    const credentialName = selectedModel.provider_id === 'qwen' ? 'DASHSCOPE_API_KEY' : 'OPENAI_API_KEY';
+    status.textContent = selectedModel.configured === false
+      ? `${selectedModel.name} 尚未配置，请先设置 ${credentialName}。`
+      : `${detail.label} · ${selectedModel.provider_name || provider?.name || selectedModel.provider_id} · ${selectedModel.model}${selectedModel.configured === true ? ' · 已就绪' : ''}`;
+    status.dataset.state = selectedModel.configured === false ? 'unavailable' : 'ready';
   };
 
   const loadModelProviders = async () => {
@@ -79,21 +150,11 @@ const GPTResearcher = (() => {
       const catalog = await response.json();
       if (!Array.isArray(catalog.providers) || !catalog.providers.length) return;
       modelProviderCatalog = catalog;
-      select.innerHTML = '';
-      catalog.providers.forEach(provider => {
-        const option = document.createElement('option');
-        option.value = provider.id;
-        option.textContent = `${provider.name}（${provider.model}）${provider.configured ? '' : ' · 未配置'}`;
-        option.dataset.configured = String(Boolean(provider.configured));
-        select.appendChild(option);
-      });
-      select.value = catalog.providers.some(item => item.id === previous)
-        ? previous
-        : (catalog.default || 'deepseek');
+      select.value = previous;
     } catch (error) {
       console.warn('Unable to load model provider catalog:', error);
     } finally {
-      updateModelProviderStatus();
+      syncReportDetailModel();
     }
   };
 
@@ -300,7 +361,8 @@ const GPTResearcher = (() => {
 
     // Load request-scoped report model choices and availability.
     loadModelProviders();
-    document.getElementById('llmProviderSelect')?.addEventListener('change', updateModelProviderStatus);
+    document.getElementById('llmProviderSelect')?.addEventListener('change', syncReportDetailModel);
+    document.getElementById('reportDetailSelect')?.addEventListener('change', syncReportDetailModel);
 
     // Initialize MCP functionality
     initMCPSection();
@@ -1225,7 +1287,7 @@ const GPTResearcher = (() => {
       hiddenReportSource.value = deriveReportSourceFromScopes();
     }
     updateScopeSummary();
-    setText('domainCoverage', getSelectedSearchScopes().includes('web') ? `${getSelectedDomains().length} 个` : '未启用');
+    updateCoverageMetrics();
   };
 
   const setText = (id, value) => {
@@ -1236,6 +1298,176 @@ const GPTResearcher = (() => {
   const setBarWidth = (id, value) => {
     const element = document.getElementById(id);
     if (element) element.style.width = `${Math.max(0, Math.min(100, value))}%`;
+  };
+
+  const setTitle = (id, value) => {
+    const element = document.getElementById(id);
+    if (element) element.title = value;
+  };
+
+  const ratioPercent = (part, total) => {
+    const denominator = Number(total || 0);
+    if (!denominator) return 0;
+    return Math.round((Number(part || 0) / denominator) * 100);
+  };
+
+  const coverageTopicSlots = [
+    {
+      barId: 'airworthinessCoverageBar',
+      scoreId: 'airworthinessCoverageScore',
+      rowId: 'airworthinessCoverageRow',
+    },
+    {
+      barId: 'fadecCoverageBar',
+      scoreId: 'fadecCoverageScore',
+      rowId: 'fadecCoverageRow',
+    },
+    {
+      barId: 'maintenanceCoverageBar',
+      scoreId: 'maintenanceCoverageScore',
+      rowId: 'maintenanceCoverageRow',
+    }
+  ];
+
+  const coverageTopicProfiles = [
+    {
+      id: 'airworthiness',
+      label: '适航安全',
+      terms: ['适航', '审定', '取证', '认证', '安全性', 'ccar', 'faa', 'easa', 'caac', 'airworthiness', 'certification', 'directive'],
+      defaultRank: 3
+    },
+    {
+      id: 'fadec',
+      label: 'FADEC',
+      terms: ['fadec', '发动机控制', '全权限数字', '数字电子控制', '控制系统', '控制律', '燃油控制', 'engine control', 'digital electronic control'],
+      defaultRank: 2
+    },
+    {
+      id: 'maintenance',
+      label: '维修保障',
+      terms: ['维修', '维护', '大修', '检修', '保障', '售后', 'mro', 'maintenance', 'overhaul', 'shop visit', '在翼'],
+      defaultRank: 1
+    },
+    {
+      id: 'performance',
+      label: '性能设计',
+      terms: ['性能', '推力', '油耗', '效率', '排放', '构型', '冷却', '燃烧', '压气机', '涡轮', 'performance', 'efficiency', 'emission', 'cooling'],
+      defaultRank: 0
+    },
+    {
+      id: 'material',
+      label: '材料制造',
+      terms: ['材料', '制造', '粉末', '涂层', '增材', '高温合金', '复合材料', '工艺', 'manufacturing', 'material', 'powder', 'coating'],
+      defaultRank: 0
+    },
+    {
+      id: 'market',
+      label: '市场供应',
+      terms: ['市场', '供应链', '交付', '订单', '产能', '短缺', '售后市场', '机队', 'market', 'supply chain', 'delivery', 'fleet'],
+      defaultRank: 0
+    },
+    {
+      id: 'patent',
+      label: '专利布局',
+      terms: ['专利', '知识产权', '申请人', '发明人', '技术布局', 'patent', 'intellectual property'],
+      defaultRank: 0
+    }
+  ];
+
+  const librarySearchText = (item) => [
+    item?.title,
+    item?.file_name,
+    item?.relative_path,
+    item?.abstract,
+    item?.keywords,
+    item?.source_library,
+    item?.category,
+    item?.subcategory,
+    item?.applicant,
+    item?.author,
+  ].join(' ').toLowerCase();
+
+  const enabledLocalCoverageDocs = (scopes = getSelectedSearchScopes()) => {
+    const docs = [];
+    if (scopes.includes('papers')) docs.push(...(localLibraryCache.papers || []));
+    if (scopes.includes('patents')) docs.push(...(localLibraryCache.patents || []));
+    if (scopes.includes('user_docs')) docs.push(...(localLibraryCache.user_docs || []));
+    return docs;
+  };
+
+  const updateTopicCoverage = (scopes = getSelectedSearchScopes()) => {
+    const docs = enabledLocalCoverageDocs(scopes);
+    const taskText = (document.getElementById('task')?.value || '').toLowerCase();
+    const allScores = coverageTopicProfiles.map((profile) => {
+      const count = docs.reduce((total, item) => {
+        const haystack = librarySearchText(item);
+        return total + (profile.terms.some((term) => haystack.includes(term.toLowerCase())) ? 1 : 0);
+      }, 0);
+      const taskHits = profile.terms.reduce((total, term) => total + (taskText.includes(term.toLowerCase()) ? 1 : 0), 0);
+      return { ...profile, count, taskHits };
+    });
+    const hasTaskTopic = allScores.some((item) => item.taskHits > 0);
+    const scores = allScores.sort((a, b) => {
+      if (b.taskHits !== a.taskHits) return b.taskHits - a.taskHits;
+      if (!hasTaskTopic && (b.defaultRank || 0) !== (a.defaultRank || 0)) {
+        return (b.defaultRank || 0) - (a.defaultRank || 0);
+      }
+      if (b.count !== a.count) return b.count - a.count;
+      return (b.defaultRank || 0) - (a.defaultRank || 0);
+    }).slice(0, coverageTopicSlots.length);
+    const maxCount = Math.max(...scores.map((item) => item.count), 1);
+    scores.forEach((item, index) => {
+      const slot = coverageTopicSlots[index];
+      const width = docs.length ? (item.count / maxCount) * 100 : 0;
+      const row = document.getElementById(slot.rowId);
+      const label = row?.querySelector('span');
+      if (label) label.textContent = item.label;
+      setText(slot.scoreId, String(item.count));
+      setBarWidth(slot.barId, width);
+      setTitle(
+        slot.rowId,
+        `${item.label}：在当前启用的本地索引中命中 ${item.count} 条；条形长度按本组最高命中数归一化。`
+      );
+    });
+  };
+
+  const scheduleCoverageMetricsUpdate = () => {
+    if (coverageRefreshTimer) clearTimeout(coverageRefreshTimer);
+    coverageRefreshTimer = setTimeout(updateCoverageMetrics, 120);
+  };
+
+  const updateCoverageMetrics = () => {
+    const stats = localLibraryStatsCache || {};
+    const scopes = getSelectedSearchScopes();
+    const userCount = stats.user_docs_count || 0;
+    const paperCount = stats.papers_count || 0;
+    const patentCount = stats.patent_records_count || stats.patents_count || 0;
+    const selectedDomains = getSelectedDomains().length;
+    const totalDomainOptions = document.querySelectorAll('.domain-cb').length;
+
+    const paperIndexPercent = ratioPercent(stats.paper_index_count || 0, paperCount);
+    const patentIndexPercent = ratioPercent(stats.patent_index_count || 0, patentCount);
+    const userIndexPercent = ratioPercent(stats.user_index_count || 0, userCount);
+    const domainPercent = totalDomainOptions ? ratioPercent(selectedDomains, totalDomainOptions) : Math.min(selectedDomains * 25, 100);
+
+    setText('paperCoverage', scopes.includes('papers') ? `${paperCount} 篇` : '未启用');
+    setText('patentCoverage', scopes.includes('patents') ? `${patentCount} 条` : '未启用');
+    setText('userCoverage', scopes.includes('user_docs') ? `${userCount} 份` : '未启用');
+    setText('domainCoverage', scopes.includes('web') ? `${selectedDomains} 个` : '未启用');
+
+    setBarWidth('paperCoverageBar', scopes.includes('papers') ? paperIndexPercent : 0);
+    setBarWidth('patentCoverageBar', scopes.includes('patents') ? patentIndexPercent : 0);
+    setBarWidth('userCoverageBar', scopes.includes('user_docs') ? userIndexPercent : 0);
+    setBarWidth('domainCoverageBar', scopes.includes('web') ? domainPercent : 0);
+
+    setTitle('paperCoverageBar', `本地论文库索引覆盖率：${stats.paper_index_count || 0}/${paperCount}`);
+    setTitle('patentCoverageBar', `本地专利池索引覆盖率：${stats.patent_index_count || 0}/${patentCount}`);
+    setTitle('userCoverageBar', `用户资料库索引覆盖率：${stats.user_index_count || 0}/${userCount}`);
+    setTitle('domainCoverageBar', totalDomainOptions
+      ? `已勾选优先网址：${selectedDomains}/${totalDomainOptions}`
+      : `已勾选优先网址：${selectedDomains}`);
+
+    updateTopicCoverage(scopes);
   };
 
   const formatFileSize = (size) => {
@@ -1523,18 +1755,25 @@ const GPTResearcher = (() => {
       return;
     }
 
-    container.innerHTML = visibleFiles.map((file) => `
+    container.innerHTML = visibleFiles.map((file) => {
+      const filePath = file.file_path || file.relative_path || file.file_name || '';
+      const displayName = file.file_name || file.title || '未命名文件';
+      const pathHint = file.relative_path && file.relative_path !== file.file_name
+        ? `${file.relative_path} | `
+        : '';
+      return `
       <div class="file-row">
-        <a class="file-open-btn" href="${getLocalLibraryOpenUrl(target, file.file_name || '')}" target="_blank" rel="noopener" title="打开文件">
-          <span>${escapeHtml(file.file_name || file.title || '未命名文件')}</span>
-          <small>${file.indexed ? '已索引' : '待索引'} | ${escapeHtml(file.updated_at || '-')} | ${formatFileSize(file.size)}</small>
+        <a class="file-open-btn" href="${getLocalLibraryOpenUrl(target, filePath)}" target="_blank" rel="noopener" title="打开文件">
+          <span>${escapeHtml(displayName)}</span>
+          <small>${pathHint ? escapeHtml(pathHint) : ''}${file.indexed ? '已索引' : '待索引'} | ${escapeHtml(file.updated_at || '-')} | ${formatFileSize(file.size)}</small>
         </a>
         <div class="file-actions">
           <span class="pill ${getLibraryTypeClass(target)}">${getLibraryTypeLabel(target)}</span>
-          <button class="delete-file-btn" type="button" data-target="${target}" data-file="${escapeHtml(file.file_name || '')}" title="删除">×</button>
+          <button class="delete-file-btn" type="button" data-target="${target}" data-file="${escapeHtml(filePath)}" title="删除">×</button>
         </div>
       </div>
-    `).join('');
+    `;
+    }).join('');
 
     container.querySelectorAll('.delete-file-btn').forEach((button) => {
       button.addEventListener('click', async (event) => {
@@ -1567,10 +1806,6 @@ const GPTResearcher = (() => {
     setText('patentPoolCount', patentCount);
     setText('userDocCount', userCount);
     setText('indexHealth', `${health}%`);
-    setText('paperCoverage', scopes.includes('papers') ? `${paperCount} 篇` : '未启用');
-    setText('patentCoverage', scopes.includes('patents') ? `${patentCount} 条` : '未启用');
-    setText('userCoverage', scopes.includes('user_docs') ? `${userCount} 份` : '未启用');
-    setText('domainCoverage', scopes.includes('web') ? `${getSelectedDomains().length} 个` : '未启用');
     setText('paperTypeCount', paperCount);
     setText('userTypeCount', userCount);
     setText('pendingTypeCount', pendingCount);
@@ -1581,13 +1816,10 @@ const GPTResearcher = (() => {
     setText('userIndexSummary', `${stats.user_index_count || 0} 条 | 增量更新`);
     setText('paperIndexSummary', `${stats.paper_index_count || 0} 条 | 支持上传增量`);
 
-    setBarWidth('paperCoverageBar', scopes.includes('papers') && paperCount ? 72 : 0);
-    setBarWidth('patentCoverageBar', scopes.includes('patents') && patentCount ? 70 : 0);
-    setBarWidth('userCoverageBar', scopes.includes('user_docs') && userCount ? 64 : 0);
-    setBarWidth('domainCoverageBar', scopes.includes('web') ? Math.min(getSelectedDomains().length * 25, 100) : 0);
     setBarWidth('paperTypeBar', (paperCount / total) * 100);
     setBarWidth('userTypeBar', (userCount / total) * 100);
     setBarWidth('pendingTypeBar', (pendingCount / total) * 100);
+    updateCoverageMetrics();
 
     renderFilteredLibraryLists();
   };
@@ -1655,6 +1887,7 @@ const GPTResearcher = (() => {
       const methodLabelMap = {
         cnki: 'CNKI总表匹配',
         cnki_patent_xlsx: 'CNKI专利摘要表',
+        structured_user_doc_summary: '结构化用户资料摘要',
         pdf_preview: 'PDF正文预览',
         file_preview: '文件预览',
         filename: '文件名兜底',
@@ -1706,7 +1939,6 @@ const GPTResearcher = (() => {
     const syncSelectAll = () => {
       selectAll.checked = checkboxes.every((checkbox) => checkbox.checked);
       syncReportSourceFromScopes();
-      setBarWidth('domainCoverageBar', getSelectedSearchScopes().includes('web') ? Math.min(getSelectedDomains().length * 25, 100) : 0);
     };
 
     selectAll.addEventListener('change', () => {
@@ -1835,6 +2067,8 @@ const GPTResearcher = (() => {
     if (paperPoolSearch) paperPoolSearch.addEventListener('input', renderFilteredLibraryLists);
     const patentPoolSearch = document.getElementById('patentPoolSearch');
     if (patentPoolSearch) patentPoolSearch.addEventListener('input', renderFilteredLibraryLists);
+    const taskInput = document.getElementById('task');
+    if (taskInput) taskInput.addEventListener('input', scheduleCoverageMetricsUpdate);
     loadLocalLibrary();
   };
 
@@ -1846,6 +2080,13 @@ const GPTResearcher = (() => {
     setText('paperCoverage', `${paperCount} 篇精读`);
     setText('patentCoverage', `${patentCount} 条精读`);
     setText('userCoverage', `${userCount} 份精读`);
+    const maxSelectedCount = Math.max(paperCount, patentCount, userCount, 1);
+    setBarWidth('paperCoverageBar', (paperCount / maxSelectedCount) * 100);
+    setBarWidth('patentCoverageBar', (patentCount / maxSelectedCount) * 100);
+    setBarWidth('userCoverageBar', (userCount / maxSelectedCount) * 100);
+    setTitle('paperCoverageBar', `本次任务实际精读论文：${paperCount} 篇`);
+    setTitle('patentCoverageBar', `本次任务实际精读专利：${patentCount} 条`);
+    setTitle('userCoverageBar', `本次任务实际精读用户资料：${userCount} 份`);
 
     const table = document.getElementById('evidenceTableBody');
     if (table) {
@@ -1883,10 +2124,12 @@ const startResearch = async () => {
       showToast('当前报告仍在生成，请等待完成后再提交新任务。');
       return;
     }
-    const selectedProvider = selectedModelProvider();
-    if (selectedProvider?.configured === false) {
-      const credentialName = selectedProvider.id === 'qwen' ? 'DASHSCOPE_API_KEY' : 'OPENAI_API_KEY';
-      showToast(`${selectedProvider.name} 尚未配置，请在 .env 中设置 ${credentialName} 后重启工作台。`, 5000);
+    syncReportDetailModel();
+    const selectedDetail = selectedReportDetail();
+    const selectedModel = selectedGenerationModel();
+    if (selectedModel?.configured === false) {
+      const credentialName = selectedModel.provider_id === 'qwen' ? 'DASHSCOPE_API_KEY' : 'OPENAI_API_KEY';
+      showToast(`${selectedModel.name} 尚未配置，请在 .env 中设置 ${credentialName} 后重启工作台。`, 5000);
       return;
     }
     // 1. 清理上一轮的输出痕迹
@@ -1936,7 +2179,9 @@ const startResearch = async () => {
     const searchScopes = getSelectedSearchScopes();
     const requestData = {
         task: document.getElementById('task').value,
-        llm_provider: document.getElementById('llmProviderSelect')?.value || 'deepseek',
+        llm_provider: selectedModel?.provider_id || 'deepseek',
+        llm_model: selectedModel?.model || selectedDetail.model,
+        report_detail: selectedDetail.id,
         report_type: document.getElementById('report_type').value,
         report_source: deriveReportSourceFromScopes(searchScopes),
         search_scopes: searchScopes,
@@ -1951,7 +2196,7 @@ const startResearch = async () => {
 
     requestData.query_domains = getSelectedDomains();
     addAgentResponse({
-      output: `本轮配置：模型 ${selectedProvider?.name || requestData.llm_provider}，检索范围 ${getSelectedSearchScopes().map((scope) => scopeLabelMap[scope] || scope).join('、')}，优先网址 ${requestData.query_domains.length} 个。`
+      output: `本轮配置：${selectedDetail.label}，模型 ${selectedModel?.name || 'DeepSeek'}（${requestData.llm_model}），检索范围 ${getSelectedSearchScopes().map((scope) => scopeLabelMap[scope] || scope).join('、')}，优先网址 ${requestData.query_domains.length} 个。`
     });
     addAgentResponse({
       output: '下一步：本地论文库、专利池和用户资料会先做索引筛选；Web 检索会优先访问已勾选的航空官方与高可信源站。'
@@ -1959,7 +2204,7 @@ const startResearch = async () => {
     addAgentResponse({
       output: '随后进入 3-Agent 流程：检索规划、资料精读、报告撰写、自动校订与 Word/PDF 导出。'
     });
-    setText('currentModel', `${selectedProvider?.name || requestData.llm_provider}（${selectedProvider?.model || '-'}）`);
+    setText('currentModel', `${selectedModel?.name || 'DeepSeek'}（${requestData.llm_model}）`);
     startTaskProgressPolling(requestData.client_task_id);
 
     try {
@@ -2254,10 +2499,14 @@ const startResearch = async () => {
         
       // 3. 将两者合并，并使用 Set 去重（防止用户手动填了上面已经勾选的网站）
       const query_domains = [...new Set([...checkedDomains, ...customDomains])];
+      syncReportDetailModel();
+      const selectedModel = selectedGenerationModel();
 
       const requestData = {
         task: task,
-        llm_provider: document.getElementById('llmProviderSelect')?.value || 'deepseek',
+        llm_provider: selectedModel?.provider_id || 'deepseek',
+        llm_model: selectedModel?.model || selectedReportDetail().model,
+        report_detail: selectedReportDetail().id,
         report_type: report_type,
         report_source: report_source,
         search_scopes: search_scopes,
