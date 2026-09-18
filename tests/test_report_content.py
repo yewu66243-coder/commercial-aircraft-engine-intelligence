@@ -58,6 +58,14 @@ class ContentReviewTests(unittest.TestCase):
         result=module.review_content(report().replace('[URL1]', '[URL?]', 1))
         self.assertGreater(result.get('unresolved_placeholders',0),0)
 
+    def test_unsupported_caveat_in_body_requires_revision(self):
+        module = self.module()
+        text = report() + '\n## 3 影响判断\n\n上述判断对维修保障影响较大，但这些结论的证据来源不清楚，仍需用户自行判断。\n'
+        result = module.review_content(text, 'research_report')
+        self.assertTrue(result['needs_enrichment'])
+        self.assertTrue(result['unsupported_caveat_sections'])
+        self.assertTrue(any('兜底表述' in warning for warning in result['warnings']))
+
     def test_repeated_paragraphs_do_not_count_as_substance(self):
         module = self.module()
         original = report()

@@ -111,6 +111,9 @@ class FormalPipelineTests(unittest.TestCase):
         self.assertIn('规范论文格式报告参考', prompt)
         self.assertIn('[EB/OL]', prompt)
         self.assertIn('检索记录时间2026-09-04', prompt)
+        self.assertIn('证据来源不清楚', prompt)
+        self.assertIn('证据对照矩阵', prompt)
+        self.assertIn('避免AI式套话', prompt)
         self.assertNotIn('严格为以下五部分', prompt)
 
 

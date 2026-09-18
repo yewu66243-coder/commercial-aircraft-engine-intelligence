@@ -22,7 +22,11 @@ from gpt_researcher import GPTResearcher
 # 👇 就是下面这一行，一定要确保有！
 from backend.utils import write_text_to_md, write_md_to_pdf, write_md_to_word 
 from backend.reporting.formal_report import concise_title, prepare_formal_report
-from backend.reporting.prompts import build_writer_prompt, build_enrichment_prompt
+from backend.reporting.prompts import (
+    build_writer_prompt,
+    build_enrichment_prompt,
+    build_argument_polish_prompt,
+)
 from backend.reporting.content_depth import pack_evidence, review_content, usable_revision, bind_local_source_filenames
 from backend.reporting.detail_profiles import (
     ReportDetailProfile,
@@ -303,7 +307,7 @@ _PROGRESS_STAGE = {
     "Review Agent": ("成稿校订与来源复查", 82, (3, 10)),
     "Report Formatter": ("论文式排版", 94, (2, 5)),
     "Report Format": ("论文式排版", 95, (2, 5)),
-    "System": ("导出文件", 97, (1, 3)),
+    "System": ("准备任务", 2, (15, 30)),
 }
 
 
@@ -342,6 +346,10 @@ def update_report_progress(task_id: str, agent: str, message: str, *, status: Op
         agent, (progress["stage"], progress["progress_percent"],
                 (progress["estimated_remaining_minutes"]["min"],
                  progress["estimated_remaining_minutes"]["max"])))
+    if agent == "System" and any(marker in message for marker in (
+            "正在将情报汇总导出", "报告已导出", "研究报告及全部下载文件已生成",
+            "部分格式导出失败", "草稿已保存")):
+        requested_stage, requested_percent, requested_estimate = ("导出文件", 97, (1, 3))
     if agent == "Evaluation Agent" and any(marker in message for marker in (
             "已完成引用整理与成稿校订", "正在统计运行耗时", "已抽取", "公开 URL 溯源")):
         requested_stage, requested_percent, requested_estimate = (
@@ -485,7 +493,7 @@ class ThreeAgentService:
     def _log(self, agent: str, message: str) -> None:
         self.trace.append({"agent": agent, "message": message})
         update_report_progress(self.task_id, agent, message)
-        if agent in {"Editorial Agent", "Review Agent", "Source Reader"}:
+        if agent in {"Editorial Agent", "Review Agent", "Source Reader", "Writer Agent"}:
             logging.getLogger(__name__).info("%s: %s", agent, message)
 
     def selected_search_scopes(self) -> set[str]:
@@ -1212,7 +1220,7 @@ class ThreeAgentService:
                 )
 
                 messages = [
-                    {"role": "system", "content": "你是一个严谨的中文情报报告撰写助手，必须区分有证据支撑的结论和待核验推测。"},
+                    {"role": "system", "content": "你是一个严谨的中文情报报告撰写助手。正式正文只写有证据支撑的结论；无证据或把握不足的具体断言不得写入正文，只能删除、缩窄或放入内部核验记录。"},
                     {"role": "user", "content": prompt},
                 ]
                 completion = await client.chat.completions.create(
@@ -1255,6 +1263,37 @@ class ThreeAgentService:
                         except Exception as exc:
                             self.content_enrichment["reason"] = "补充写作失败，保留已有完整正文。"
                             self._log("Writer Agent", f"{self.content_enrichment['reason']} 原因: {exc}")
+                        self.content_review = review_content(
+                            content, self.request.report_type, detail_profile=self.detail_profile)
+                    if self.detail_profile is not None:
+                        self.content_enrichment["argument_polish_attempted"] = True
+                        self._log("Writer Agent", "正在进行论证重组、证据矩阵补强与去AI味修订。")
+                        try:
+                            polished = await client.chat.completions.create(
+                                model=model_name, temperature=0, max_tokens=output_tokens,
+                                messages=messages + [
+                                    {"role": "assistant", "content": content},
+                                    {
+                                        "role": "user",
+                                        "content": build_argument_polish_prompt(
+                                            self.content_review,
+                                            detail_profile=self.detail_profile,
+                                        ),
+                                    },
+                                ],
+                            )
+                            candidate = polished.choices[0].message.content or ""
+                            candidate = bind_local_source_filenames(candidate, self.selected_local_papers)
+                            if getattr(polished.choices[0], "finish_reason", "stop") == "stop" and usable_revision(content, candidate):
+                                content = candidate
+                                self.content_enrichment["argument_polish_accepted"] = True
+                                self._log("Writer Agent", "已完成论证重组与去AI味修订，继续进入成稿审校。")
+                            else:
+                                self.content_enrichment["argument_polish_reason"] = "论证重组稿未完整输出或未保留原有章节、引文及来源，保留上一版。"
+                                self._log("Writer Agent", self.content_enrichment["argument_polish_reason"])
+                        except Exception as exc:
+                            self.content_enrichment["argument_polish_reason"] = "论证重组与去AI味修订失败，保留上一版完整正文。"
+                            self._log("Writer Agent", f"{self.content_enrichment['argument_polish_reason']} 原因: {exc}")
                         self.content_review = review_content(
                             content, self.request.report_type, detail_profile=self.detail_profile)
                     self.generation_status = "ready"

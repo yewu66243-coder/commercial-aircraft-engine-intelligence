@@ -553,6 +553,18 @@ class FinalizationTests(unittest.TestCase):
         self.assertEqual(final['stage_durations_seconds']['成稿校订与来源复查'],6)
         three_agent_service.clear_report_progress(task_id)
 
+    def test_system_start_message_does_not_jump_to_export_stage(self):
+        import three_agent_service
+        task_id='system-stage-test'
+        three_agent_service.initialize_report_progress(task_id,'GTF',max_rounds=3)
+        three_agent_service.update_report_progress(task_id,'System','本任务选择短报告，使用生成模型。')
+        progress=three_agent_service.get_report_progress(task_id)
+        self.assertEqual(progress['stage'],'准备任务')
+        three_agent_service.update_report_progress(task_id,'System','正在将情报汇总导出为本地文件。')
+        progress=three_agent_service.get_report_progress(task_id)
+        self.assertEqual(progress['stage'],'导出文件')
+        three_agent_service.clear_report_progress(task_id)
+
     def test_stitched_quote_keeps_only_verified_ordered_literal_clauses(self):
         module=self.module('finalization')
         source='2025年维修能力提高35%，仅限指定设施，不代表停场问题已解决；仍需检查更换部件。'

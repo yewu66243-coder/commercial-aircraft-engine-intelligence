@@ -7,6 +7,16 @@ from itertools import zip_longest
 _EXCLUDED = re.compile(r'摘要|关键词|目录|参考文献|证据来源|References|附录|内部核验|实体.*清单|运行统计|本次精读', re.I)
 _FRONT_BACK = re.compile(r'引言|前言|背景|研究方法|资料来源|讨论|局限|结论|建议|总结')
 _CITATION = re.compile(r'\[(?:(?:原文|URL|文献|来源)\s*\d+|\d+)\]', re.I)
+_UNSUPPORTED_CAVEAT = re.compile(
+    r'(?:证据|事实|数据|来源|出处|依据).{0,8}(?:不清楚|不明确|不足|有限|缺乏|缺少|无法(?:确认|证实|核实|验证)|尚(?:未|无法)(?:确认|证实|核实|验证))'
+    r'|(?:缺乏|缺少|没有).{0,8}(?:证据|事实依据|来源支撑|数据支撑)'
+    r'|(?:尚(?:未|无法)|不能|无法).{0,6}(?:证实|确认|核实|验证).{0,12}(?:上述|该|这些|这一|前述)?(?:判断|结论|说法|推断|数据)?'
+)
+_AI_TONE = re.compile(
+    r'(?:不仅|不只|不只是|不但).{0,28}(?:更是|更|还|也)'
+    r'|(?:不是|并非|不应是).{0,28}(?:而是|而应是)'
+    r'|(?:值得注意的是|需要指出的是|综上所述|总体来看|可以看出|充分体现|深刻反映|具有重要意义)'
+)
 
 
 def _excerpt_item(item):
@@ -110,10 +120,15 @@ def review_content(markdown, report_type='research_report', detail_profile=None)
         expected_themes = 3 if report_type == 'detailed_report' else 2
     seen, duplicates, count, themes, thin = set(), 0, 0, 0, []
     placeholders = 0
+    unsupported_caveats = []
+    ai_tone_hits = 0
     for title, body in _sections(markdown):
         if _EXCLUDED.search(title):
             continue
         placeholders += len(re.findall(r'\[(?:URL\s*\?|原文\s*\?|材料引述|来源待补)\]', body, re.I))
+        if _UNSUPPORTED_CAVEAT.search(body):
+            unsupported_caveats.append(title)
+        ai_tone_hits += len(_AI_TONE.findall(body))
         section_count = 0
         for paragraph in _paragraphs(body):
             if len(paragraph) >= 12 and paragraph in seen:
@@ -137,10 +152,16 @@ def review_content(markdown, report_type='research_report', detail_profile=None)
         warnings.append(f'发现{duplicates}段重复内容，建议合并并补充不同证据或分析。')
     if placeholders:
         warnings.append(f'存在{placeholders}处尚未定位的来源占位标记；须用已有真实来源补齐，无法定位的具体断言移入内部核验记录。')
+    if unsupported_caveats:
+        warnings.append('正文出现“证据/来源不清楚”式兜底表述，请删除无依据断言或移入内部核验记录：' + '、'.join(unsupported_caveats[:6]) + '。')
+    if ai_tone_hits >= 3:
+        warnings.append('正文存在较多AI式套话或拔高表达，需改为具体、平实、由证据推进的研究报告语言。')
     return {'body_characters': count, 'suggested_minimum': minimum,
             'thematic_sections': themes, 'thin_sections': thin,
             'duplicate_paragraphs': duplicates, 'warnings': warnings,
             'unresolved_placeholders': placeholders,
+            'unsupported_caveat_sections': unsupported_caveats,
+            'ai_tone_hits': ai_tone_hits,
             'needs_enrichment': bool(warnings), 'check_kind': 'structural_heuristics_not_fact_verification'}
 
 
