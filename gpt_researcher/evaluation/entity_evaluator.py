@@ -113,6 +113,22 @@ EQUIVALENT_TERM_GROUPS = [
     ["additive manufacturing", "增材制造", "3d打印"],
 ]
 
+ENTITY_CATEGORY_ALIASES = {
+    "organization": {"机构", "企业", "公司", "制造商", "监管机构", "研究机构", "organization"},
+    "model": {"型号", "产品", "发动机型号", "部件型号", "平台", "model"},
+    "material": {"材料", "合金", "涂层", "复合材料", "工艺材料", "material"},
+    "parameter": {"参数", "性能参数", "技术指标", "数值", "规格", "parameter"},
+    "time": {"时间", "日期", "年份", "阶段", "里程碑", "time"},
+}
+
+
+def normalize_entity_category(value: Any) -> str:
+    normalized = str(value or "").strip().lower()
+    for category, aliases in ENTITY_CATEGORY_ALIASES.items():
+        if normalized in {str(alias).lower() for alias in aliases}:
+            return category
+    return "other"
+
 
 def get_project_root() -> Path:
     return Path(__file__).resolve().parents[2]
@@ -829,23 +845,83 @@ def _ground_truth_candidates(task: str) -> List[Path]:
     ]
 
 
-def _load_ground_truth(task: str) -> tuple[Optional[Path], List[Dict[str, Any]]]:
+def _entity_name(item: Dict[str, Any]) -> str:
+    return str(item.get("name") or item.get("entity") or item.get("实体") or item.get("实体/参数") or "").strip()
+
+
+def _invalid_ground_truth(path: Path, error_code: str, message: str) -> Dict[str, Any]:
+    return {
+        "status": "invalid_ground_truth",
+        "path": str(path),
+        "entities": [],
+        "error_code": error_code,
+        "message": message,
+    }
+
+
+def load_ground_truth(task: str) -> Dict[str, Any]:
     for path in _ground_truth_candidates(task):
         if not path.exists():
             continue
-        with path.open("r", encoding="utf-8") as handle:
-            data = json.load(handle)
+        try:
+            with path.open("r", encoding="utf-8") as handle:
+                data = json.load(handle)
+        except (OSError, UnicodeError):
+            return _invalid_ground_truth(path, "invalid_json", "标准答案文件无法读取。")
+        except json.JSONDecodeError:
+            return _invalid_ground_truth(path, "invalid_json", "标准答案文件不是有效 JSON。")
+
         if isinstance(data, list):
-            return path, [item for item in data if isinstance(item, dict)]
-        if isinstance(data, dict):
-            entities = data.get("entities") or data.get("expected_entities") or []
-            if isinstance(entities, list):
-                return path, [item for item in entities if isinstance(item, dict)]
-    return None, []
+            entities = data
+        elif isinstance(data, dict):
+            declared_task = data.get("task")
+            if declared_task not in (None, "") and _normalize_entity(declared_task) != _normalize_entity(task):
+                return _invalid_ground_truth(path, "task_mismatch", "标准答案声明的任务与当前任务不一致。")
+            if "entities" in data:
+                entities = data["entities"]
+            elif "expected_entities" in data:
+                entities = data["expected_entities"]
+            else:
+                return _invalid_ground_truth(path, "invalid_schema", "标准答案缺少实体列表。")
+        else:
+            return _invalid_ground_truth(path, "invalid_schema", "标准答案顶层结构无效。")
 
+        if not isinstance(entities, list):
+            return _invalid_ground_truth(path, "invalid_schema", "标准答案实体列表结构无效。")
 
-def _entity_name(item: Dict[str, Any]) -> str:
-    return str(item.get("name") or item.get("entity") or item.get("实体") or item.get("实体/参数") or "").strip()
+        normalized_entities: List[Dict[str, Any]] = []
+        for entity in entities:
+            if not isinstance(entity, dict):
+                return _invalid_ground_truth(path, "invalid_entity", "标准答案包含无效实体。")
+            name = _entity_name(entity)
+            if not name:
+                return _invalid_ground_truth(path, "invalid_entity", "标准答案实体缺少有效名称。")
+            aliases = entity.get("aliases", [])
+            if not isinstance(aliases, list) or not all(isinstance(alias, str) for alias in aliases):
+                return _invalid_ground_truth(path, "invalid_aliases", "标准答案实体别名必须是字符串列表。")
+            normalized = dict(entity)
+            normalized["name"] = name
+            normalized["category"] = normalize_entity_category(
+                entity.get("category", entity.get("type", entity.get("类别", "")))
+            )
+            normalized_aliases = []
+            seen_aliases = set()
+            for alias in aliases:
+                normalized_alias = _normalize_entity(alias)
+                if normalized_alias and normalized_alias not in seen_aliases:
+                    seen_aliases.add(normalized_alias)
+                    normalized_aliases.append(normalized_alias)
+            normalized["aliases"] = normalized_aliases
+            normalized_entities.append(normalized)
+
+        return {
+            "status": "loaded",
+            "path": str(path),
+            "entities": normalized_entities,
+            "error_code": "",
+            "message": "",
+        }
+    return {"status": "missing", "path": "", "entities": [], "error_code": "", "message": ""}
 
 
 def _match_entities(extracted: List[Dict[str, Any]], expected: List[Dict[str, Any]]) -> Dict[str, Any]:
@@ -902,7 +978,9 @@ def evaluate_report_entities(
         "requirement_met": None,
         "note": "未抽取到实体，未执行自动证据核验。",
     }
-    ground_truth_path, expected = _load_ground_truth(task)
+    ground_truth = load_ground_truth(task)
+    ground_truth_path = Path(ground_truth["path"]) if ground_truth.get("path") else None
+    expected = ground_truth["entities"] if ground_truth.get("status") == "loaded" else []
     evidence_supported_count = sum(1 for item in extracted if item.get("evidence_supported"))
     unsupported_count = len(extracted) - evidence_supported_count
 
