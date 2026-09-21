@@ -8,7 +8,6 @@ import shutil
 import re
 import uuid
 import time
-import ssl
 import logging
 from dataclasses import dataclass, replace
 from datetime import datetime
@@ -40,6 +39,7 @@ from backend.reporting.finalization import finalize_report
 from gpt_researcher.document.local_index import SelectedLocalPaper, prepare_local_docs_for_query
 from gpt_researcher.document.local_image_extractor import extract_local_report_images
 from gpt_researcher.evaluation.entity_evaluator import evaluate_report_entities
+from gpt_researcher.evaluation.evaluation_summary import build_evaluation_summary
 from gpt_researcher.evaluation.source_evaluator import (
     evaluate_public_url_sources,
     prune_redundant_unchecked_url_citations,
@@ -604,7 +604,7 @@ class ThreeAgentService:
         lower_error = (error or "").lower()
         if status_code is not None:
             return "http_status"
-        if "certificate_verify_failed" in lower_error or "ssl" in lower_error:
+        if "certificate_verify_failed" in lower_error or "certificate verify failed" in lower_error or "ssl" in lower_error:
             return "ssl_certificate"
         if "timed out" in lower_error or "timeout" in lower_error:
             return "timeout"
@@ -635,104 +635,74 @@ class ThreeAgentService:
                 "warning": "",
             }
 
-        attempts = [
-            ("HEAD", None, True),
-            ("GET", None, True),
-        ]
-        last_error = ""
-        ssl_error_seen = False
-        for method, context, ssl_verified in attempts:
+        method = "HEAD"
+        while True:
             try:
                 request = Request(checked_url, headers=headers, method=method)
-                with urlopen(request, timeout=timeout, context=context) as response:
+                with urlopen(request, timeout=timeout) as response:
                     status_code = int(getattr(response, "status", 0) or response.getcode())
-                accessible = 200 <= status_code < 400 or status_code in {401, 403, 405}
+                accessible = 200 <= status_code < 400
                 return {
                     "url": original_url,
                     "checked_url": checked_url,
                     "status_code": status_code,
                     "accessible": accessible,
                     "method": method,
-                    "ssl_verified": ssl_verified,
+                    "ssl_verified": True,
                     "error": "",
                     "failure_reason": "" if accessible else "http_status",
-                    "warning": "" if ssl_verified else "SSL 证书校验失败后使用非验证模式完成可访问性检测",
+                    "warning": "",
                 }
             except HTTPError as exc:
                 status_code = int(exc.code)
                 if method == "HEAD" and status_code in {403, 405}:
+                    method = "GET"
                     continue
                 return {
                     "url": original_url,
                     "checked_url": checked_url,
                     "status_code": status_code,
-                    "accessible": status_code in {401, 403, 405},
+                    "accessible": False,
                     "method": method,
-                    "ssl_verified": ssl_verified,
+                    "ssl_verified": True,
                     "error": str(exc),
-                    "failure_reason": "" if status_code in {401, 403, 405} else "http_status",
-                    "warning": "" if ssl_verified else "SSL 证书校验失败后使用非验证模式完成 HTTP 状态检测",
+                    "failure_reason": "http_status",
+                    "warning": "",
                 }
             except URLError as exc:
-                last_error = str(exc.reason)
-                ssl_error_seen = ssl_error_seen or isinstance(exc.reason, ssl.SSLError) or "CERTIFICATE_VERIFY_FAILED" in last_error
+                error = str(exc.reason)
+                failure_reason = ThreeAgentService._classify_url_error(error)
+                return {
+                    "url": original_url,
+                    "checked_url": checked_url,
+                    "status_code": None,
+                    "accessible": False,
+                    "method": method,
+                    "ssl_verified": True,
+                    "error": error,
+                    "failure_reason": failure_reason,
+                    "warning": "",
+                }
             except Exception as exc:
-                last_error = str(exc)
-                ssl_error_seen = ssl_error_seen or isinstance(exc, ssl.SSLError) or "CERTIFICATE_VERIFY_FAILED" in last_error
+                error = str(exc)
+                failure_reason = ThreeAgentService._classify_url_error(error)
+                return {
+                    "url": original_url,
+                    "checked_url": checked_url,
+                    "status_code": None,
+                    "accessible": False,
+                    "method": method,
+                    "ssl_verified": True,
+                    "error": error,
+                    "failure_reason": failure_reason,
+                    "warning": "",
+                }
 
-        if ssl_error_seen and checked_url.startswith("https://"):
-            unverified_context = ssl._create_unverified_context()
-            for method in ("HEAD", "GET"):
-                try:
-                    request = Request(checked_url, headers=headers, method=method)
-                    with urlopen(request, timeout=timeout, context=unverified_context) as response:
-                        status_code = int(getattr(response, "status", 0) or response.getcode())
-                    accessible = 200 <= status_code < 400 or status_code in {401, 403, 405}
-                    return {
-                        "url": original_url,
-                        "checked_url": checked_url,
-                        "status_code": status_code,
-                        "accessible": accessible,
-                        "method": f"{method}_SSL_UNVERIFIED",
-                        "ssl_verified": False,
-                        "error": "" if accessible else last_error,
-                        "failure_reason": "" if accessible else "ssl_certificate",
-                        "warning": "SSL 证书校验失败，但链接在非验证模式下可访问；建议人工确认站点证书链。",
-                    }
-                except HTTPError as exc:
-                    status_code = int(exc.code)
-                    if method == "HEAD" and status_code in {403, 405}:
-                        continue
-                    return {
-                        "url": original_url,
-                        "checked_url": checked_url,
-                        "status_code": status_code,
-                        "accessible": status_code in {401, 403, 405},
-                        "method": f"{method}_SSL_UNVERIFIED",
-                        "ssl_verified": False,
-                        "error": str(exc),
-                        "failure_reason": "" if status_code in {401, 403, 405} else "http_status",
-                        "warning": "SSL 证书校验失败，已使用非验证模式复查。",
-                    }
-                except Exception as exc:
-                    last_error = str(exc)
-
-        failure_reason = ThreeAgentService._classify_url_error(last_error)
-        return {
-            "url": original_url,
-            "checked_url": checked_url,
-            "status_code": None,
-            "accessible": False,
-            "method": "HEAD/GET",
-            "ssl_verified": True,
-            "error": last_error,
-            "failure_reason": failure_reason,
-            "warning": "",
-        }
-
-    async def inspect_report_urls(self, report: str, max_urls: int = 50) -> Dict[str, Any]:
+    async def inspect_report_urls(
+        self, report: str, max_urls: Optional[int] = None
+    ) -> Dict[str, Any]:
         urls = self._extract_urls(report)
-        checked_urls = urls[:max_urls]
+        checked_urls = urls if max_urls is None else urls[: max(0, int(max_urls))]
         skipped_count = max(0, len(urls) - len(checked_urls))
         if not checked_urls:
             return {
@@ -1404,8 +1374,42 @@ class ThreeAgentService:
             )
             public_url_source_eval = await asyncio.to_thread(evaluate_public_url_sources, final_report)
         self._log("Evaluation Agent", "正在统计运行耗时并检测最终报告中的公开 URL 可访问性。")
-        url_check = await self.inspect_report_urls(final_report)
-        entity_eval = evaluate_report_entities(final_report, self.request.task, self.selected_local_papers)
+        try:
+            url_check = await self.inspect_report_urls(final_report)
+        except Exception as exc:
+            logging.getLogger(__name__).exception("URL accessibility evaluation failed")
+            url_check = {
+                "total_urls": 0,
+                "checked_urls": 0,
+                "accessible_urls": 0,
+                "failed_urls": 0,
+                "accessibility_rate": None,
+                "skipped_urls": 0,
+                "ssl_unverified_accessible_urls": 0,
+                "failure_reasons": {},
+                "results": [],
+                "evaluation_error": type(exc).__name__,
+            }
+        try:
+            entity_eval = evaluate_report_entities(
+                final_report, self.request.task, self.selected_local_papers
+            )
+        except Exception as exc:
+            logging.getLogger(__name__).exception("Entity evaluation failed")
+            entity_eval = {
+                "status": "evaluation_failed",
+                "mode": "proxy",
+                "metrics": None,
+                "ground_truth_path": "",
+                "ground_truth_error_code": "",
+                "ground_truth_message": "",
+                "extracted_count": 0,
+                "evidence_supported_count": 0,
+                "auto_evidence_eval": {},
+                "note": "实体抽取测评未完成。",
+                "evaluation_error": type(exc).__name__,
+            }
+        evaluation_summary = build_evaluation_summary(entity_eval, url_check)
         self._log(
             "Evaluation Agent",
             f"已抽取 {entity_eval.get('extracted_count', 0)} 个实体/参数，"
@@ -1474,6 +1478,7 @@ class ThreeAgentService:
             "duration_seconds": round(stats_ready_elapsed, 2),
             "duration_minutes": round(stats_ready_elapsed / 60, 2),
             "entity_eval": entity_eval,
+            "evaluation_summary": evaluation_summary,
         }
         # Preserve the evaluated evidence IDs and original draft for audit. Public numbering
         # is applied only after the existing source/entity evaluators have finished.
@@ -1586,10 +1591,9 @@ class ThreeAgentService:
                 },
                 "validation_summary": {
                     "time_requirement_met": completed_elapsed <= 30 * 60,
-                    "url_accessibility_requirement_met": (
-                        url_check.get("accessibility_rate") is not None
-                        and url_check.get("accessibility_rate", 0) >= 0.98
-                    ),
+                    "url_accessibility_requirement_met": evaluation_summary[
+                        "public_links"
+                    ]["requirement_met"],
                     "url_requirement_met": (
                         public_url_source_eval.get("requirement_met")
                     ),
