@@ -8,6 +8,16 @@ from gpt_researcher.evaluation import entity_evaluator
 class EntityGroundTruthTests:
     __test__ = True
 
+    def test_category_labels_expose_complete_stable_mapping(self):
+        assert entity_evaluator.ENTITY_CATEGORY_LABELS == {
+            "organization": "机构",
+            "model": "型号",
+            "material": "材料",
+            "parameter": "参数",
+            "time": "时间",
+            "other": "其他",
+        }
+
     @pytest.mark.parametrize(
         ("value", "expected"),
         [

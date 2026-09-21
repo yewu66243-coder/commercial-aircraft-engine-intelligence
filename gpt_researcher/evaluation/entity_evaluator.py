@@ -120,6 +120,14 @@ ENTITY_CATEGORY_ALIASES = {
     "parameter": {"参数", "性能参数", "技术指标", "数值", "规格", "parameter"},
     "time": {"时间", "日期", "年份", "阶段", "里程碑", "time"},
 }
+ENTITY_CATEGORY_LABELS = {
+    "organization": "机构",
+    "model": "型号",
+    "material": "材料",
+    "parameter": "参数",
+    "time": "时间",
+    "other": "其他",
+}
 
 
 def normalize_entity_category(value: Any) -> str:
