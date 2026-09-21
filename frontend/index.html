@@ -7,7 +7,7 @@
     <link rel="icon" type="image/png" href="/static/software-icon.png" />
     <link rel="alternate icon" href="./static/favicon.ico" />
     <link rel="stylesheet" href="https://cdnjs.cloudflare.com/ajax/libs/font-awesome/6.5.1/css/all.min.css" />
-    <link rel="stylesheet" href="/site/styles.css?v=error-diagnosis-20260910" />
+    <link rel="stylesheet" href="/site/styles.css?v=evaluation-dashboard-20260921" />
 </head>
 <body>
     <div class="app-shell">
@@ -236,6 +236,27 @@
                         <a id="downloadLinkTop" href="#" class="report-action-btn disabled"><i class="fas fa-file-pdf"></i> PDF</a>
                     </div>
                     <p id="reportQualityStatus" class="report-quality-status" role="status" aria-live="polite">中文研究报告：摘要、正文、参考文献；Word / PDF 统一论文式排版。</p>
+                    <section id="evaluationPanel" class="evaluation-panel" aria-labelledby="evaluationPanelTitle" hidden>
+                        <div class="evaluation-heading">
+                            <h3 id="evaluationPanelTitle">自动测评结果</h3>
+                            <span>实体 F1 达标线 90% · 链接可访问率达标线 98%</span>
+                        </div>
+                        <div class="evaluation-metrics">
+                            <div class="evaluation-card"><span>实体 F1</span><b id="evaluationEntityF1">—</b></div>
+                            <div class="evaluation-card"><span>实体召回率</span><b id="evaluationEntityRecall">—</b></div>
+                            <div class="evaluation-card"><span>链接可访问率</span><b id="evaluationLinkAccessibility">—</b></div>
+                        </div>
+                        <p id="evaluationMessage" class="evaluation-message" aria-live="polite" hidden></p>
+                        <details class="evaluation-details">
+                            <summary>查看分类明细</summary>
+                            <div class="evaluation-table-wrap">
+                                <table>
+                                    <thead><tr><th>类别</th><th>TP</th><th>FP</th><th>FN</th><th>Precision</th><th>Recall</th><th>F1</th></tr></thead>
+                                    <tbody id="evaluationCategoryBody"></tbody>
+                                </table>
+                            </div>
+                        </details>
+                    </section>
                     <div id="reportContainer">
                         <p class="empty-state">报告生成后可在此审阅摘要、研究方法、专题分析与结论，并下载 Word 或 PDF。</p>
                     </div>
@@ -314,7 +335,8 @@
 
     <script src="https://cdnjs.cloudflare.com/ajax/libs/showdown/1.9.1/showdown.min.js"></script>
     <script src="https://cdnjs.cloudflare.com/ajax/libs/dompurify/3.2.6/purify.min.js"></script>
-    <script src="/site/scripts.js?v=error-diagnosis-20260910"></script>
+    <script src="/site/evaluation_panel.js?v=evaluation-dashboard-20260921"></script>
+    <script src="/site/scripts.js?v=evaluation-dashboard-20260921"></script>
 </body>
 </html>
 

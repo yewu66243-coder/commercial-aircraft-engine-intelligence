@@ -3764,6 +3764,48 @@ select:focus {
 .report-quality-status[data-state="needs_review"] { background: #fff5df; color: #785012; }
 .report-quality-status[data-state="error"] { background: #fff0f0; color: #973c3c; }
 .report-quality-status[data-state="ready"] { background: #edf7f1; color: #286448; }
+.evaluation-panel {
+    margin: 12px 0 16px;
+    padding: 14px;
+    border: 1px solid var(--is-line);
+    border-radius: 10px;
+    background: var(--is-panel);
+}
+.evaluation-heading {
+    display: flex;
+    align-items: baseline;
+    justify-content: space-between;
+    gap: 12px;
+}
+.evaluation-heading h3 { margin: 0; font-size: 16px; }
+.evaluation-heading span, .evaluation-message { color: var(--is-muted); font-size: 12px; }
+.evaluation-metrics {
+    display: grid;
+    grid-template-columns: repeat(3, minmax(0, 1fr));
+    gap: 8px;
+    margin-top: 12px;
+}
+.evaluation-card {
+    padding: 10px;
+    border: 1px solid var(--is-line);
+    border-radius: 8px;
+    background: rgba(91, 110, 128, .06);
+}
+.evaluation-card span { color: var(--is-muted); font-size: 12px; }
+.evaluation-card b { display: block; margin-top: 4px; font-size: 20px; }
+.evaluation-card[data-state="pass"] { background: #edf7f1; color: #286448; }
+.evaluation-card[data-state="fail"] { background: #fff0f0; color: #973c3c; }
+.evaluation-message { margin: 10px 0 0; line-height: 1.5; }
+.evaluation-details { margin-top: 10px; }
+.evaluation-details summary { cursor: pointer; color: var(--is-blue); font-size: 13px; }
+.evaluation-table-wrap { margin-top: 8px; overflow-x: auto; }
+.evaluation-table-wrap table { width: 100%; border-collapse: collapse; font-size: 12px; }
+.evaluation-table-wrap th, .evaluation-table-wrap td {
+    padding: 7px;
+    border-bottom: 1px solid var(--is-line);
+    text-align: right;
+}
+.evaluation-table-wrap th:first-child, .evaluation-table-wrap td:first-child { text-align: left; }
 #reportContainer { background: #fff; color: #1f2933; }
 #reportContainer p { color: #1f2933; text-indent: 2em; margin: 0 0 .75em; }
 #reportContainer p:not(.report-special-paragraph) strong,
@@ -3787,3 +3829,8 @@ select:focus {
 #reportContainer th, #reportContainer td { color: #1f2933; border: 0; padding: 6px 8px; overflow-wrap: anywhere; }
 #reportContainer th { border-bottom: 1px solid #222; background: #fff; }
 #reportContainer tr:nth-child(even) { background: transparent; }
+
+@media (max-width: 760px) {
+    .evaluation-metrics { grid-template-columns: 1fr; }
+    .evaluation-heading { align-items: flex-start; flex-direction: column; }
+}

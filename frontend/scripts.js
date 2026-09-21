@@ -1063,6 +1063,7 @@ const GPTResearcher = (() => {
     // Clear current research/report areas
     document.getElementById('output').innerHTML = '';
     document.getElementById('reportContainer').innerHTML = '';
+    window.EvaluationPanel?.reset();
     document.getElementById('selectedImagesContainer').innerHTML = '';
     document.getElementById('selectedImagesContainer').style.display = 'none';
 
@@ -2286,6 +2287,7 @@ const startResearch = async () => {
         // 6. 将最终报告渲染到页面的主体区域
         writeReport({ output: data.report }, converter, true, false);
         renderSelectedSources(data.selected_sources || []);
+        window.EvaluationPanel?.render(data.run_statistics?.evaluation_summary);
 
         // 7. 更新UI状态，结束动画
         lastTaskDurationSeconds = Math.max(0, Math.floor((Date.now() - taskStartTime) / 1000));
