@@ -15,7 +15,7 @@ sys.path.insert(0, os.getcwd())
 class FormalPipelineTests(unittest.TestCase):
     def test_offline_pipeline_writes_real_word_pdf_and_markdown(self):
         from three_agent_service import ThreeAgentService, ThreeAgentRequestData
-        from test_formal_report import BASE
+        from tests.test_formal_report import BASE
         from docx import Document
         from pypdf import PdfReader
         service = ThreeAgentService(ThreeAgentRequestData(task='GTF离线验收', report_source='web'))
@@ -48,7 +48,7 @@ class FormalPipelineTests(unittest.TestCase):
 
     def test_pipeline_evaluates_original_ids_and_publishes_only_numbered_report(self):
         from three_agent_service import ThreeAgentService, ThreeAgentRequestData
-        from test_formal_report import BASE
+        from tests.test_formal_report import BASE
         service = ThreeAgentService(ThreeAgentRequestData(task='GTF研究', report_source='web'))
         service.generation_status = 'ready'
         url_check = {'accessibility_rate': 1, 'total_urls': 1, 'checked_urls': 1,
