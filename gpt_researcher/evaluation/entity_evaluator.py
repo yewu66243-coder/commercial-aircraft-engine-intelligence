@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import io
 import json
+import math
 import re
 import ssl
 import zipfile
@@ -857,6 +858,53 @@ def _entity_name(item: Dict[str, Any]) -> str:
     return str(item.get("name") or item.get("entity") or item.get("实体") or item.get("实体/参数") or "").strip()
 
 
+def _entity_category(item: Dict[str, Any]) -> str:
+    value = item.get("category")
+    if value is None or (isinstance(value, str) and not value.strip()):
+        value = item.get("type")
+    if value is None or (isinstance(value, str) and not value.strip()):
+        value = item.get("类别")
+    return normalize_entity_category(value)
+
+
+def _equivalent_name_variants(terms: Iterable[Any]) -> set[str]:
+    """Expand explicit terms through curated equivalences, never arbitrary names."""
+    normalized_terms = {
+        _normalize_match_text(term)
+        for term in terms
+        if isinstance(term, str) and _normalize_match_text(term)
+    }
+    expanded = set(normalized_terms)
+    for group in EQUIVALENT_TERM_GROUPS:
+        normalized_group = {_normalize_match_text(item) for item in group}
+        if normalized_terms.intersection(normalized_group):
+            expanded.update(normalized_group)
+    return expanded
+
+
+def _entity_name_terms(item: Dict[str, Any]) -> set[str]:
+    terms: List[Any] = [_entity_name(item)]
+    for key in ("aliases", "synonyms"):
+        values = item.get(key, [])
+        if isinstance(values, str):
+            terms.append(values)
+        elif isinstance(values, (list, tuple, set)):
+            terms.extend(values)
+    return _equivalent_name_variants(terms)
+
+
+def _name_match_type(predicted: Dict[str, Any], expected: Dict[str, Any]) -> Optional[str]:
+    predicted_main = _normalize_match_text(_entity_name(predicted))
+    expected_main = _normalize_match_text(_entity_name(expected))
+    if not predicted_main or not expected_main:
+        return None
+    if predicted_main == expected_main:
+        return "exact_name"
+    if _entity_name_terms(predicted).intersection(_entity_name_terms(expected)):
+        return "alias"
+    return None
+
+
 def _validated_entity_name(item: Dict[str, Any]) -> Optional[str]:
     for key in ("name", "entity", "实体", "实体/参数"):
         if key in item:
@@ -945,37 +993,303 @@ def load_ground_truth(task: str) -> Dict[str, Any]:
     return {"status": "missing", "path": "", "entities": [], "error_code": "", "message": ""}
 
 
-def _match_entities(extracted: List[Dict[str, Any]], expected: List[Dict[str, Any]]) -> Dict[str, Any]:
-    extracted_norm = [(_normalize_entity(_entity_name(item)), item) for item in extracted]
-    expected_norm = [(_normalize_entity(_entity_name(item)), item) for item in expected]
-    matched_extracted = set()
-    matched_expected = set()
+_MISSING_PARAMETER_VALUES = {"", "-", "--", "—", "–", "无", "n/a", "na", "none", "null"}
+_NUMERIC_VALUE_RE = re.compile(
+    r"[-+]?(?:\d+(?:,\d{3})*(?:\.\d*)?|\.\d+)(?:[eE][-+]?\d+)?"
+)
+_UNIT_DEFINITIONS = {
+    "n": ("force", 1.0),
+    "kn": ("force", 1000.0),
+    "lbf": ("force", 4.4482216152605),
+    "g": ("mass", 0.001),
+    "kg": ("mass", 1.0),
+    "t": ("mass", 1000.0),
+    "lb": ("mass", 0.45359237),
+    "mm": ("length", 0.001),
+    "cm": ("length", 0.01),
+    "m": ("length", 1.0),
+    "in": ("length", 0.0254),
+    "pa": ("pressure", 1.0),
+    "kpa": ("pressure", 1000.0),
+    "mpa": ("pressure", 1_000_000.0),
+    "bar": ("pressure", 100_000.0),
+    "psi": ("pressure", 6894.757293168),
+    "k": ("temperature", 1.0),
+    "c": ("temperature_celsius", 1.0),
+    "°c": ("temperature_celsius", 1.0),
+    "f": ("temperature_fahrenheit", 1.0),
+    "°f": ("temperature_fahrenheit", 1.0),
+    "s": ("time", 1.0),
+    "min": ("time", 60.0),
+    "h": ("time", 3600.0),
+    "rpm": ("rotation", 1.0),
+    "%": ("ratio", 0.01),
+}
 
-    for expected_index, (expected_name, _expected_item) in enumerate(expected_norm):
-        if not expected_name:
-            continue
-        for extracted_index, (extracted_name, _extracted_item) in enumerate(extracted_norm):
-            if extracted_index in matched_extracted or not extracted_name:
+
+def _has_parameter_value(item: Dict[str, Any]) -> bool:
+    value = item.get("value")
+    if value is None:
+        return False
+    if isinstance(value, str) and value.strip().lower() in _MISSING_PARAMETER_VALUES:
+        return False
+    return True
+
+
+def _normalize_unit(value: Any) -> str:
+    unit = str(value or "").strip().replace("％", "%").replace("℃", "°C").replace("℉", "°F")
+    return re.sub(r"\s+", "", unit).lower()
+
+
+def _parse_parameter_value(item: Dict[str, Any]) -> Dict[str, Any]:
+    raw_value = item.get("value")
+    if isinstance(raw_value, bool):
+        return {"ok": False, "reason": "unparseable_value"}
+
+    if isinstance(raw_value, (int, float)):
+        numeric_value = float(raw_value)
+        parsed_unit = ""
+    elif isinstance(raw_value, str):
+        match = _NUMERIC_VALUE_RE.search(raw_value)
+        if not match:
+            return {"ok": False, "reason": "unparseable_value"}
+        try:
+            numeric_value = float(match.group(0).replace(",", ""))
+        except ValueError:
+            return {"ok": False, "reason": "unparseable_value"}
+        suffix = raw_value[match.end() :].strip()
+        unit_match = re.match(r"^(°?[A-Za-z]+|[%％])", suffix)
+        parsed_unit = unit_match.group(1) if unit_match else ""
+        if suffix and not parsed_unit and re.search(r"[A-Za-z°%％]", suffix):
+            return {"ok": False, "reason": "unknown_unit"}
+    else:
+        return {"ok": False, "reason": "unparseable_value"}
+
+    if not math.isfinite(numeric_value):
+        return {"ok": False, "reason": "unparseable_value"}
+
+    explicit_unit = item.get("unit")
+    has_explicit_unit = explicit_unit is not None and str(explicit_unit).strip() != ""
+    unit = _normalize_unit(explicit_unit if has_explicit_unit else parsed_unit)
+    if not unit:
+        return {"ok": True, "value": numeric_value, "dimension": "dimensionless", "unit": ""}
+    definition = _UNIT_DEFINITIONS.get(unit)
+    if definition is None:
+        return {"ok": False, "reason": "unknown_unit", "unit": unit}
+
+    dimension, factor = definition
+    if dimension == "temperature_celsius":
+        base_value = numeric_value + 273.15
+        dimension = "temperature"
+    elif dimension == "temperature_fahrenheit":
+        base_value = (numeric_value - 32.0) * 5.0 / 9.0 + 273.15
+        dimension = "temperature"
+    else:
+        base_value = numeric_value * factor
+    return {"ok": True, "value": base_value, "dimension": dimension, "unit": unit}
+
+
+def _parameter_candidate(
+    predicted: Dict[str, Any],
+    expected: Dict[str, Any],
+    name_match: str,
+    default_tolerance: float,
+) -> Dict[str, Any]:
+    tolerance_value = expected["tolerance"] if "tolerance" in expected else default_tolerance
+    if isinstance(tolerance_value, bool):
+        return {"eligible": False, "reason": "invalid_tolerance"}
+    try:
+        tolerance = float(tolerance_value)
+    except (TypeError, ValueError):
+        return {"eligible": False, "reason": "invalid_tolerance"}
+    if not math.isfinite(tolerance) or tolerance < 0:
+        return {"eligible": False, "reason": "invalid_tolerance"}
+
+    predicted_has_value = _has_parameter_value(predicted)
+    expected_has_value = _has_parameter_value(expected)
+    if not predicted_has_value and not expected_has_value:
+        return {
+            "eligible": True,
+            "priority": 3,
+            "match_type": "name_only_parameter",
+            "reason": "name_only_parameter_match_both_values_absent",
+        }
+    if predicted_has_value != expected_has_value:
+        return {"eligible": False, "reason": "missing_value_on_one_side"}
+
+    predicted_value = _parse_parameter_value(predicted)
+    expected_value = _parse_parameter_value(expected)
+    if not predicted_value.get("ok"):
+        return {"eligible": False, "reason": predicted_value["reason"], "side": "predicted"}
+    if not expected_value.get("ok"):
+        return {"eligible": False, "reason": expected_value["reason"], "side": "expected"}
+    if predicted_value["dimension"] != expected_value["dimension"]:
+        return {
+            "eligible": False,
+            "reason": "unit_mismatch",
+            "predicted_dimension": predicted_value["dimension"],
+            "expected_dimension": expected_value["dimension"],
+        }
+
+    predicted_base = predicted_value["value"]
+    expected_base = expected_value["value"]
+    difference = abs(predicted_base - expected_base)
+    details = {
+        "predicted_base_value": predicted_base,
+        "expected_base_value": expected_base,
+        "dimension": predicted_value["dimension"],
+        "tolerance": tolerance,
+    }
+    if math.isclose(predicted_base, expected_base, rel_tol=1e-12, abs_tol=1e-12):
+        return {
+            "eligible": True,
+            "priority": 0 if name_match == "exact_name" else 1,
+            "match_type": f"{name_match}_exact_value",
+            "reason": "exact_value_match",
+            **details,
+        }
+    allowed_difference = tolerance * max(abs(expected_base), 1e-12)
+    if difference <= allowed_difference:
+        return {
+            "eligible": True,
+            "priority": 2,
+            "match_type": "within_tolerance",
+            "reason": "value_within_tolerance",
+            "difference": difference,
+            "allowed_difference": allowed_difference,
+            "name_match": name_match,
+            **details,
+        }
+    return {
+        "eligible": False,
+        "reason": "value_out_of_tolerance",
+        "difference": difference,
+        "allowed_difference": allowed_difference,
+        **details,
+    }
+
+
+def _metric_counts(tp: int, fp: int, fn: int) -> Dict[str, Any]:
+    precision_denominator = tp + fp
+    recall_denominator = tp + fn
+    precision = tp / precision_denominator if precision_denominator else None
+    recall = tp / recall_denominator if recall_denominator else None
+    if tp == 0 and (fp or fn):
+        f1 = 0.0
+    elif precision is None or recall is None or precision + recall == 0:
+        f1 = None
+    else:
+        f1 = 2 * precision * recall / (precision + recall)
+    return {
+        "true_positive": tp,
+        "false_positive": fp,
+        "false_negative": fn,
+        "precision": round(precision, 4) if precision is not None else None,
+        "recall": round(recall, 4) if recall is not None else None,
+        "f1": round(f1, 4) if f1 is not None else None,
+    }
+
+
+def evaluate_entities_against_ground_truth(
+    extracted: List[Dict[str, Any]],
+    expected: List[Dict[str, Any]],
+    default_tolerance: float = 0.01,
+) -> Dict[str, Any]:
+    """Evaluate typed entities with deterministic one-to-one assignment."""
+    extracted = [dict(item, category=_entity_category(item)) for item in (extracted or [])]
+    expected = [dict(item, category=_entity_category(item)) for item in (expected or [])]
+    candidates: List[Dict[str, Any]] = []
+    rejected: List[Dict[str, Any]] = []
+
+    for predicted_index, predicted in enumerate(extracted):
+        predicted_category = _entity_category(predicted)
+        for truth_index, truth in enumerate(expected):
+            category = _entity_category(truth)
+            if predicted_category != category:
                 continue
-            if expected_name == extracted_name or expected_name in extracted_name or extracted_name in expected_name:
-                matched_expected.add(expected_index)
-                matched_extracted.add(extracted_index)
-                break
+            name_match = _name_match_type(predicted, truth)
+            if name_match is None:
+                continue
 
-    correct = [extracted[index] for index in sorted(matched_extracted)]
+            audit = {
+                "predicted_index": predicted_index,
+                "truth_index": truth_index,
+                "category": category,
+                "predicted": predicted,
+                "expected": truth,
+                "name_match": name_match,
+            }
+            if category == "parameter":
+                decision = _parameter_candidate(predicted, truth, name_match, default_tolerance)
+            else:
+                decision = {
+                    "eligible": True,
+                    "priority": 0 if name_match == "exact_name" else 1,
+                    "match_type": name_match,
+                    "reason": f"{name_match}_same_category",
+                }
+            audit.update(decision)
+            if decision["eligible"]:
+                candidates.append(audit)
+            else:
+                audit["matched"] = False
+                rejected.append(audit)
+
+    candidates.sort(key=lambda item: (item["priority"], item["predicted_index"], item["truth_index"]))
+    matched_extracted: set[int] = set()
+    matched_expected: set[int] = set()
+    accepted: List[Dict[str, Any]] = []
+    for candidate in candidates:
+        predicted_index = candidate["predicted_index"]
+        truth_index = candidate["truth_index"]
+        if predicted_index in matched_extracted or truth_index in matched_expected:
+            candidate["matched"] = False
+            candidate["reason"] = "candidate_not_selected_one_to_one"
+            rejected.append(candidate)
+            continue
+        candidate["matched"] = True
+        matched_extracted.add(predicted_index)
+        matched_expected.add(truth_index)
+        accepted.append(candidate)
+
+    correct = [item for index, item in enumerate(extracted) if index in matched_extracted]
     wrong = [item for index, item in enumerate(extracted) if index not in matched_extracted]
     missed = [item for index, item in enumerate(expected) if index not in matched_expected]
-    denominator = len(correct) + len(wrong) + len(missed)
-    accuracy = round(len(correct) / denominator, 4) if denominator else None
-    precision_denominator = len(correct) + len(wrong)
-    accuracy_without_missed = round(len(correct) / precision_denominator, 4) if precision_denominator else None
+    categories: Dict[str, Dict[str, Any]] = {}
+    for category, label in ENTITY_CATEGORY_LABELS.items():
+        tp = sum(1 for item in accepted if item["category"] == category)
+        fp = sum(
+            1
+            for index, item in enumerate(extracted)
+            if index not in matched_extracted and _entity_category(item) == category
+        )
+        fn = sum(
+            1
+            for index, item in enumerate(expected)
+            if index not in matched_expected and _entity_category(item) == category
+        )
+        categories[category] = {"label": label, **_metric_counts(tp, fp, fn)}
 
+    overall = _metric_counts(len(correct), len(wrong), len(missed))
     return {
+        "overall": overall,
+        "categories": categories,
+        "matches": accepted,
+        "match_audit": accepted + rejected,
         "correct_entities": correct,
         "wrong_entities": wrong,
         "missed_entities": missed,
-        "accuracy": accuracy,
-        "accuracy_without_missed": accuracy_without_missed,
+    }
+
+
+def _match_entities(extracted: List[Dict[str, Any]], expected: List[Dict[str, Any]]) -> Dict[str, Any]:
+    metrics = evaluate_entities_against_ground_truth(extracted, expected)
+    return {
+        "correct_entities": metrics["correct_entities"],
+        "wrong_entities": metrics["wrong_entities"],
+        "missed_entities": metrics["missed_entities"],
+        "accuracy": metrics["overall"]["f1"],
+        "accuracy_without_missed": metrics["overall"]["precision"],
     }
 
 
@@ -1007,9 +1321,16 @@ def evaluate_report_entities(
 
     base: Dict[str, Any] = {
         "status": "auto_evidence_checked" if extracted else "pending_manual_review",
+        "mode": "proxy",
         "method": "report_entity_table_extraction",
         "threshold": threshold,
+        "metrics": None,
+        "matches": [],
+        "match_audit": [],
+        "ground_truth_status": ground_truth.get("status", "missing"),
         "ground_truth_path": str(ground_truth_path) if ground_truth_path else "",
+        "ground_truth_error_code": ground_truth.get("error_code", ""),
+        "ground_truth_message": ground_truth.get("message", ""),
         "extracted_count": len(extracted),
         "evidence_supported_count": evidence_supported_count,
         "unsupported_count": unsupported_count,
@@ -1027,32 +1348,45 @@ def evaluate_report_entities(
         "note": "未提供标准答案，已完成自动证据核验；金标准实体准确率仍需标准答案或人工复核。",
     }
 
-    if not extracted:
-        base["status"] = "no_entity_table_found"
-        base["note"] = "未从报告的“实体与参数清单”表格中抽取到实体；请检查 Writer Agent 是否按 V1.2 格式输出。"
+    if ground_truth.get("status") == "invalid_ground_truth":
+        base.update(
+            {
+                "status": "invalid_ground_truth",
+                "mode": "invalid",
+                "accuracy": None,
+                "requirement_met": None,
+                "note": ground_truth.get("message") or "标准答案无效，未执行严格实体评估。",
+            }
+        )
         return base
 
-    if not expected:
+    if ground_truth.get("status") != "loaded":
+        if not extracted:
+            base["status"] = "no_entity_table_found"
+            base["note"] = "未从报告的“实体与参数清单”表格中抽取到实体；请检查 Writer Agent 是否按 V1.2 格式输出。"
         return base
 
-    matched = _match_entities(extracted, expected)
-    accuracy = matched["accuracy"]
+    metrics = evaluate_entities_against_ground_truth(extracted, expected)
+    overall = metrics["overall"]
+    accuracy = overall["f1"]
+    precision = overall["precision"]
     base.update(
         {
             "status": "auto_evaluated",
+            "mode": "strict",
+            "metrics": metrics,
+            "matches": metrics["matches"],
+            "match_audit": metrics["match_audit"],
             "expected_entities": expected,
-            "correct_entities": matched["correct_entities"],
-            "wrong_entities": matched["wrong_entities"],
-            "missed_entities": matched["missed_entities"],
+            "correct_entities": metrics["correct_entities"],
+            "wrong_entities": metrics["wrong_entities"],
+            "missed_entities": metrics["missed_entities"],
             "accuracy": accuracy,
-            "accuracy_without_missed": matched["accuracy_without_missed"],
+            "accuracy_without_missed": precision,
             "accuracy_without_missed_method": "ground_truth_precision",
-            "accuracy_without_missed_requirement_met": (
-                matched["accuracy_without_missed"] is not None
-                and matched["accuracy_without_missed"] >= threshold
-            ),
+            "accuracy_without_missed_requirement_met": precision is not None and precision >= threshold,
             "requirement_met": accuracy is not None and accuracy >= threshold,
-            "note": "已根据标准答案文件自动计算实体抽取准确率。",
+            "note": "已根据标准答案文件自动计算分类实体的精确率、召回率和 F1。",
         }
     )
     return base

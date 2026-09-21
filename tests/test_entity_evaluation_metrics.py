@@ -5,6 +5,20 @@ import pytest
 from gpt_researcher.evaluation import entity_evaluator
 
 
+def _entity(name, category, **extra):
+    return {"name": name, "category": category, **extra}
+
+
+def _report(*rows):
+    body = [
+        "## 实体与参数清单",
+        "| 类别 | 实体/参数 | 数值/描述 | 证据 |",
+        "| --- | --- | --- | --- |",
+    ]
+    body.extend(f"| {category} | {name} | {value} | {evidence} |" for category, name, value, evidence in rows)
+    return "\n".join(body)
+
+
 class EntityGroundTruthTests:
     __test__ = True
 
@@ -189,3 +203,318 @@ class EntityGroundTruthTests:
         assert result["status"] == "auto_evaluated"
         assert result["expected_entities"][0]["name"] == "PW1000G"
         assert result["accuracy"] == 1.0
+
+
+class TestEntityMetrics:
+    def test_organization_equivalent_terms_match_as_aliases(self):
+        result = entity_evaluator.evaluate_entities_against_ground_truth(
+            [_entity("普惠", "机构")],
+            [_entity("Pratt & Whitney", "organization")],
+        )
+
+        assert result["overall"]["true_positive"] == 1
+        assert result["matches"][0]["matched"] is True
+        assert result["matches"][0]["match_type"] == "alias"
+
+    def test_material_name_normalization_handles_case_and_punctuation(self):
+        result = entity_evaluator.evaluate_entities_against_ground_truth(
+            [_entity("Ti-6Al-4V", "material")],
+            [_entity("ti 6al 4v", "材料")],
+        )
+
+        assert result["overall"]["true_positive"] == 1
+        assert result["matches"][0]["match_type"] == "exact_name"
+
+    def test_curated_equivalent_term_expansion_is_not_generic_substring_matching(self):
+        curated = entity_evaluator.evaluate_entities_against_ground_truth(
+            [_entity("PW1100G", "model")],
+            [_entity("GTF", "model")],
+        )
+        arbitrary = entity_evaluator.evaluate_entities_against_ground_truth(
+            [_entity("Adobe", "organization")],
+            [_entity("Airworthiness Directive", "organization")],
+        )
+
+        assert curated["overall"]["true_positive"] == 1
+        assert arbitrary["overall"]["true_positive"] == 0
+
+    def test_same_name_in_different_categories_does_not_match(self):
+        result = entity_evaluator.evaluate_entities_against_ground_truth(
+            [_entity("A320neo", "organization")],
+            [_entity("A320neo", "model")],
+        )
+
+        assert result["overall"] == {
+            "true_positive": 0,
+            "false_positive": 1,
+            "false_negative": 1,
+            "precision": 0.0,
+            "recall": 0.0,
+            "f1": 0.0,
+        }
+
+    @pytest.mark.parametrize(
+        ("predicted", "expected", "should_match"),
+        [("100.9 kN", "100 kN", True), ("101.1 kN", "100 kN", False)],
+    )
+    def test_parameter_values_use_default_one_percent_relative_tolerance(
+        self, predicted, expected, should_match
+    ):
+        result = entity_evaluator.evaluate_entities_against_ground_truth(
+            [_entity("thrust", "parameter", value=predicted)],
+            [_entity("thrust", "parameter", value=expected)],
+        )
+
+        assert result["overall"]["true_positive"] == int(should_match)
+
+    def test_expected_parameter_tolerance_overrides_default(self):
+        result = entity_evaluator.evaluate_entities_against_ground_truth(
+            [_entity("thrust", "parameter", value="104 kN")],
+            [_entity("thrust", "parameter", value="100 kN", tolerance=0.05)],
+        )
+
+        assert result["overall"]["true_positive"] == 1
+        assert result["matches"][0]["match_type"] == "within_tolerance"
+
+    @pytest.mark.parametrize(
+        ("predicted", "expected"),
+        [
+            ({"value": 1000, "unit": "lbf"}, {"value": "4.448221615 kN"}),
+            ({"value": "39.37007874 in"}, {"value": 1, "unit": "m"}),
+        ],
+    )
+    def test_parameter_values_convert_force_and_length_units(self, predicted, expected):
+        result = entity_evaluator.evaluate_entities_against_ground_truth(
+            [_entity("rating", "parameter", **predicted)],
+            [_entity("rating", "parameter", **expected)],
+        )
+
+        assert result["overall"]["true_positive"] == 1
+
+    @pytest.mark.parametrize(
+        ("predicted", "expected", "reason_fragment"),
+        [
+            ({"value": "10 furlong"}, {"value": "10 m"}, "unknown_unit"),
+            ({"value": "10 kg"}, {"value": "10 m"}, "unit_mismatch"),
+            ({"value": "many kN"}, {"value": "10 kN"}, "unparseable_value"),
+            ({"value": "10 kN"}, {}, "missing_value_on_one_side"),
+        ],
+    )
+    def test_invalid_parameter_comparisons_do_not_match_and_are_audited(
+        self, predicted, expected, reason_fragment
+    ):
+        result = entity_evaluator.evaluate_entities_against_ground_truth(
+            [_entity("rating", "parameter", **predicted)],
+            [_entity("rating", "parameter", **expected)],
+        )
+
+        assert result["overall"]["true_positive"] == 0
+        assert any(
+            not item["matched"] and reason_fragment in item["reason"]
+            for item in result["match_audit"]
+        )
+
+    @pytest.mark.parametrize("tolerance", [-0.1, "invalid"])
+    def test_invalid_expected_tolerance_rejects_parameter_match(self, tolerance):
+        result = entity_evaluator.evaluate_entities_against_ground_truth(
+            [_entity("rating", "parameter", value="10 kN")],
+            [_entity("rating", "parameter", value="10 kN", tolerance=tolerance)],
+        )
+
+        assert result["overall"]["true_positive"] == 0
+        assert any("invalid_tolerance" in item["reason"] for item in result["match_audit"])
+
+    def test_invalid_tolerance_also_rejects_name_only_parameter_match(self):
+        result = entity_evaluator.evaluate_entities_against_ground_truth(
+            [_entity("rating", "parameter")],
+            [_entity("rating", "parameter", tolerance=-0.1)],
+        )
+
+        assert result["overall"]["true_positive"] == 0
+        assert result["match_audit"][0]["reason"] == "invalid_tolerance"
+
+    def test_both_missing_parameter_values_allow_audited_name_only_match(self):
+        result = entity_evaluator.evaluate_entities_against_ground_truth(
+            [_entity("bypass ratio", "parameter")],
+            [_entity("bypass-ratio", "parameter")],
+        )
+
+        assert result["overall"]["true_positive"] == 1
+        assert result["matches"][0]["match_type"] == "name_only_parameter"
+        assert "both_values_absent" in result["matches"][0]["reason"]
+
+    def test_matching_prioritizes_exact_main_name_and_is_one_to_one(self):
+        predictions = [
+            _entity("普惠", "organization"),
+            _entity("Pratt & Whitney", "organization"),
+        ]
+        result = entity_evaluator.evaluate_entities_against_ground_truth(
+            predictions,
+            [_entity("Pratt & Whitney", "organization")],
+        )
+
+        accepted = [item for item in result["matches"] if item["matched"]]
+        assert [item["predicted_index"] for item in accepted] == [1]
+        assert len(result["matches"]) == 1
+        assert any(not item["matched"] for item in result["match_audit"])
+        assert result["correct_entities"] == [predictions[1]]
+        assert result["wrong_entities"] == [predictions[0]]
+
+    def test_matching_ties_use_original_prediction_order(self):
+        predictions = [
+            _entity("P&W", "organization"),
+            _entity("普惠", "organization"),
+        ]
+        result = entity_evaluator.evaluate_entities_against_ground_truth(
+            predictions,
+            [_entity("Pratt & Whitney", "organization")],
+        )
+
+        accepted = [item for item in result["matches"] if item["matched"]]
+        assert [item["predicted_index"] for item in accepted] == [0]
+
+    def test_category_and_micro_metrics_have_correct_counts_and_scores(self):
+        result = entity_evaluator.evaluate_entities_against_ground_truth(
+            [
+                _entity("Pratt & Whitney", "organization"),
+                _entity("Ti-6Al-4V", "material"),
+            ],
+            [
+                _entity("普惠", "organization"),
+                _entity("thrust", "parameter", value="100 kN"),
+            ],
+        )
+
+        assert result["overall"] == {
+            "true_positive": 1,
+            "false_positive": 1,
+            "false_negative": 1,
+            "precision": 0.5,
+            "recall": 0.5,
+            "f1": 0.5,
+        }
+        assert result["categories"]["organization"] == {
+            "label": "机构",
+            "true_positive": 1,
+            "false_positive": 0,
+            "false_negative": 0,
+            "precision": 1.0,
+            "recall": 1.0,
+            "f1": 1.0,
+        }
+        assert result["categories"]["material"]["precision"] == 0.0
+        assert result["categories"]["material"]["recall"] is None
+        assert result["categories"]["material"]["f1"] == 0.0
+        assert result["categories"]["parameter"]["precision"] is None
+        assert result["categories"]["parameter"]["recall"] == 0.0
+        assert result["categories"]["parameter"]["f1"] == 0.0
+
+    def test_empty_inputs_produce_null_metric_denominators(self):
+        result = entity_evaluator.evaluate_entities_against_ground_truth([], [])
+
+        assert result["overall"] == {
+            "true_positive": 0,
+            "false_positive": 0,
+            "false_negative": 0,
+            "precision": None,
+            "recall": None,
+            "f1": None,
+        }
+        assert all(item["precision"] is None for item in result["categories"].values())
+        assert all(item["recall"] is None for item in result["categories"].values())
+        assert all(item["f1"] is None for item in result["categories"].values())
+
+
+class TestEntityReportEvaluationModes:
+    def test_loaded_truth_uses_strict_metrics_and_compatibility_scores(self, monkeypatch):
+        monkeypatch.setattr(
+            entity_evaluator,
+            "load_ground_truth",
+            lambda _task: {
+                "status": "loaded",
+                "path": "truth.json",
+                "entities": [_entity("PW1000G", "model")],
+                "error_code": "",
+                "message": "",
+            },
+        )
+
+        result = entity_evaluator.evaluate_report_entities(
+            _report(("型号", "PW1000G", "engine", "-")), "task", threshold=0.9
+        )
+
+        assert result["mode"] == "strict"
+        assert result["metrics"]["overall"]["f1"] == 1.0
+        assert result["accuracy"] == 1.0
+        assert result["accuracy_without_missed"] == 1.0
+        assert result["accuracy_without_missed_method"] == "ground_truth_precision"
+        assert result["requirement_met"] is True
+
+    def test_missing_truth_uses_proxy_without_fabricating_strict_accuracy(self, monkeypatch):
+        monkeypatch.setattr(
+            entity_evaluator,
+            "load_ground_truth",
+            lambda _task: {
+                "status": "missing",
+                "path": "",
+                "entities": [],
+                "error_code": "",
+                "message": "",
+            },
+        )
+
+        result = entity_evaluator.evaluate_report_entities(
+            _report(("型号", "PW1000G", "engine", "https://example.com/source")), "task"
+        )
+
+        assert result["mode"] == "proxy"
+        assert result["metrics"] is None
+        assert result["accuracy"] is None
+        assert result["accuracy_without_missed"] == result["auto_evidence_eval"]["auto_evidence_accuracy"]
+
+    def test_invalid_truth_returns_safe_invalid_mode(self, monkeypatch):
+        monkeypatch.setattr(
+            entity_evaluator,
+            "load_ground_truth",
+            lambda _task: {
+                "status": "invalid_ground_truth",
+                "path": "truth.json",
+                "entities": [],
+                "error_code": "invalid_json",
+                "message": "标准答案文件不是有效 JSON。",
+            },
+        )
+
+        result = entity_evaluator.evaluate_report_entities(
+            _report(("型号", "PW1000G", "engine", "-")), "task"
+        )
+
+        assert result["mode"] == "invalid"
+        assert result["status"] == "invalid_ground_truth"
+        assert result["metrics"] is None
+        assert result["accuracy"] is None
+        assert result["correct_entities"] is None
+        assert result["ground_truth_error_code"] == "invalid_json"
+
+    def test_loaded_truth_without_extracted_table_still_scores_all_truth_as_missed(self, monkeypatch):
+        expected = [_entity("PW1000G", "model")]
+        monkeypatch.setattr(
+            entity_evaluator,
+            "load_ground_truth",
+            lambda _task: {
+                "status": "loaded",
+                "path": "truth.json",
+                "entities": expected,
+                "error_code": "",
+                "message": "",
+            },
+        )
+
+        result = entity_evaluator.evaluate_report_entities("# Report without entity table", "task")
+
+        assert result["mode"] == "strict"
+        assert result["status"] == "auto_evaluated"
+        assert result["missed_entities"] == expected
+        assert result["metrics"]["overall"]["recall"] == 0.0
+        assert result["metrics"]["overall"]["f1"] == 0.0
+        assert result["accuracy"] == 0.0
