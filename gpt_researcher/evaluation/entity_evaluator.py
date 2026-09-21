@@ -857,6 +857,16 @@ def _entity_name(item: Dict[str, Any]) -> str:
     return str(item.get("name") or item.get("entity") or item.get("实体") or item.get("实体/参数") or "").strip()
 
 
+def _validated_entity_name(item: Dict[str, Any]) -> Optional[str]:
+    for key in ("name", "entity", "实体", "实体/参数"):
+        if key in item:
+            value = item[key]
+            if not isinstance(value, str) or not value.strip():
+                return None
+            return value.strip()
+    return None
+
+
 def _invalid_ground_truth(path: Path, error_code: str, message: str) -> Dict[str, Any]:
     return {
         "status": "invalid_ground_truth",
@@ -901,7 +911,7 @@ def load_ground_truth(task: str) -> Dict[str, Any]:
         for entity in entities:
             if not isinstance(entity, dict):
                 return _invalid_ground_truth(path, "invalid_entity", "标准答案包含无效实体。")
-            name = _entity_name(entity)
+            name = _validated_entity_name(entity)
             if not name:
                 return _invalid_ground_truth(path, "invalid_entity", "标准答案实体缺少有效名称。")
             aliases = entity.get("aliases", [])
@@ -909,9 +919,12 @@ def load_ground_truth(task: str) -> Dict[str, Any]:
                 return _invalid_ground_truth(path, "invalid_aliases", "标准答案实体别名必须是字符串列表。")
             normalized = dict(entity)
             normalized["name"] = name
-            normalized["category"] = normalize_entity_category(
-                entity.get("category", entity.get("type", entity.get("类别", "")))
-            )
+            category_value = entity.get("category")
+            if category_value is None or (isinstance(category_value, str) and not category_value.strip()):
+                category_value = entity.get("type")
+            if category_value is None or (isinstance(category_value, str) and not category_value.strip()):
+                category_value = entity.get("类别", "")
+            normalized["category"] = normalize_entity_category(category_value)
             normalized_aliases = []
             seen_aliases = set()
             for alias in aliases:
