@@ -8,14 +8,12 @@ import math
 import os
 import re
 import tempfile
-import zipfile
 from collections import Counter
+from decimal import Decimal, InvalidOperation
 from pathlib import Path
 from typing import Any
-from xml.etree import ElementTree
 
 from openpyxl import load_workbook
-from openpyxl.utils import get_column_letter
 
 
 MAX_UPLOAD_BYTES = 5 * 1024 * 1024
@@ -30,6 +28,10 @@ _CATEGORY_ALIASES = {
 }
 _REQUIRED_XLSX_COLUMNS = ("类别", "名称")
 _OPTIONAL_XLSX_COLUMNS = ("别名", "数值", "单位", "容差")
+_PARAMETER_VALUE_RE = re.compile(
+    r"^\s*(?P<number>[-+]?(?:\d+(?:,\d{3})*(?:\.\d*)?|\.\d+)(?:[eE][-+]?\d+)?)"
+    r"\s*(?P<unit>°?[A-Za-z]+|[%％])?\s*$"
+)
 
 
 class GroundTruthValidationError(ValueError):
@@ -58,8 +60,6 @@ def _normalized_key(value: Any) -> str:
 
 
 def _clean_aliases(value: Any, location: str = "") -> list[str]:
-    if value is None:
-        return []
     if not isinstance(value, list) or not all(isinstance(alias, str) for alias in value):
         _error("invalid_aliases", f"标准答案实体别名必须是字符串列表。{location}")
     aliases: list[str] = []
@@ -72,6 +72,47 @@ def _clean_aliases(value: Any, location: str = "") -> list[str]:
     return aliases
 
 
+def _normalized_unit(value: Any) -> str:
+    return re.sub(r"\s+", "", str(value or "").replace("％", "%").replace("℃", "°C").replace("℉", "°F")).lower()
+
+
+def _parse_parameter_number(value: Any, unit: Any = None) -> Decimal:
+    if isinstance(value, bool):
+        raise ValueError
+    if isinstance(value, (int, float)):
+        try:
+            number = Decimal(str(value))
+        except InvalidOperation as error:
+            raise ValueError from error
+        embedded_unit = ""
+    elif isinstance(value, str):
+        match = _PARAMETER_VALUE_RE.fullmatch(value)
+        if not match:
+            raise ValueError
+        try:
+            number = Decimal(match.group("number").replace(",", ""))
+        except InvalidOperation as error:
+            raise ValueError from error
+        embedded_unit = match.group("unit") or ""
+    else:
+        raise ValueError
+    if not number.is_finite():
+        raise ValueError
+    if unit is not None and str(unit).strip() and embedded_unit and _normalized_unit(unit) != _normalized_unit(embedded_unit):
+        raise ValueError
+    return number
+
+
+def _normalized_parameter_value(value: Any) -> str:
+    if value is None:
+        return "<missing>"
+    try:
+        number = _parse_parameter_number(value)
+    except ValueError:
+        return _normalized_key(value)
+    return format(number.normalize(), "f")
+
+
 def _validate_parameter_fields(
     entity: dict[str, Any], normalized: dict[str, Any], location: str = ""
 ) -> None:
@@ -79,8 +120,10 @@ def _validate_parameter_fields(
         value = entity["value"]
         if isinstance(value, bool) or not isinstance(value, (int, float, str)):
             _error("invalid_parameter", f"标准答案参数值必须是数值或数值字符串。{location}")
-        if isinstance(value, float) and not math.isfinite(value):
-            _error("invalid_parameter", f"标准答案参数值必须是有限数值。{location}")
+        try:
+            _parse_parameter_number(value, entity.get("unit"))
+        except ValueError:
+            _error("invalid_parameter", f"标准答案参数值必须是有限单一数值。{location}")
         normalized["value"] = value.strip() if isinstance(value, str) else value
     if "unit" in entity and entity["unit"] is not None:
         unit = entity["unit"]
@@ -89,14 +132,18 @@ def _validate_parameter_fields(
         normalized["unit"] = unit.strip()
 
     tolerance = entity.get("tolerance", 0.01)
+    try:
+        tolerance_value = float(tolerance)
+    except (OverflowError, TypeError, ValueError):
+        _error("invalid_parameter", f"标准答案参数的容差必须是非负有限数值。{location}")
     if (
         isinstance(tolerance, bool)
         or not isinstance(tolerance, (int, float))
-        or not math.isfinite(float(tolerance))
-        or float(tolerance) < 0
+        or not math.isfinite(tolerance_value)
+        or tolerance_value < 0
     ):
         _error("invalid_parameter", f"标准答案参数的容差必须是非负有限数值。{location}")
-    normalized["tolerance"] = float(tolerance)
+    normalized["tolerance"] = tolerance_value
 
 
 def canonicalize_ground_truth_payload(payload: Any, expected_task: str) -> dict[str, Any]:
@@ -104,13 +151,12 @@ def canonicalize_ground_truth_payload(payload: Any, expected_task: str) -> dict[
     if not isinstance(payload, dict):
         _error("invalid_schema", "标准答案顶层结构必须是对象。")
 
-    declared_task = payload.get("task")
-    if declared_task is None or declared_task == "":
+    if "task" not in payload:
         task = expected_task
-    elif not isinstance(declared_task, str) or declared_task != expected_task:
+    elif not isinstance(payload["task"], str) or payload["task"] != expected_task:
         _error("task_mismatch", "标准答案声明的任务与当前任务不一致。")
     else:
-        task = declared_task
+        task = payload["task"]
 
     entities = payload.get("entities")
     if not isinstance(entities, list):
@@ -135,7 +181,7 @@ def canonicalize_ground_truth_payload(payload: Any, expected_task: str) -> dict[
         normalized = {
             "type": _normalize_category(raw_type),
             "name": name.strip(),
-            "aliases": _clean_aliases(entity.get("aliases", []), location),
+            "aliases": _clean_aliases(entity["aliases"] if "aliases" in entity else [], location),
         }
         if normalized["type"] == "parameter":
             _validate_parameter_fields(entity, normalized, location)
@@ -143,7 +189,7 @@ def canonicalize_ground_truth_payload(payload: Any, expected_task: str) -> dict[
         duplicate_key = (
             normalized["type"],
             _normalized_key(normalized["name"]),
-            _normalized_key(normalized.get("value", "")),
+            _normalized_parameter_value(normalized.get("value")),
             _normalized_key(normalized.get("unit", "")),
         )
         if duplicate_key in duplicate_keys:
@@ -168,26 +214,6 @@ def _validate_upload_path(path: Path) -> None:
         _error("file_too_large", "标准答案文件不能超过 5 MiB。")
 
 
-def _formula_cells_without_cached_values(path: Path, worksheet_index: int) -> set[str]:
-    """Find formula coordinates which have no cached value in the worksheet XML."""
-    try:
-        with zipfile.ZipFile(path) as archive:
-            root = ElementTree.fromstring(archive.read(f"xl/worksheets/sheet{worksheet_index}.xml"))
-    except (KeyError, OSError, zipfile.BadZipFile, ElementTree.ParseError):
-        return set()
-
-    namespace = "{http://schemas.openxmlformats.org/spreadsheetml/2006/main}"
-    missing: set[str] = set()
-    for cell in root.iter(f"{namespace}c"):
-        formula = cell.find(f"{namespace}f")
-        cached = cell.find(f"{namespace}v")
-        if formula is not None and (cached is None or cached.text is None):
-            coordinate = cell.get("r")
-            if coordinate:
-                missing.add(coordinate)
-    return missing
-
-
 def _split_aliases(value: Any) -> list[str]:
     if value is None:
         return []
@@ -197,6 +223,7 @@ def _split_aliases(value: Any) -> list[str]:
 def _xlsx_payload(path: Path) -> dict[str, Any]:
     try:
         workbook = load_workbook(path, read_only=True, data_only=True, keep_links=False)
+        formula_workbook = load_workbook(path, read_only=True, data_only=False, keep_links=False)
     except Exception:
         _error("invalid_excel", "标准答案 XLSX 文件无法读取。")
 
@@ -205,13 +232,22 @@ def _xlsx_payload(path: Path) -> dict[str, Any]:
         if not visible_sheets:
             _error("invalid_excel", "标准答案 XLSX 文件没有可见工作表。")
         worksheet = visible_sheets[0]
-        worksheet_index = workbook.worksheets.index(worksheet) + 1
-        formula_cells = _formula_cells_without_cached_values(path, worksheet_index)
+        formula_worksheet = next(
+            sheet for sheet in formula_workbook.worksheets if sheet.title == worksheet.title
+        )
         rows = worksheet.iter_rows(values_only=False)
+        formula_rows = formula_worksheet.iter_rows(values_only=False)
         try:
             header_cells = next(rows)
+            formula_header_cells = next(formula_rows)
         except StopIteration:
             _error("missing_columns", f"工作表{worksheet.title}缺少必需列。")
+        for data_cell, formula_cell in zip(header_cells, formula_header_cells):
+            if formula_cell.data_type == "f" and data_cell.value is None:
+                _error(
+                    "formula_without_cached_value",
+                    f"工作表{worksheet.title}，第 1 行的公式没有缓存值。",
+                )
 
         headers = {
             str(cell.value).strip(): index
@@ -224,15 +260,15 @@ def _xlsx_payload(path: Path) -> dict[str, Any]:
 
         entities: list[dict[str, Any]] = []
         known_columns = (*_REQUIRED_XLSX_COLUMNS, *_OPTIONAL_XLSX_COLUMNS)
-        for row_number, row_cells in enumerate(rows, start=2):
-            if all(cell.value is None for cell in row_cells):
-                continue
-            for column_index, _cell in enumerate(row_cells, start=1):
-                if f"{get_column_letter(column_index)}{row_number}" in formula_cells:
+        for row_number, (row_cells, formula_row_cells) in enumerate(zip(rows, formula_rows), start=2):
+            for data_cell, formula_cell in zip(row_cells, formula_row_cells):
+                if formula_cell.data_type == "f" and data_cell.value is None:
                     _error(
                         "formula_without_cached_value",
                         f"工作表{worksheet.title}，第 {row_number} 行的公式没有缓存值。",
                     )
+            if all(cell.value is None for cell in row_cells):
+                continue
             values = {
                 column: row_cells[index].value if index < len(row_cells) else None
                 for column, index in headers.items()
@@ -251,6 +287,7 @@ def _xlsx_payload(path: Path) -> dict[str, Any]:
         return {"entities": entities}
     finally:
         workbook.close()
+        formula_workbook.close()
 
 
 def load_ground_truth_upload(path: str | Path, expected_task: str) -> dict[str, Any]:
@@ -295,17 +332,17 @@ def persist_ground_truth_upload(
         with tempfile.NamedTemporaryFile(
             mode="wb", suffix=suffix, prefix=".ground-truth-", dir=directory, delete=False
         ) as temporary:
-            temporary.write(content)
             upload_path = Path(temporary.name)
             temporary_paths.add(upload_path)
+            temporary.write(content)
         canonical = load_ground_truth_upload(upload_path, task)
 
         with tempfile.NamedTemporaryFile(
             mode="w", encoding="utf-8", suffix=".tmp", prefix=".ground-truth-", dir=directory, delete=False
         ) as temporary:
-            json.dump(canonical, temporary, ensure_ascii=False, separators=(",", ":"))
             canonical_temporary_path = Path(temporary.name)
             temporary_paths.add(canonical_temporary_path)
+            json.dump(canonical, temporary, ensure_ascii=False, separators=(",", ":"))
         os.replace(canonical_temporary_path, canonical_path)
         temporary_paths.remove(canonical_temporary_path)
     finally:

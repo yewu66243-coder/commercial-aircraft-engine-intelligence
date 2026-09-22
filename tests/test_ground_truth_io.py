@@ -5,6 +5,7 @@ from io import BytesIO
 import pytest
 from openpyxl import Workbook
 
+from gpt_researcher.evaluation import entity_evaluator, ground_truth_io
 from gpt_researcher.evaluation.ground_truth_io import (
     ALLOWED_SUFFIXES,
     MAX_UPLOAD_BYTES,
@@ -138,7 +139,9 @@ def test_json_schema_validation_has_stable_error_codes(tmp_path, payload, code):
 
 
 def test_missing_task_is_injected_and_duplicate_normalized_entities_are_rejected(tmp_path):
-    injected_path = _write_json(tmp_path, _valid_payload(task=None))
+    missing_task_payload = _valid_payload()
+    del missing_task_payload["task"]
+    injected_path = _write_json(tmp_path, missing_task_payload)
     assert load_ground_truth_upload(injected_path, TASK)["task"] == TASK
 
     duplicate_path = _write_json(
@@ -205,3 +208,192 @@ def test_persist_upload_uses_hashed_canonical_json_inside_destination(tmp_path):
     assert not (tmp_path / "outside.json").exists()
     assert all(path.parent == destination for path in destination.iterdir())
     assert list(destination.iterdir()) == [target]
+
+
+def test_parameter_string_value_must_be_a_finite_single_number(tmp_path):
+    path = _write_json(
+        tmp_path,
+        _valid_payload(entities=[{"type": "parameter", "name": "ratio", "value": "garbage"}]),
+    )
+
+    with pytest.raises(GroundTruthValidationError) as exc_info:
+        load_ground_truth_upload(path, TASK)
+
+    _assert_error(exc_info, "invalid_parameter")
+
+
+def test_duplicate_keys_preserve_negative_sign_and_normalize_numeric_equivalence(tmp_path):
+    distinct = _write_json(
+        tmp_path,
+        _valid_payload(
+            entities=[
+                {"type": "parameter", "name": "ratio", "value": -1},
+                {"type": "parameter", "name": "ratio", "value": 1},
+            ]
+        ),
+        "distinct.json",
+    )
+    assert len(load_ground_truth_upload(distinct, TASK)["entities"]) == 2
+
+    equivalent = _write_json(
+        tmp_path,
+        _valid_payload(
+            entities=[
+                {"type": "parameter", "name": "ratio", "value": 100},
+                {"type": "parameter", "name": "ratio", "value": "100.0"},
+            ]
+        ),
+        "equivalent.json",
+    )
+    with pytest.raises(GroundTruthValidationError) as exc_info:
+        load_ground_truth_upload(equivalent, TASK)
+    _assert_error(exc_info, "duplicate_entity")
+
+
+def test_xlsx_all_formula_data_row_without_cached_values_is_not_ignored(tmp_path):
+    path = _write_xlsx(
+        tmp_path,
+        [["类别", "名称", "数值"], ["=\"参数\"", "=\"推力\"", "=100"]],
+    )
+
+    with pytest.raises(GroundTruthValidationError) as exc_info:
+        load_ground_truth_upload(path, TASK)
+
+    _assert_error(exc_info, "formula_without_cached_value", "实体表，第 2 行")
+
+
+def test_persist_cleans_a_temporary_file_when_canonical_json_write_fails(tmp_path, monkeypatch):
+    destination = tmp_path / "stored"
+
+    def fail_json_dump(*_args, **_kwargs):
+        raise OSError("disk full")
+
+    monkeypatch.setattr(ground_truth_io.json, "dump", fail_json_dump)
+    with pytest.raises(OSError, match="disk full"):
+        persist_ground_truth_upload(
+            json.dumps(_valid_payload(), ensure_ascii=False).encode("utf-8"),
+            "truth.json",
+            TASK,
+            destination,
+        )
+
+    assert list(destination.iterdir()) == []
+
+
+def test_persist_cleans_a_temporary_file_when_upload_write_fails(tmp_path, monkeypatch):
+    destination = tmp_path / "stored"
+    real_named_temporary_file = ground_truth_io.tempfile.NamedTemporaryFile
+
+    class FailingTemporaryFile:
+        def __init__(self, *args, **kwargs):
+            self._temporary = real_named_temporary_file(*args, **kwargs)
+            self.name = self._temporary.name
+
+        def __enter__(self):
+            self._temporary.__enter__()
+            return self
+
+        def __exit__(self, *args):
+            return self._temporary.__exit__(*args)
+
+        def write(self, _content):
+            raise OSError("disk full")
+
+    monkeypatch.setattr(ground_truth_io.tempfile, "NamedTemporaryFile", FailingTemporaryFile)
+    with pytest.raises(OSError, match="disk full"):
+        persist_ground_truth_upload(
+            json.dumps(_valid_payload(), ensure_ascii=False).encode("utf-8"),
+            "truth.json",
+            TASK,
+            destination,
+        )
+
+    assert list(destination.iterdir()) == []
+
+
+def test_nonconvertible_tolerance_returns_a_stable_validation_error(tmp_path):
+    path = _write_json(
+        tmp_path,
+        _valid_payload(entities=[{"type": "parameter", "name": "ratio", "tolerance": 10**400}]),
+    )
+
+    with pytest.raises(GroundTruthValidationError) as exc_info:
+        load_ground_truth_upload(path, TASK)
+
+    _assert_error(exc_info, "invalid_parameter")
+
+
+@pytest.mark.parametrize("declared_task", [None, ""])
+def test_explicit_missing_like_task_values_are_not_injected(tmp_path, declared_task):
+    path = _write_json(tmp_path, _valid_payload(task=declared_task))
+
+    with pytest.raises(GroundTruthValidationError) as exc_info:
+        load_ground_truth_upload(path, TASK)
+
+    _assert_error(exc_info, "task_mismatch")
+
+
+def test_explicit_null_aliases_are_invalid(tmp_path):
+    path = _write_json(
+        tmp_path,
+        _valid_payload(entities=[{"type": "model", "name": "LEAP", "aliases": None}]),
+    )
+
+    with pytest.raises(GroundTruthValidationError) as exc_info:
+        load_ground_truth_upload(path, TASK)
+
+    _assert_error(exc_info, "invalid_aliases")
+
+
+def test_legacy_evaluator_fallback_keeps_shared_file_size_validation(tmp_path, monkeypatch):
+    task = "legacy-oversized"
+    path = tmp_path / f"{task}.json"
+    path.write_bytes(json.dumps({"entities": [{"name": "LEAP"}]}).encode() + b" " * MAX_UPLOAD_BYTES)
+    monkeypatch.setattr(entity_evaluator, "get_ground_truth_dir", lambda: tmp_path)
+
+    result = entity_evaluator.load_ground_truth(task)
+
+    assert result["status"] == "invalid_ground_truth"
+    assert result["error_code"] == "file_too_large"
+
+
+def test_legacy_evaluator_fallback_keeps_shared_file_type_validation(tmp_path, monkeypatch):
+    path = tmp_path / "legacy.txt"
+    path.write_text(json.dumps([{"name": "LEAP"}]), encoding="utf-8")
+    monkeypatch.setattr(entity_evaluator, "_ground_truth_candidates", lambda _task: [path])
+
+    result = entity_evaluator.load_ground_truth("legacy-type")
+
+    assert result["status"] == "invalid_ground_truth"
+    assert result["error_code"] == "unsupported_file_type"
+
+
+def test_corrupt_uploads_have_stable_parse_errors(tmp_path):
+    invalid_json = tmp_path / "broken.json"
+    invalid_json.write_bytes(b"{")
+    invalid_xlsx = tmp_path / "broken.xlsx"
+    invalid_xlsx.write_bytes(b"not an xlsx")
+
+    for path, code in ((invalid_json, "invalid_json"), (invalid_xlsx, "invalid_excel")):
+        with pytest.raises(GroundTruthValidationError) as exc_info:
+            load_ground_truth_upload(path, TASK)
+        _assert_error(exc_info, code)
+
+
+def test_xlsx_uses_first_visible_sheet_and_splits_both_semicolon_forms(tmp_path):
+    workbook = Workbook()
+    hidden = workbook.active
+    hidden.title = "隐藏"
+    hidden.append(["错误", "表头"])
+    hidden.sheet_state = "hidden"
+    visible = workbook.create_sheet("标准答案")
+    visible.append(["类别", "名称", "别名"])
+    visible.append(["型号", "LEAP", "LEAP-1A; LEAP-1B；LEAP"])
+    path = tmp_path / "visible.xlsx"
+    workbook.save(path)
+
+    canonical = load_ground_truth_upload(path, TASK)
+
+    assert canonical["entities"] == [
+        {"type": "model", "name": "LEAP", "aliases": ["leap1a", "leap1b", "leap"]}
+    ]
