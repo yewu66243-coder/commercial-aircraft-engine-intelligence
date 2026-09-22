@@ -3793,6 +3793,7 @@ select:focus {
 }
 .evaluation-card span { color: var(--is-muted); font-size: 12px; }
 .evaluation-card b { display: block; margin-top: 4px; font-size: 20px; }
+.evaluation-card small { display: block; margin-top: 3px; font-size: 11px; font-weight: 600; }
 .evaluation-card[data-state="pass"] { background: #edf7f1; color: #286448; }
 .evaluation-card[data-state="fail"] { background: #fff0f0; color: #973c3c; }
 .evaluation-message { margin: 10px 0 0; line-height: 1.5; }

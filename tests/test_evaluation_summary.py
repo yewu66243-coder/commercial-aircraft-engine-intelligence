@@ -148,3 +148,39 @@ def test_failed_links_do_not_reuse_partial_counts_or_rate():
     assert summary["public_links"]["status"] == "evaluation_failed"
     assert summary["public_links"]["accessibility_rate"] is None
     assert summary["public_links"]["requirement_met"] is None
+
+
+def test_empty_strict_metrics_keep_requirement_neutral():
+    summary = build_evaluation_summary(
+        {
+            "mode": "strict",
+            "status": "auto_evaluated",
+            "metrics": {
+                "overall": {"precision": None, "recall": None, "f1": None},
+                "categories": {},
+            },
+        },
+        {"total_urls": 0, "accessibility_rate": None},
+    )
+
+    assert summary["entity"]["status"] == "completed"
+    assert summary["entity"]["overall"]["requirement_met"] is None
+
+
+def test_malformed_link_counts_fail_only_link_summary():
+    summary = build_evaluation_summary(
+        {
+            "mode": "strict",
+            "status": "auto_evaluated",
+            "metrics": {
+                "overall": {"precision": 1.0, "recall": 1.0, "f1": 1.0},
+                "categories": {},
+            },
+        },
+        {"total_urls": {"malformed": True}},
+    )
+
+    assert summary["status"] == "partial"
+    assert summary["entity"]["status"] == "completed"
+    assert summary["public_links"]["status"] == "evaluation_failed"
+    assert summary["errors"][-1]["scope"] == "public_links"

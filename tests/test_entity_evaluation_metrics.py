@@ -151,6 +151,41 @@ class EntityGroundTruthTests:
 
         assert result["entities"][0]["name"] == "specific"
 
+    @pytest.mark.parametrize(
+        "payload",
+        [
+            {"entities": [{"name": "generic"}]},
+            {"task": "", "entities": [{"name": "generic"}]},
+            {"task": "different-task", "entities": [{"name": "generic"}]},
+            [{"name": "generic"}],
+        ],
+    )
+    def test_generic_ground_truth_requires_matching_task_binding(
+        self, tmp_path, monkeypatch, payload
+    ):
+        task = "bound-task"
+        (tmp_path / "ground_truth.json").write_text(
+            json.dumps(payload), encoding="utf-8"
+        )
+        monkeypatch.setattr(entity_evaluator, "get_ground_truth_dir", lambda: tmp_path)
+
+        result = entity_evaluator.load_ground_truth(task)
+
+        assert result["status"] == "invalid_ground_truth"
+        assert result["error_code"] == "task_mismatch"
+
+    def test_generic_ground_truth_loads_when_task_matches(self, tmp_path, monkeypatch):
+        task = "bound-task"
+        (tmp_path / "ground_truth.json").write_text(
+            json.dumps({"task": task, "entities": [{"name": "generic"}]}), encoding="utf-8"
+        )
+        monkeypatch.setattr(entity_evaluator, "get_ground_truth_dir", lambda: tmp_path)
+
+        result = entity_evaluator.load_ground_truth(task)
+
+        assert result["status"] == "loaded"
+        assert result["entities"][0]["name"] == "generic"
+
     def test_loads_top_level_list_and_legacy_expected_entities(self, tmp_path, monkeypatch):
         monkeypatch.setattr(entity_evaluator, "get_ground_truth_dir", lambda: tmp_path)
         list_task = "legacy-list"
@@ -180,6 +215,40 @@ class EntityGroundTruthTests:
 
         assert result["status"] == "invalid_ground_truth"
         assert result["error_code"] == error_code
+
+    @pytest.mark.parametrize(
+        "entity",
+        [
+            {"name": "推力", "type": "参数", "value": {}},
+            {"name": "推力", "type": "参数", "value": True},
+            {"name": "推力", "type": "参数", "unit": {}},
+            {"name": "推力", "type": "参数", "tolerance": -1},
+            {"name": "推力", "type": "参数", "tolerance": float("inf")},
+        ],
+    )
+    def test_rejects_malformed_parameter_ground_truth(self, tmp_path, monkeypatch, entity):
+        task = "bad-parameter"
+        (tmp_path / f"{task}.json").write_text(
+            json.dumps({"entities": [entity]}), encoding="utf-8"
+        )
+        monkeypatch.setattr(entity_evaluator, "get_ground_truth_dir", lambda: tmp_path)
+
+        result = entity_evaluator.load_ground_truth(task)
+
+        assert result["status"] == "invalid_ground_truth"
+        assert result["error_code"] == "invalid_parameter"
+
+    def test_well_formed_unknown_parameter_unit_loads_for_audited_matching(self, tmp_path, monkeypatch):
+        task = "unknown-unit"
+        (tmp_path / f"{task}.json").write_text(
+            json.dumps(
+                {"entities": [{"name": "距离", "type": "参数", "value": 10, "unit": "furlong"}]}
+            ),
+            encoding="utf-8",
+        )
+        monkeypatch.setattr(entity_evaluator, "get_ground_truth_dir", lambda: tmp_path)
+
+        assert entity_evaluator.load_ground_truth(task)["status"] == "loaded"
 
     def test_normalizes_and_deduplicates_aliases(self, tmp_path, monkeypatch):
         task = "aliases"
@@ -313,6 +382,26 @@ class TestEntityMetrics:
             not item["matched"] and reason_fragment in item["reason"]
             for item in result["match_audit"]
         )
+
+    @pytest.mark.parametrize(
+        ("predicted", "expected"),
+        [
+            ("10 kg/s", "10 kg"),
+            ("100 kN/m", "100 kN"),
+            ("10-20", "10"),
+            ("10 to 20 kN", "10 kN"),
+        ],
+    )
+    def test_compound_or_range_parameter_values_never_truncate_to_scalar(
+        self, predicted, expected
+    ):
+        result = entity_evaluator.evaluate_entities_against_ground_truth(
+            [_entity("rating", "parameter", value=predicted)],
+            [_entity("rating", "parameter", value=expected)],
+        )
+
+        assert result["overall"]["true_positive"] == 0
+        assert result["match_audit"][0]["reason"] in {"unknown_unit", "unparseable_value"}
 
     @pytest.mark.parametrize("tolerance", [-0.1, "invalid"])
     def test_invalid_expected_tolerance_rejects_parameter_match(self, tolerance):

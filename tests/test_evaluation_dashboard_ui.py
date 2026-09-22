@@ -12,6 +12,8 @@ def test_markup_and_runtime_wiring_exist():
     assert 'id="evaluationEntityF1"' in html
     assert 'id="evaluationEntityRecall"' in html
     assert 'id="evaluationLinkAccessibility"' in html
+    assert 'id="evaluationEntityF1Status"' in html
+    assert 'id="evaluationLinkAccessibilityStatus"' in html
     assert 'id="evaluationCategoryBody"' in html
     assert html.index('id="evaluationPanel"') < html.index('id="reportContainer"')
     assert "/site/evaluation_panel.js?v=evaluation-dashboard-20260921" in html

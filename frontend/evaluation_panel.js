@@ -36,11 +36,48 @@
       : links.status === 'evaluation_failed'
         ? 'fail'
         : 'neutral';
+    const entityF1Status = invalid
+      ? '需修正标准答案'
+      : entityFailed
+        ? '需处理'
+        : strict
+          ? entity.overall.requirement_met === true
+            ? '达标'
+            : entity.overall.requirement_met === false
+              ? '未达标'
+              : '无可计算样本'
+          : '待严格测评';
+    const entityRecallStatus = invalid
+      ? '需修正标准答案'
+      : entityFailed
+        ? '需处理'
+        : strict
+          ? '参考值'
+          : '待严格测评';
+    const linkStatus = links.status === 'no_public_urls'
+      ? '不适用'
+      : links.status === 'evaluation_failed'
+        ? '需处理'
+        : links.requirement_met === true
+          ? '达标'
+          : links.requirement_met === false
+            ? '未达标'
+            : '无可计算样本';
 
     const cards = [
-      { id: 'evaluationEntityF1', value: entityValue('f1'), state: entityState },
-      { id: 'evaluationEntityRecall', value: entityValue('recall'), state: entityState },
-      { id: 'evaluationLinkAccessibility', value: linkValue, state: linkState },
+      {
+        id: 'evaluationEntityF1', statusId: 'evaluationEntityF1Status',
+        value: entityValue('f1'), state: entityState, statusText: entityF1Status,
+      },
+      {
+        id: 'evaluationEntityRecall', statusId: 'evaluationEntityRecallStatus',
+        value: entityValue('recall'), state: invalid || entityFailed ? 'fail' : 'neutral',
+        statusText: entityRecallStatus,
+      },
+      {
+        id: 'evaluationLinkAccessibility', statusId: 'evaluationLinkAccessibilityStatus',
+        value: linkValue, state: linkState, statusText: linkStatus,
+      },
     ];
     const categories = entity.categories || {};
     const rows = categoryOrder
@@ -74,6 +111,8 @@
       if (!value) return;
       value.textContent = card.value;
       if (value.parentElement) value.parentElement.dataset.state = card.state;
+      const status = targetDocument.getElementById(card.statusId);
+      if (status) status.textContent = card.statusText;
     });
     const body = targetDocument.getElementById('evaluationCategoryBody');
     if (body) {
@@ -115,6 +154,14 @@
       const value = targetDocument.getElementById(id);
       if (value) value.textContent = '—';
       if (value?.parentElement) value.parentElement.dataset.state = 'neutral';
+    });
+    [
+      'evaluationEntityF1Status',
+      'evaluationEntityRecallStatus',
+      'evaluationLinkAccessibilityStatus',
+    ].forEach(id => {
+      const status = targetDocument.getElementById(id);
+      if (status) status.textContent = '待测评';
     });
     const body = targetDocument.getElementById('evaluationCategoryBody');
     if (body) body.replaceChildren();

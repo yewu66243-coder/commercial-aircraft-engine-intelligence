@@ -1379,7 +1379,7 @@ class ThreeAgentService:
         except Exception as exc:
             logging.getLogger(__name__).exception("URL accessibility evaluation failed")
             url_check = {
-                "total_urls": 0,
+                "total_urls": len(self._extract_urls(final_report)),
                 "checked_urls": 0,
                 "accessible_urls": 0,
                 "failed_urls": 0,
@@ -1409,7 +1409,40 @@ class ThreeAgentService:
                 "note": "实体抽取测评未完成。",
                 "evaluation_error": type(exc).__name__,
             }
-        evaluation_summary = build_evaluation_summary(entity_eval, url_check)
+        try:
+            evaluation_summary = build_evaluation_summary(entity_eval, url_check)
+        except Exception:
+            logging.getLogger(__name__).exception("Evaluation summary assembly failed")
+            evaluation_summary = {
+                "status": "failed",
+                "entity": {
+                    "mode": str(entity_eval.get("mode") or "proxy"),
+                    "status": "evaluation_failed",
+                    "ground_truth_path": "",
+                    "threshold": 0.90,
+                    "overall": None,
+                    "categories": {},
+                    "proxy_evidence_support_rate": None,
+                    "message": "实体抽取测评汇总未完成。",
+                },
+                "public_links": {
+                    "status": "evaluation_failed",
+                    "threshold": 0.98,
+                    "total_count": 0,
+                    "checked_count": 0,
+                    "accessible_count": 0,
+                    "inaccessible_count": 0,
+                    "accessibility_rate": None,
+                    "requirement_met": None,
+                },
+                "errors": [
+                    {
+                        "scope": "evaluation_summary",
+                        "code": "evaluation_failed",
+                        "message": "测评结果汇总未完成，报告导出已继续。",
+                    }
+                ],
+            }
         self._log(
             "Evaluation Agent",
             f"已抽取 {entity_eval.get('extracted_count', 0)} 个实体/参数，"

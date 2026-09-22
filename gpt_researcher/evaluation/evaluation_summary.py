@@ -33,9 +33,12 @@ def _entity_summary(
         if isinstance(overall_source, dict):
             overall = dict(overall_source)
             f1 = overall.get("f1")
-            overall["requirement_met"] = (
-                isinstance(f1, (int, float)) and not isinstance(f1, bool) and f1 >= ENTITY_THRESHOLD
-            )
+            if f1 is None:
+                overall["requirement_met"] = None
+            elif isinstance(f1, (int, float)) and not isinstance(f1, bool):
+                overall["requirement_met"] = f1 >= ENTITY_THRESHOLD
+            else:
+                raise ValueError("invalid strict F1")
             source_categories = metrics.get("categories")
             categories = dict(source_categories) if isinstance(source_categories, dict) else {}
             status = "completed"
@@ -134,8 +137,48 @@ def build_evaluation_summary(
     url_check: Dict[str, Any] | None,
 ) -> Dict[str, Any]:
     """Combine raw entity and URL results without rerunning either evaluation."""
-    entity, entity_errors = _entity_summary(entity_eval or {})
-    public_links, link_errors = _link_summary(url_check or {})
+    entity_input = entity_eval or {}
+    link_input = url_check or {}
+    try:
+        entity, entity_errors = _entity_summary(entity_input)
+    except Exception:
+        entity = {
+            "mode": str(entity_input.get("mode") or "proxy"),
+            "status": "evaluation_failed",
+            "ground_truth_path": "",
+            "threshold": ENTITY_THRESHOLD,
+            "overall": None,
+            "categories": {},
+            "proxy_evidence_support_rate": None,
+            "message": "实体抽取测评汇总未完成。",
+        }
+        entity_errors = [
+            {
+                "scope": "entity",
+                "code": "evaluation_failed",
+                "message": "实体抽取测评汇总未完成。",
+            }
+        ]
+    try:
+        public_links, link_errors = _link_summary(link_input)
+    except Exception:
+        public_links = {
+            "status": "evaluation_failed",
+            "threshold": PUBLIC_LINK_THRESHOLD,
+            "total_count": 0,
+            "checked_count": 0,
+            "accessible_count": 0,
+            "inaccessible_count": 0,
+            "accessibility_rate": None,
+            "requirement_met": None,
+        }
+        link_errors = [
+            {
+                "scope": "public_links",
+                "code": "evaluation_failed",
+                "message": "公开链接可访问性测评汇总未完成。",
+            }
+        ]
     errors = entity_errors + link_errors
     successful_parts = sum(
         (

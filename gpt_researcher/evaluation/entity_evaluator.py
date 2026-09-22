@@ -937,6 +937,26 @@ def load_ground_truth(task: str) -> Dict[str, Any]:
         except json.JSONDecodeError:
             return _invalid_ground_truth(path, "invalid_json", "标准答案文件不是有效 JSON。")
 
+        is_generic_fallback = path.name.lower() == "ground_truth.json"
+        if is_generic_fallback:
+            if not isinstance(data, dict):
+                return _invalid_ground_truth(
+                    path,
+                    "task_mismatch",
+                    "通用标准答案必须声明与当前任务一致的 task。",
+                )
+            generic_task = data.get("task")
+            if (
+                not isinstance(generic_task, str)
+                or not generic_task.strip()
+                or _normalize_entity(generic_task) != _normalize_entity(task)
+            ):
+                return _invalid_ground_truth(
+                    path,
+                    "task_mismatch",
+                    "通用标准答案声明的任务与当前任务不一致。",
+                )
+
         if isinstance(data, list):
             entities = data
         elif isinstance(data, dict):
@@ -973,6 +993,33 @@ def load_ground_truth(task: str) -> Dict[str, Any]:
             if category_value is None or (isinstance(category_value, str) and not category_value.strip()):
                 category_value = entity.get("类别", "")
             normalized["category"] = normalize_entity_category(category_value)
+            if normalized["category"] == "parameter":
+                unit = entity.get("unit")
+                if unit is not None and not isinstance(unit, str):
+                    return _invalid_ground_truth(
+                        path, "invalid_parameter", "标准答案参数的单位必须是字符串。"
+                    )
+                tolerance = entity.get("tolerance")
+                if tolerance is not None and (
+                    isinstance(tolerance, bool)
+                    or not isinstance(tolerance, (int, float))
+                    or not math.isfinite(float(tolerance))
+                    or float(tolerance) < 0
+                ):
+                    return _invalid_ground_truth(
+                        path, "invalid_parameter", "标准答案参数的容差必须是非负有限数值。"
+                    )
+                if "value" in entity and entity.get("value") is not None:
+                    value = entity.get("value")
+                    if isinstance(value, bool) or not isinstance(value, (int, float, str)):
+                        return _invalid_ground_truth(
+                            path, "invalid_parameter", "标准答案参数值必须是数值或数值字符串。"
+                        )
+                    parsed_value = _parse_parameter_value(entity)
+                    if not parsed_value.get("ok") and parsed_value.get("reason") != "unknown_unit":
+                        return _invalid_ground_truth(
+                            path, "invalid_parameter", "标准答案参数值无法解析为单一数值。"
+                        )
             normalized_aliases = []
             seen_aliases = set()
             for alias in aliases:
@@ -994,8 +1041,9 @@ def load_ground_truth(task: str) -> Dict[str, Any]:
 
 
 _MISSING_PARAMETER_VALUES = {"", "-", "--", "—", "–", "无", "n/a", "na", "none", "null"}
-_NUMERIC_VALUE_RE = re.compile(
-    r"[-+]?(?:\d+(?:,\d{3})*(?:\.\d*)?|\.\d+)(?:[eE][-+]?\d+)?"
+_PARAMETER_VALUE_RE = re.compile(
+    r"^\s*(?P<number>[-+]?(?:\d+(?:,\d{3})*(?:\.\d*)?|\.\d+)(?:[eE][-+]?\d+)?)"
+    r"\s*(?P<unit>°?[A-Za-z]+|[%％])?\s*$"
 )
 _UNIT_DEFINITIONS = {
     "n": ("force", 1.0),
@@ -1050,18 +1098,14 @@ def _parse_parameter_value(item: Dict[str, Any]) -> Dict[str, Any]:
         numeric_value = float(raw_value)
         parsed_unit = ""
     elif isinstance(raw_value, str):
-        match = _NUMERIC_VALUE_RE.search(raw_value)
+        match = _PARAMETER_VALUE_RE.fullmatch(raw_value)
         if not match:
             return {"ok": False, "reason": "unparseable_value"}
         try:
-            numeric_value = float(match.group(0).replace(",", ""))
+            numeric_value = float(match.group("number").replace(",", ""))
         except ValueError:
             return {"ok": False, "reason": "unparseable_value"}
-        suffix = raw_value[match.end() :].strip()
-        unit_match = re.match(r"^(°?[A-Za-z]+|[%％])", suffix)
-        parsed_unit = unit_match.group(1) if unit_match else ""
-        if suffix and not parsed_unit and re.search(r"[A-Za-z°%％]", suffix):
-            return {"ok": False, "reason": "unknown_unit"}
+        parsed_unit = match.group("unit") or ""
     else:
         return {"ok": False, "reason": "unparseable_value"}
 
@@ -1070,6 +1114,9 @@ def _parse_parameter_value(item: Dict[str, Any]) -> Dict[str, Any]:
 
     explicit_unit = item.get("unit")
     has_explicit_unit = explicit_unit is not None and str(explicit_unit).strip() != ""
+    if has_explicit_unit and parsed_unit:
+        if _normalize_unit(explicit_unit) != _normalize_unit(parsed_unit):
+            return {"ok": False, "reason": "unit_mismatch"}
     unit = _normalize_unit(explicit_unit if has_explicit_unit else parsed_unit)
     if not unit:
         return {"ok": True, "value": numeric_value, "dimension": "dimensionless", "unit": ""}
