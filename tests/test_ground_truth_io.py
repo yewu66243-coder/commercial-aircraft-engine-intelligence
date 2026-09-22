@@ -1,5 +1,6 @@
 import json
 import math
+import zipfile
 from io import BytesIO
 
 import pytest
@@ -397,3 +398,67 @@ def test_xlsx_uses_first_visible_sheet_and_splits_both_semicolon_forms(tmp_path)
     assert canonical["entities"] == [
         {"type": "model", "name": "LEAP", "aliases": ["leap1a", "leap1b", "leap"]}
     ]
+
+
+@pytest.mark.parametrize("value", ["1e1000000", "1e309"])
+def test_parameter_values_must_be_finite_for_the_existing_matcher(tmp_path, value):
+    path = _write_json(
+        tmp_path,
+        _valid_payload(entities=[{"type": "parameter", "name": "ratio", "value": value}]),
+    )
+
+    with pytest.raises(GroundTruthValidationError) as exc_info:
+        load_ground_truth_upload(path, TASK)
+
+    _assert_error(exc_info, "invalid_parameter")
+
+
+def test_duplicate_parameter_keys_include_embedded_units(tmp_path):
+    distinct_units = _write_json(
+        tmp_path,
+        _valid_payload(
+            entities=[
+                {"type": "parameter", "name": "thrust", "value": "100 kN"},
+                {"type": "parameter", "name": "thrust", "value": "100 N"},
+            ]
+        ),
+        "distinct-units.json",
+    )
+    assert len(load_ground_truth_upload(distinct_units, TASK)["entities"]) == 2
+
+    equivalent_units = _write_json(
+        tmp_path,
+        _valid_payload(
+            entities=[
+                {"type": "parameter", "name": "thrust", "value": "100 kN"},
+                {"type": "parameter", "name": "thrust", "value": 100, "unit": "kN"},
+            ]
+        ),
+        "equivalent-units.json",
+    )
+    with pytest.raises(GroundTruthValidationError) as exc_info:
+        load_ground_truth_upload(equivalent_units, TASK)
+    _assert_error(exc_info, "duplicate_entity")
+
+
+def test_delayed_corrupt_xlsx_sheet_xml_returns_safe_error_and_releases_file(tmp_path):
+    path = _write_xlsx(tmp_path, [["类别", "名称"], ["型号", "LEAP"]])
+    replacement = tmp_path / "replacement.xlsx"
+    with zipfile.ZipFile(path) as source, zipfile.ZipFile(replacement, "w") as target:
+        for info in source.infolist():
+            content = source.read(info.filename)
+            if info.filename == "xl/worksheets/sheet1.xml":
+                content = (
+                    b'<?xml version="1.0" encoding="UTF-8"?>'
+                    b'<worksheet xmlns="http://schemas.openxmlformats.org/spreadsheetml/2006/main">'
+                    b'<dimension ref="A1:B2"/><sheetData><row'
+                )
+            target.writestr(info, content)
+    replacement.replace(path)
+
+    with pytest.raises(GroundTruthValidationError) as exc_info:
+        load_ground_truth_upload(path, TASK)
+
+    _assert_error(exc_info, "invalid_excel")
+    path.unlink()
+    assert not path.exists()

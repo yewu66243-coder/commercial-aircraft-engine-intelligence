@@ -76,7 +76,7 @@ def _normalized_unit(value: Any) -> str:
     return re.sub(r"\s+", "", str(value or "").replace("％", "%").replace("℃", "°C").replace("℉", "°F")).lower()
 
 
-def _parse_parameter_number(value: Any, unit: Any = None) -> Decimal:
+def _parse_parameter_number(value: Any, unit: Any = None) -> tuple[Decimal, str]:
     if isinstance(value, bool):
         raise ValueError
     if isinstance(value, (int, float)):
@@ -98,19 +98,30 @@ def _parse_parameter_number(value: Any, unit: Any = None) -> Decimal:
         raise ValueError
     if not number.is_finite():
         raise ValueError
-    if unit is not None and str(unit).strip() and embedded_unit and _normalized_unit(unit) != _normalized_unit(embedded_unit):
-        raise ValueError
-    return number
-
-
-def _normalized_parameter_value(value: Any) -> str:
-    if value is None:
-        return "<missing>"
     try:
-        number = _parse_parameter_number(value)
-    except ValueError:
-        return _normalized_key(value)
-    return format(number.normalize(), "f")
+        matcher_value = float(number)
+    except (OverflowError, ValueError):
+        raise ValueError
+    if not math.isfinite(matcher_value):
+        raise ValueError
+    if unit is not None and not isinstance(unit, str):
+        raise ValueError
+    explicit_unit = _normalized_unit(unit) if unit and unit.strip() else ""
+    normalized_embedded_unit = _normalized_unit(embedded_unit)
+    if explicit_unit and normalized_embedded_unit and explicit_unit != normalized_embedded_unit:
+        raise ValueError
+    return number, explicit_unit or normalized_embedded_unit
+
+
+def _normalized_parameter_value(value: Any, unit: Any = None) -> tuple[str, str]:
+    if value is None:
+        return "<missing>", _normalized_unit(unit)
+    try:
+        number, normalized_unit = _parse_parameter_number(value, unit)
+        normalized_number = "0" if number == 0 else str(number.normalize())
+    except (InvalidOperation, OverflowError, ValueError) as error:
+        raise ValueError from error
+    return normalized_number, normalized_unit
 
 
 def _validate_parameter_fields(
@@ -186,11 +197,17 @@ def canonicalize_ground_truth_payload(payload: Any, expected_task: str) -> dict[
         if normalized["type"] == "parameter":
             _validate_parameter_fields(entity, normalized, location)
 
+        try:
+            value_key, unit_key = _normalized_parameter_value(
+                normalized.get("value"), normalized.get("unit")
+            )
+        except ValueError:
+            _error("invalid_parameter", f"标准答案参数值必须是有限单一数值。{location}")
         duplicate_key = (
             normalized["type"],
             _normalized_key(normalized["name"]),
-            _normalized_parameter_value(normalized.get("value")),
-            _normalized_key(normalized.get("unit", "")),
+            value_key,
+            unit_key,
         )
         if duplicate_key in duplicate_keys:
             _error("duplicate_entity", f"标准答案包含重复实体。{location}")
@@ -221,13 +238,14 @@ def _split_aliases(value: Any) -> list[str]:
 
 
 def _xlsx_payload(path: Path) -> dict[str, Any]:
+    workbook = None
+    formula_workbook = None
+    rows = None
+    formula_rows = None
+    parse_error: GroundTruthValidationError | None = None
     try:
         workbook = load_workbook(path, read_only=True, data_only=True, keep_links=False)
         formula_workbook = load_workbook(path, read_only=True, data_only=False, keep_links=False)
-    except Exception:
-        _error("invalid_excel", "标准答案 XLSX 文件无法读取。")
-
-    try:
         visible_sheets = [sheet for sheet in workbook.worksheets if sheet.sheet_state == "visible"]
         if not visible_sheets:
             _error("invalid_excel", "标准答案 XLSX 文件没有可见工作表。")
@@ -285,9 +303,21 @@ def _xlsx_payload(path: Path) -> dict[str, Any]:
                     entity[target] = values[source]
             entities.append(entity)
         return {"entities": entities}
+    except GroundTruthValidationError:
+        raise
+    except Exception:
+        parse_error = GroundTruthValidationError("invalid_excel", "标准答案 XLSX 文件无法读取。")
     finally:
-        workbook.close()
-        formula_workbook.close()
+        if rows is not None:
+            rows.close()
+        if formula_rows is not None:
+            formula_rows.close()
+        if workbook is not None:
+            workbook.close()
+        if formula_workbook is not None:
+            formula_workbook.close()
+    if parse_error is not None:
+        raise parse_error
 
 
 def load_ground_truth_upload(path: str | Path, expected_task: str) -> dict[str, Any]:
