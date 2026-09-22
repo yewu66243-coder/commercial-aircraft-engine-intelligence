@@ -15,6 +15,12 @@ from urllib.error import HTTPError, URLError
 from urllib.parse import unquote
 from urllib.request import Request, urlopen
 
+from gpt_researcher.evaluation.ground_truth_io import (
+    GroundTruthValidationError,
+    canonicalize_ground_truth_payload,
+    load_ground_truth_upload,
+)
+
 
 ENTITY_THRESHOLD = 0.9
 AUTO_EVIDENCE_THRESHOLD = 0.9
@@ -925,27 +931,65 @@ def _invalid_ground_truth(path: Path, error_code: str, message: str) -> Dict[str
     }
 
 
+def _legacy_payload_for_unified_validation(payload: Any, task: str) -> Any:
+    """Translate historic evaluator files before handing them to the shared validator."""
+    if isinstance(payload, list):
+        converted: Dict[str, Any] = {"task": task, "entities": payload}
+    elif isinstance(payload, dict) and "expected_entities" in payload:
+        converted = {
+            "task": payload.get("task") or task,
+            "entities": payload["expected_entities"],
+        }
+    elif isinstance(payload, dict) and "entities" in payload:
+        converted = dict(payload)
+    else:
+        return payload
+
+    entities = converted.get("entities")
+    if not isinstance(entities, list):
+        return converted
+    normalized_legacy_entities: List[Any] = []
+    for entity in entities:
+        if not isinstance(entity, dict):
+            normalized_legacy_entities.append(entity)
+            continue
+        item = dict(entity)
+        if "name" not in item:
+            for key in ("entity", "实体", "实体/参数"):
+                if key in item:
+                    item["name"] = item[key]
+                    break
+        if not isinstance(item.get("type"), str) or not item["type"].strip():
+            category = item.get("category")
+            if category is None or (isinstance(category, str) and not category.strip()):
+                category = item.get("类别")
+            item["type"] = category if isinstance(category, str) and category.strip() else "other"
+        normalized_legacy_entities.append(item)
+    converted["entities"] = normalized_legacy_entities
+    return converted
+
+
 def load_ground_truth(task: str) -> Dict[str, Any]:
     for path in _ground_truth_candidates(task):
         if not path.exists():
             continue
-        try:
-            with path.open("r", encoding="utf-8") as handle:
-                data = json.load(handle)
-        except (OSError, UnicodeError):
-            return _invalid_ground_truth(path, "invalid_json", "标准答案文件无法读取。")
-        except json.JSONDecodeError:
-            return _invalid_ground_truth(path, "invalid_json", "标准答案文件不是有效 JSON。")
-
+        legacy_payload: Any = None
         is_generic_fallback = path.name.lower() == "ground_truth.json"
         if is_generic_fallback:
-            if not isinstance(data, dict):
+            try:
+                with path.open("r", encoding="utf-8") as handle:
+                    legacy_payload = json.load(handle)
+            except (OSError, UnicodeError):
+                return _invalid_ground_truth(path, "invalid_json", "标准答案文件无法读取。")
+            except json.JSONDecodeError:
+                return _invalid_ground_truth(path, "invalid_json", "标准答案文件不是有效 JSON。")
+            if not isinstance(legacy_payload, dict):
                 return _invalid_ground_truth(
                     path,
                     "task_mismatch",
                     "通用标准答案必须声明与当前任务一致的 task。",
                 )
-            generic_task = data.get("task")
+            generic_task = legacy_payload.get("task")
             if (
                 not isinstance(generic_task, str)
                 or not generic_task.strip()
@@ -956,86 +1000,30 @@ def load_ground_truth(task: str) -> Dict[str, Any]:
                     "task_mismatch",
                     "通用标准答案声明的任务与当前任务不一致。",
                 )
+        try:
+            canonical = load_ground_truth_upload(path, task)
+        except GroundTruthValidationError as primary_error:
+            try:
+                if legacy_payload is None:
+                    with path.open("r", encoding="utf-8") as handle:
+                        legacy_payload = json.load(handle)
+                legacy_payload = _legacy_payload_for_unified_validation(legacy_payload, task)
+                if not isinstance(legacy_payload, dict) or "entities" not in legacy_payload:
+                    raise primary_error
+                canonical = canonicalize_ground_truth_payload(legacy_payload, task)
+            except (OSError, UnicodeError, json.JSONDecodeError):
+                return _invalid_ground_truth(path, "invalid_json", "标准答案文件不是有效 JSON。")
+            except GroundTruthValidationError as error:
+                return _invalid_ground_truth(path, error.code, error.message)
 
-        if isinstance(data, list):
-            entities = data
-        elif isinstance(data, dict):
-            declared_task = data.get("task")
-            if declared_task not in (None, "") and _normalize_entity(declared_task) != _normalize_entity(task):
-                return _invalid_ground_truth(path, "task_mismatch", "标准答案声明的任务与当前任务不一致。")
-            if "entities" in data:
-                entities = data["entities"]
-            elif "expected_entities" in data:
-                entities = data["expected_entities"]
-            else:
-                return _invalid_ground_truth(path, "invalid_schema", "标准答案缺少实体列表。")
-        else:
-            return _invalid_ground_truth(path, "invalid_schema", "标准答案顶层结构无效。")
-
-        if not isinstance(entities, list):
-            return _invalid_ground_truth(path, "invalid_schema", "标准答案实体列表结构无效。")
-
-        normalized_entities: List[Dict[str, Any]] = []
-        for entity in entities:
-            if not isinstance(entity, dict):
-                return _invalid_ground_truth(path, "invalid_entity", "标准答案包含无效实体。")
-            name = _validated_entity_name(entity)
-            if not name:
-                return _invalid_ground_truth(path, "invalid_entity", "标准答案实体缺少有效名称。")
-            aliases = entity.get("aliases", [])
-            if not isinstance(aliases, list) or not all(isinstance(alias, str) for alias in aliases):
-                return _invalid_ground_truth(path, "invalid_aliases", "标准答案实体别名必须是字符串列表。")
-            normalized = dict(entity)
-            normalized["name"] = name
-            category_value = entity.get("category")
-            if category_value is None or (isinstance(category_value, str) and not category_value.strip()):
-                category_value = entity.get("type")
-            if category_value is None or (isinstance(category_value, str) and not category_value.strip()):
-                category_value = entity.get("类别", "")
-            normalized["category"] = normalize_entity_category(category_value)
-            if normalized["category"] == "parameter":
-                unit = entity.get("unit")
-                if unit is not None and not isinstance(unit, str):
-                    return _invalid_ground_truth(
-                        path, "invalid_parameter", "标准答案参数的单位必须是字符串。"
-                    )
-                if "tolerance" in entity:
-                    tolerance = entity.get("tolerance")
-                    if (
-                        tolerance is None
-                        or isinstance(tolerance, bool)
-                        or not isinstance(tolerance, (int, float))
-                        or not math.isfinite(float(tolerance))
-                        or float(tolerance) < 0
-                    ):
-                        return _invalid_ground_truth(
-                            path, "invalid_parameter", "标准答案参数的容差必须是非负有限数值。"
-                        )
-                if "value" in entity and entity.get("value") is not None:
-                    value = entity.get("value")
-                    if isinstance(value, bool) or not isinstance(value, (int, float, str)):
-                        return _invalid_ground_truth(
-                            path, "invalid_parameter", "标准答案参数值必须是数值或数值字符串。"
-                        )
-                    parsed_value = _parse_parameter_value(entity)
-                    if not parsed_value.get("ok") and parsed_value.get("reason") != "unknown_unit":
-                        return _invalid_ground_truth(
-                            path, "invalid_parameter", "标准答案参数值无法解析为单一数值。"
-                        )
-            normalized_aliases = []
-            seen_aliases = set()
-            for alias in aliases:
-                normalized_alias = _normalize_entity(alias)
-                if normalized_alias and normalized_alias not in seen_aliases:
-                    seen_aliases.add(normalized_alias)
-                    normalized_aliases.append(normalized_alias)
-            normalized["aliases"] = normalized_aliases
-            normalized_entities.append(normalized)
-
+        evaluator_entities = [
+            dict(entity, category=entity["type"])
+            for entity in canonical["entities"]
+        ]
         return {
             "status": "loaded",
             "path": str(path),
-            "entities": normalized_entities,
+            "entities": evaluator_entities,
             "error_code": "",
             "message": "",
         }
