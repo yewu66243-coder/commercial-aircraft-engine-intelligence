@@ -222,6 +222,7 @@ class EntityGroundTruthTests:
             {"name": "推力", "type": "参数", "value": {}},
             {"name": "推力", "type": "参数", "value": True},
             {"name": "推力", "type": "参数", "unit": {}},
+            {"name": "推力", "type": "参数", "tolerance": None},
             {"name": "推力", "type": "参数", "tolerance": -1},
             {"name": "推力", "type": "参数", "tolerance": float("inf")},
         ],

@@ -999,16 +999,18 @@ def load_ground_truth(task: str) -> Dict[str, Any]:
                     return _invalid_ground_truth(
                         path, "invalid_parameter", "标准答案参数的单位必须是字符串。"
                     )
-                tolerance = entity.get("tolerance")
-                if tolerance is not None and (
-                    isinstance(tolerance, bool)
-                    or not isinstance(tolerance, (int, float))
-                    or not math.isfinite(float(tolerance))
-                    or float(tolerance) < 0
-                ):
-                    return _invalid_ground_truth(
-                        path, "invalid_parameter", "标准答案参数的容差必须是非负有限数值。"
-                    )
+                if "tolerance" in entity:
+                    tolerance = entity.get("tolerance")
+                    if (
+                        tolerance is None
+                        or isinstance(tolerance, bool)
+                        or not isinstance(tolerance, (int, float))
+                        or not math.isfinite(float(tolerance))
+                        or float(tolerance) < 0
+                    ):
+                        return _invalid_ground_truth(
+                            path, "invalid_parameter", "标准答案参数的容差必须是非负有限数值。"
+                        )
                 if "value" in entity and entity.get("value") is not None:
                     value = entity.get("value")
                     if isinstance(value, bool) or not isinstance(value, (int, float, str)):

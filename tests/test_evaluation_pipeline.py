@@ -7,6 +7,8 @@ from types import SimpleNamespace
 from unittest.mock import AsyncMock, patch
 from urllib.error import HTTPError, URLError
 
+import pytest
+
 from three_agent_service import ThreeAgentRequestData, ThreeAgentService
 
 
@@ -91,10 +93,19 @@ def test_inspection_checks_all_unique_report_urls_by_default():
     assert result["accessibility_rate"] == 1.0
 
 
-def test_pipeline_publishes_failed_evaluations_without_blocking_exports():
+@pytest.mark.parametrize(
+    ("source_url", "expected_url_count"),
+    [
+        ("https://example.com/source", 1),
+        ("https://example.com：80/source", 0),
+    ],
+)
+def test_pipeline_publishes_failed_evaluations_without_blocking_exports(
+    source_url, expected_url_count
+):
     service = ThreeAgentService(ThreeAgentRequestData(task="容错测评"))
     service.generation_status = "ready"
-    report = "# 容错测评报告\n\n正文：https://example.com/source"
+    report = f"# 容错测评报告\n\n正文：{source_url}"
     prepared = SimpleNamespace(
         markdown=report,
         quality={"status": "ready", "warnings": []},
@@ -148,7 +159,7 @@ def test_pipeline_publishes_failed_evaluations_without_blocking_exports():
     assert summary["entity"]["status"] == "evaluation_failed"
     assert summary["public_links"]["status"] == "evaluation_failed"
     assert "private" not in repr(summary)
-    assert result["run_statistics"]["url_check"]["total_urls"] == 1
+    assert result["run_statistics"]["url_check"]["total_urls"] == expected_url_count
 
 
 def test_summary_assembly_failure_does_not_block_exports():

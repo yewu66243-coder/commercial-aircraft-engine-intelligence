@@ -586,7 +586,10 @@ class ThreeAgentService:
         cleaned = cleaned.rstrip(".,;:!?。；，、)]}）】》")
         if not cleaned.startswith(("http://", "https://")):
             return ""
-        parsed = urlsplit(cleaned)
+        try:
+            parsed = urlsplit(cleaned)
+        except ValueError:
+            return ""
         if not parsed.scheme or not parsed.netloc:
             return ""
         return cleaned
@@ -1378,8 +1381,12 @@ class ThreeAgentService:
             url_check = await self.inspect_report_urls(final_report)
         except Exception as exc:
             logging.getLogger(__name__).exception("URL accessibility evaluation failed")
+            try:
+                fallback_url_count = len(self._extract_urls(final_report))
+            except Exception:
+                fallback_url_count = 0
             url_check = {
-                "total_urls": len(self._extract_urls(final_report)),
+                "total_urls": fallback_url_count,
                 "checked_urls": 0,
                 "accessible_urls": 0,
                 "failed_urls": 0,
