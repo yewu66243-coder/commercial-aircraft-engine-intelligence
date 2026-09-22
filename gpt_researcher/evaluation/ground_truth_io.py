@@ -8,6 +8,7 @@ import math
 import os
 import re
 import tempfile
+import zipfile
 from collections import Counter
 from decimal import Decimal, InvalidOperation
 from pathlib import Path
@@ -18,6 +19,9 @@ from openpyxl import load_workbook
 
 MAX_UPLOAD_BYTES = 5 * 1024 * 1024
 ALLOWED_SUFFIXES = {".json", ".xlsx"}
+MAX_XLSX_MEMBER_BYTES = 8 * 1024 * 1024
+MAX_XLSX_UNCOMPRESSED_BYTES = 20 * 1024 * 1024
+MAX_XLSX_CELLS = 100_000
 
 _CATEGORY_ALIASES = {
     "organization": {"机构", "企业", "公司", "制造商", "监管机构", "研究机构", "organization"},
@@ -231,6 +235,52 @@ def _validate_upload_path(path: Path) -> None:
         _error("file_too_large", "标准答案文件不能超过 5 MiB。")
 
 
+def read_ground_truth_json(path: str | Path) -> Any:
+    """Read JSON with a single safe error boundary shared by legacy callers."""
+    try:
+        with Path(path).open("r", encoding="utf-8") as handle:
+            return json.load(handle)
+    except (OSError, UnicodeError, json.JSONDecodeError, ValueError, RecursionError):
+        _error("invalid_json", "标准答案文件不是有效 JSON。")
+
+
+def _column_number(column: str) -> int:
+    value = 0
+    for letter in column:
+        value = value * 26 + ord(letter) - ord("A") + 1
+    return value
+
+
+def _dimension_cell_count(reference: str) -> int:
+    end = reference.split(":")[-1].upper()
+    match = re.fullmatch(r"([A-Z]+)([1-9]\d*)", end)
+    if not match:
+        return 0
+    return _column_number(match.group(1)) * int(match.group(2))
+
+
+def _preflight_xlsx(path: Path) -> None:
+    try:
+        with zipfile.ZipFile(path) as archive:
+            members = archive.infolist()
+            total_uncompressed = sum(member.file_size for member in members)
+            if total_uncompressed > MAX_XLSX_UNCOMPRESSED_BYTES or any(
+                member.file_size > MAX_XLSX_MEMBER_BYTES for member in members
+            ):
+                _error("xlsx_too_large", "标准答案 XLSX 解压内容超过安全限制。")
+            for member in members:
+                if not re.fullmatch(r"xl/worksheets/sheet\d+\.xml", member.filename):
+                    continue
+                content = archive.read(member)
+                dimension = re.search(rb"<dimension\b[^>]*\bref\s*=\s*[\"']([^\"']+)", content)
+                if dimension and _dimension_cell_count(dimension.group(1).decode("ascii", "ignore")) > MAX_XLSX_CELLS:
+                    _error("xlsx_too_large", "标准答案 XLSX 声明的工作表范围超过安全限制。")
+    except GroundTruthValidationError:
+        raise
+    except (OSError, zipfile.BadZipFile, ValueError):
+        _error("invalid_excel", "标准答案 XLSX 文件无法读取。")
+
+
 def _split_aliases(value: Any) -> list[str]:
     if value is None:
         return []
@@ -244,12 +294,15 @@ def _xlsx_payload(path: Path) -> dict[str, Any]:
     formula_rows = None
     parse_error: GroundTruthValidationError | None = None
     try:
+        _preflight_xlsx(path)
         workbook = load_workbook(path, read_only=True, data_only=True, keep_links=False)
         formula_workbook = load_workbook(path, read_only=True, data_only=False, keep_links=False)
         visible_sheets = [sheet for sheet in workbook.worksheets if sheet.sheet_state == "visible"]
         if not visible_sheets:
             _error("invalid_excel", "标准答案 XLSX 文件没有可见工作表。")
         worksheet = visible_sheets[0]
+        if worksheet.max_row * worksheet.max_column > MAX_XLSX_CELLS:
+            _error("xlsx_too_large", "标准答案 XLSX 声明的工作表范围超过安全限制。")
         formula_worksheet = next(
             sheet for sheet in formula_workbook.worksheets if sheet.title == worksheet.title
         )
@@ -325,11 +378,7 @@ def load_ground_truth_upload(path: str | Path, expected_task: str) -> dict[str, 
     upload_path = Path(path)
     _validate_upload_path(upload_path)
     if upload_path.suffix.lower() == ".json":
-        try:
-            with upload_path.open("r", encoding="utf-8") as handle:
-                payload = json.load(handle)
-        except (OSError, UnicodeError, json.JSONDecodeError):
-            _error("invalid_json", "标准答案文件不是有效 JSON。")
+        payload = read_ground_truth_json(upload_path)
     else:
         payload = _xlsx_payload(upload_path)
     return canonicalize_ground_truth_payload(payload, expected_task)

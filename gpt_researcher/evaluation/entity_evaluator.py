@@ -19,6 +19,7 @@ from gpt_researcher.evaluation.ground_truth_io import (
     GroundTruthValidationError,
     canonicalize_ground_truth_payload,
     load_ground_truth_upload,
+    read_ground_truth_json,
 )
 
 
@@ -959,13 +960,24 @@ def _legacy_payload_for_unified_validation(payload: Any, task: str) -> Any:
                 if key in item:
                     item["name"] = item[key]
                     break
-        if not isinstance(item.get("type"), str) or not item["type"].strip():
-            category = item.get("category")
-            if category is None or (isinstance(category, str) and not category.strip()):
-                category = item.get("类别")
-            item["type"] = category if isinstance(category, str) and category.strip() else "other"
+        category = item.get("category")
+        if category is None or (isinstance(category, str) and not category.strip()):
+            category = item.get("类别")
+        if isinstance(category, str) and category.strip():
+            item["type"] = category
+        elif not isinstance(item.get("type"), str) or not item["type"].strip():
+            item["type"] = "other"
+        aliases = item.get("aliases", [])
+        synonyms = item.get("synonyms", [])
+        if isinstance(synonyms, str):
+            synonyms = [synonyms]
+        if isinstance(aliases, list) and isinstance(synonyms, (list, tuple)):
+            item["aliases"] = aliases + list(synonyms)
         normalized_legacy_entities.append(item)
     converted["entities"] = normalized_legacy_entities
+    declared_task = converted.get("task")
+    if isinstance(declared_task, str) and _normalize_entity(declared_task) == _normalize_entity(task):
+        converted["task"] = task
     return converted
 
 
@@ -982,7 +994,7 @@ def _is_recognized_legacy_payload(payload: Any) -> bool:
         and (
             not isinstance(entity.get("type"), str)
             or not entity["type"].strip()
-            or any(key in entity for key in ("entity", "实体", "实体/参数"))
+            or any(key in entity for key in ("entity", "实体", "实体/参数", "category", "类别", "synonyms"))
         )
         for entity in entities
     )
@@ -993,15 +1005,13 @@ def load_ground_truth(task: str) -> Dict[str, Any]:
         if not path.exists():
             continue
         legacy_payload: Any = None
+        try:
+            legacy_payload = read_ground_truth_json(path)
+        except GroundTruthValidationError as error:
+            return _invalid_ground_truth(path, error.code, error.message)
+        is_legacy_payload = _is_recognized_legacy_payload(legacy_payload)
         is_generic_fallback = path.name.lower() == "ground_truth.json"
         if is_generic_fallback:
-            try:
-                with path.open("r", encoding="utf-8") as handle:
-                    legacy_payload = json.load(handle)
-            except (OSError, UnicodeError):
-                return _invalid_ground_truth(path, "invalid_json", "标准答案文件无法读取。")
-            except json.JSONDecodeError:
-                return _invalid_ground_truth(path, "invalid_json", "标准答案文件不是有效 JSON。")
             if not isinstance(legacy_payload, dict):
                 return _invalid_ground_truth(
                     path,
@@ -1022,13 +1032,12 @@ def load_ground_truth(task: str) -> Dict[str, Any]:
         try:
             canonical = load_ground_truth_upload(path, task)
         except GroundTruthValidationError as primary_error:
-            if primary_error.code not in {"invalid_schema", "invalid_entity", "invalid_aliases"}:
+            if primary_error.code not in {"invalid_schema", "invalid_entity", "invalid_aliases"} and not (
+                primary_error.code == "task_mismatch" and is_legacy_payload
+            ):
                 return _invalid_ground_truth(path, primary_error.code, primary_error.message)
             try:
-                if legacy_payload is None:
-                    with path.open("r", encoding="utf-8") as handle:
-                        legacy_payload = json.load(handle)
-                if not _is_recognized_legacy_payload(legacy_payload):
+                if not is_legacy_payload:
                     raise primary_error
                 legacy_payload = _legacy_payload_for_unified_validation(legacy_payload, task)
                 if not isinstance(legacy_payload, dict) or "entities" not in legacy_payload:
@@ -1038,6 +1047,14 @@ def load_ground_truth(task: str) -> Dict[str, Any]:
                 return _invalid_ground_truth(path, "invalid_json", "标准答案文件不是有效 JSON。")
             except GroundTruthValidationError as error:
                 return _invalid_ground_truth(path, error.code, error.message)
+        else:
+            if is_legacy_payload:
+                try:
+                    canonical = canonicalize_ground_truth_payload(
+                        _legacy_payload_for_unified_validation(legacy_payload, task), task
+                    )
+                except GroundTruthValidationError as error:
+                    return _invalid_ground_truth(path, error.code, error.message)
 
         evaluator_entities = [
             dict(entity, category=entity["type"])

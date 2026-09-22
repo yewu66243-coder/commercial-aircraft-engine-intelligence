@@ -462,3 +462,80 @@ def test_delayed_corrupt_xlsx_sheet_xml_returns_safe_error_and_releases_file(tmp
     _assert_error(exc_info, "invalid_excel")
     path.unlink()
     assert not path.exists()
+
+
+def test_sparse_xlsx_dimension_is_rejected_before_workbook_iteration(tmp_path, monkeypatch):
+    path = tmp_path / "sparse.xlsx"
+    sheet_xml = (
+        b'<?xml version="1.0" encoding="UTF-8"?>'
+        b'<worksheet xmlns="http://schemas.openxmlformats.org/spreadsheetml/2006/main">'
+        b'<dimension ref="A1:XFD1048576"/><sheetData><row r="1"/></sheetData></worksheet>'
+    )
+    with zipfile.ZipFile(path, "w", compression=zipfile.ZIP_DEFLATED) as archive:
+        archive.writestr("xl/worksheets/sheet1.xml", sheet_xml)
+
+    def must_not_open(*_args, **_kwargs):
+        raise AssertionError("workbook iteration must not start")
+
+    monkeypatch.setattr(ground_truth_io, "load_workbook", must_not_open)
+    with pytest.raises(GroundTruthValidationError) as exc_info:
+        load_ground_truth_upload(path, TASK)
+
+    _assert_error(exc_info, "xlsx_too_large")
+
+
+@pytest.mark.parametrize(
+    "content",
+    [
+        pytest.param(b"[" * 1100 + b"0" + b"]" * 1100, id="deep-array"),
+        pytest.param(b"{" + b'"n":' + b"9" * 5000 + b"}", id="huge-integer"),
+    ],
+)
+def test_deep_or_huge_json_numbers_return_safe_error_for_upload_and_evaluator(tmp_path, monkeypatch, content):
+    path = tmp_path / "unsafe.json"
+    path.write_bytes(content)
+
+    with pytest.raises(GroundTruthValidationError) as exc_info:
+        load_ground_truth_upload(path, TASK)
+    _assert_error(exc_info, "invalid_json")
+
+    evaluator_path = tmp_path / "unsafe-task.json"
+    evaluator_path.write_bytes(content)
+    monkeypatch.setattr(entity_evaluator, "get_ground_truth_dir", lambda: tmp_path)
+    result = entity_evaluator.load_ground_truth("unsafe-task")
+    assert result["status"] == "invalid_ground_truth"
+    assert result["error_code"] == "invalid_json"
+
+
+def test_legacy_synonyms_are_merged_into_aliases_for_matching(tmp_path, monkeypatch):
+    task = "legacy-synonyms"
+    (tmp_path / f"{task}.json").write_text(
+        json.dumps({"entities": [{"name": "LEAP-1A", "category": "model", "synonyms": ["LEAP"]}]}),
+        encoding="utf-8",
+    )
+    monkeypatch.setattr(entity_evaluator, "get_ground_truth_dir", lambda: tmp_path)
+
+    truth = entity_evaluator.load_ground_truth(task)
+    metrics = entity_evaluator.evaluate_entities_against_ground_truth(
+        [{"name": "LEAP", "category": "model"}], truth["entities"]
+    )
+
+    assert truth["status"] == "loaded"
+    assert truth["entities"][0]["aliases"] == ["leap"]
+    assert metrics["overall"]["f1"] == 1.0
+
+
+def test_legacy_category_overrides_type_and_normalizes_equivalent_task(tmp_path, monkeypatch):
+    task = "t"
+    (tmp_path / f"{task}.json").write_text(
+        json.dumps(
+            {"task": "T", "entities": [{"name": "LEAP", "category": "model", "type": "organization"}]}
+        ),
+        encoding="utf-8",
+    )
+    monkeypatch.setattr(entity_evaluator, "get_ground_truth_dir", lambda: tmp_path)
+
+    truth = entity_evaluator.load_ground_truth(task)
+
+    assert truth["status"] == "loaded"
+    assert truth["entities"][0]["category"] == "model"
