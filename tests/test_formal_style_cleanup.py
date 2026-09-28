@@ -115,6 +115,29 @@ def test_heading_audit_tracks_nearest_section_across_body_and_caption():
     assert [item['section'] for item in audit['removed_items']] == ['摘要', '图表']
 
 
+@pytest.mark.parametrize('line', [
+    '图 1：鉴于证据不足，不作结论。',
+    '图 1. 鉴于证据不足，不作结论。',
+    '**表2：** 鉴于证据不足，不作结论。',
+    '- 鉴于证据不足，不作结论。',
+    '* 鉴于证据不足，不作结论。',
+    '+ 鉴于证据不足，不作结论。',
+    '1. 鉴于证据不足，不作结论。',
+])
+def test_removes_scope_only_disclaimer_after_markdown_or_caption_prefix(line):
+    cleaned, audit = clean_formal_report_style('## 图表\n' + line + '\n')
+    assert cleaned == '## 图表\n'
+    assert audit['removed_count'] == 1
+    assert audit['removed_items'][0]['rule'] == 'scope_preface_with_conclusion'
+
+
+def test_preserves_objective_caption_with_scope_preface():
+    report = '## 图表\n图1：鉴于证据不足，但样本显示推力提高3%。\n'
+    cleaned, audit = clean_formal_report_style(report)
+    assert cleaned == report
+    assert audit['removed_count'] == 0
+
+
 def test_cleanup_is_idempotent():
     report = '# 摘要\n\n' + DISCLAIMERS[3] + '\n\n公开资料未披露该部件价格。\n'
     first, _ = clean_formal_report_style(report)

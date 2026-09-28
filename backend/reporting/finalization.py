@@ -26,6 +26,9 @@ _STYLE_RETRACTION_RE = re.compile(
     r'[，,；;]\s*((?:因此|故)(?:无法证实|不作确定性结论)[^。！？.!?]*[。！？.!?]?(?:\[[^\]]+\])*)$')
 _STYLE_ORPHAN_RE = re.compile(r'^(?:\s*\[(?:URL|原文|来源URL)\s*\d+\]\s*)+$', re.I)
 _STYLE_EMPTY_RE = re.compile(r'^[\s，,；;：:。.!！？?（）()\[\]、]*(?:因此|故|所以|并且)?[\s，,；;：:。.!！？?（）()\[\]、]*$')
+_STYLE_LIST_PREFIX_RE = re.compile(r'^\s*(?:[-*+]|\d+[.)])\s+')
+_STYLE_CAPTION_PREFIX_RE = re.compile(
+    r'^\s*(?:\*\*(?:图|表)\s*\d+\s*[:：.．]\*\*|(?:图|表)\s*\d+\s*[:：.．])\s*')
 
 
 def _formal_style_rule(sentence):
@@ -42,6 +45,14 @@ def _formal_style_rule(sentence):
 
 def _clean_formal_style_text(text):
     """Return edited text and exact removed spans for one line or table cell."""
+    prefix = ''
+    list_marker = _STYLE_LIST_PREFIX_RE.match(text)
+    if list_marker:
+        prefix, text = text[:list_marker.end()], text[list_marker.end():]
+    caption = _STYLE_CAPTION_PREFIX_RE.match(text)
+    if caption:
+        prefix += text[:caption.end()]
+        text = text[caption.end():]
     kept = []
     removed = []
     for match in _STYLE_SENTENCE_RE.finditer(text):
@@ -64,6 +75,11 @@ def _clean_formal_style_text(text):
     cleaned = re.sub(r'\(\s*\)|（\s*）', '', cleaned)
     if _STYLE_ORPHAN_RE.fullmatch(cleaned) or _STYLE_EMPTY_RE.fullmatch(cleaned):
         cleaned = ''
+    if cleaned:
+        cleaned = prefix + cleaned
+    elif prefix:
+        rule, original = removed[0]
+        removed[0] = (rule, prefix + original)
     return cleaned, removed
 
 
