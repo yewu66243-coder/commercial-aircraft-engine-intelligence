@@ -465,14 +465,20 @@ def test_delayed_corrupt_xlsx_sheet_xml_returns_safe_error_and_releases_file(tmp
 
 
 def test_sparse_xlsx_dimension_is_rejected_before_workbook_iteration(tmp_path, monkeypatch):
-    path = tmp_path / "sparse.xlsx"
+    path = _write_xlsx(tmp_path, [["类别", "名称"], ["型号", "LEAP"]], "sparse.xlsx")
+    replacement = tmp_path / "replacement.xlsx"
     sheet_xml = (
         b'<?xml version="1.0" encoding="UTF-8"?>'
         b'<worksheet xmlns="http://schemas.openxmlformats.org/spreadsheetml/2006/main">'
         b'<dimension ref="A1:XFD1048576"/><sheetData><row r="1"/></sheetData></worksheet>'
     )
-    with zipfile.ZipFile(path, "w", compression=zipfile.ZIP_DEFLATED) as archive:
-        archive.writestr("xl/worksheets/sheet1.xml", sheet_xml)
+    with zipfile.ZipFile(path) as source, zipfile.ZipFile(replacement, "w") as target:
+        for info in source.infolist():
+            content = source.read(info.filename)
+            if info.filename == "xl/worksheets/sheet1.xml":
+                content = sheet_xml
+            target.writestr(info.filename, content)
+    replacement.replace(path)
 
     def must_not_open(*_args, **_kwargs):
         raise AssertionError("workbook iteration must not start")
@@ -542,14 +548,20 @@ def test_legacy_category_overrides_type_and_normalizes_equivalent_task(tmp_path,
 
 
 def test_xlsx_preflight_rejects_excessive_actual_cell_nodes(tmp_path, monkeypatch):
-    path = tmp_path / "many-cells.xlsx"
+    path = _write_xlsx(tmp_path, [["类别", "名称"], ["型号", "LEAP"]], "many-cells.xlsx")
+    replacement = tmp_path / "replacement.xlsx"
     cells = b"<c r=\"A1\"/>" * 120_000
     sheet_xml = (
         b'<worksheet xmlns="http://schemas.openxmlformats.org/spreadsheetml/2006/main">'
         b'<dimension ref="A1:B2"/><sheetData><row r="1">' + cells + b"</row></sheetData></worksheet>"
     )
-    with zipfile.ZipFile(path, "w", compression=zipfile.ZIP_DEFLATED) as archive:
-        archive.writestr("xl/worksheets/sheet1.xml", sheet_xml)
+    with zipfile.ZipFile(path) as source, zipfile.ZipFile(replacement, "w") as target:
+        for info in source.infolist():
+            content = source.read(info.filename)
+            if info.filename == "xl/worksheets/sheet1.xml":
+                content = sheet_xml
+            target.writestr(info.filename, content)
+    replacement.replace(path)
 
     monkeypatch.setattr(ground_truth_io, "load_workbook", lambda *_args, **_kwargs: pytest.fail("opened"))
     with pytest.raises(GroundTruthValidationError) as exc_info:
@@ -620,3 +632,53 @@ def test_persist_rejects_unpaired_surrogate_task_before_hashing(tmp_path):
 
     _assert_error(exc_info, "invalid_text")
     assert list(destination.iterdir()) == []
+
+
+def test_xlsx_preflight_follows_renamed_worksheet_relationships(tmp_path, monkeypatch):
+    path = _write_xlsx(tmp_path, [["类别", "名称"], ["型号", "LEAP"]], "renamed-sheet.xlsx")
+    replacement = tmp_path / "replacement.xlsx"
+    cells = b'<c r="A1"/>' * 120_000
+    sheet_xml = (
+        b'<?xml version="1.0" encoding="UTF-8"?>'
+        b'<worksheet xmlns="http://schemas.openxmlformats.org/spreadsheetml/2006/main">'
+        b'<dimension ref="A1:B2"/><sheetData><row r="1">'
+        + cells
+        + b"</row></sheetData></worksheet>"
+    )
+    with zipfile.ZipFile(path) as source, zipfile.ZipFile(replacement, "w") as target:
+        for info in source.infolist():
+            name = info.filename
+            content = source.read(name)
+            if name == "xl/worksheets/sheet1.xml":
+                name = "xl/worksheets/data.xml"
+                content = sheet_xml
+            elif name == "xl/_rels/workbook.xml.rels":
+                content = content.replace(b"worksheets/sheet1.xml", b"worksheets/data.xml")
+            elif name == "[Content_Types].xml":
+                content = content.replace(b"/xl/worksheets/sheet1.xml", b"/xl/worksheets/data.xml")
+            target.writestr(name, content)
+    replacement.replace(path)
+
+    workbook = ground_truth_io.load_workbook(path, read_only=True, data_only=True, keep_links=False)
+    workbook.close()
+    monkeypatch.setattr(ground_truth_io, "load_workbook", lambda *_args, **_kwargs: pytest.fail("opened"))
+    with pytest.raises(GroundTruthValidationError) as exc_info:
+        load_ground_truth_upload(path, TASK)
+    _assert_error(exc_info, "xlsx_too_large")
+
+
+@pytest.mark.parametrize("declared_task", [None, "", "T"])
+def test_legacy_evaluator_accepts_historic_task_values_with_canonical_entities(
+    tmp_path, monkeypatch, declared_task
+):
+    task = "t"
+    (tmp_path / f"{task}.json").write_text(
+        json.dumps({"task": declared_task, "entities": [{"type": "model", "name": "LEAP"}]}),
+        encoding="utf-8",
+    )
+    monkeypatch.setattr(entity_evaluator, "get_ground_truth_dir", lambda: tmp_path)
+
+    result = entity_evaluator.load_ground_truth(task)
+
+    assert result["status"] == "loaded"
+    assert result["entities"] == [{"type": "model", "name": "LEAP", "aliases": [], "category": "model"}]

@@ -6,6 +6,7 @@ import hashlib
 import json
 import math
 import os
+import posixpath
 import re
 import tempfile
 import zipfile
@@ -23,6 +24,9 @@ ALLOWED_SUFFIXES = {".json", ".xlsx"}
 MAX_XLSX_MEMBER_BYTES = 8 * 1024 * 1024
 MAX_XLSX_UNCOMPRESSED_BYTES = 20 * 1024 * 1024
 MAX_XLSX_CELLS = 100_000
+_WORKSHEET_RELATIONSHIP_TYPE = (
+    "http://schemas.openxmlformats.org/officeDocument/2006/relationships/worksheet"
+)
 
 _CATEGORY_ALIASES = {
     "organization": {"机构", "企业", "公司", "制造商", "监管机构", "研究机构", "organization"},
@@ -283,6 +287,63 @@ def _dimension_cell_count(reference: str) -> int:
     return _column_number(match.group(1)) * int(match.group(2))
 
 
+def _relationship_target_part(target: str) -> str:
+    """Resolve an internal workbook relationship target to a safe ZIP part name."""
+    if not target or "\\" in target or ".." in target.split("/"):
+        _error("invalid_excel", "标准答案 XLSX 工作表路径无效。")
+    if target.startswith("/"):
+        part_name = target[1:]
+    else:
+        part_name = posixpath.join("xl", target)
+    part_name = posixpath.normpath(part_name)
+    if part_name.startswith("../") or part_name == ".." or not part_name.startswith("xl/"):
+        _error("invalid_excel", "标准答案 XLSX 工作表路径无效。")
+    return part_name
+
+
+def _worksheet_parts(archive: zipfile.ZipFile, members: list[zipfile.ZipInfo]) -> list[str]:
+    """Return worksheet XML parts referred to by workbook.xml relationships."""
+    member_names = {member.filename for member in members}
+    if "xl/workbook.xml" not in member_names or "xl/_rels/workbook.xml.rels" not in member_names:
+        _error("invalid_excel", "标准答案 XLSX 工作簿结构无效。")
+    try:
+        with archive.open("xl/workbook.xml") as source:
+            workbook_root = ElementTree.parse(source).getroot()
+        with archive.open("xl/_rels/workbook.xml.rels") as source:
+            relationships_root = ElementTree.parse(source).getroot()
+    except (OSError, KeyError, ElementTree.ParseError):
+        _error("invalid_excel", "标准答案 XLSX 工作簿结构无效。")
+
+    relationship_ids = {
+        next((value for key, value in sheet.attrib.items() if key.rsplit("}", 1)[-1] == "id"), "")
+        for sheet in workbook_root.iter()
+        if sheet.tag.rsplit("}", 1)[-1] == "sheet"
+    }
+    if not relationship_ids or "" in relationship_ids:
+        _error("invalid_excel", "标准答案 XLSX 工作簿结构无效。")
+
+    worksheet_targets: dict[str, str] = {}
+    for relationship in relationships_root.iter():
+        if relationship.tag.rsplit("}", 1)[-1] != "Relationship":
+            continue
+        if relationship.attrib.get("Type") != _WORKSHEET_RELATIONSHIP_TYPE:
+            continue
+        if relationship.attrib.get("TargetMode", "Internal") != "Internal":
+            _error("invalid_excel", "标准答案 XLSX 工作表路径无效。")
+        relationship_id = relationship.attrib.get("Id")
+        target = relationship.attrib.get("Target")
+        if relationship_id and target:
+            worksheet_targets[relationship_id] = _relationship_target_part(target)
+
+    parts: list[str] = []
+    for relationship_id in relationship_ids:
+        part_name = worksheet_targets.get(relationship_id)
+        if not part_name or part_name not in member_names:
+            _error("invalid_excel", "标准答案 XLSX 工作簿结构无效。")
+        parts.append(part_name)
+    return parts
+
+
 def _preflight_xlsx(path: Path) -> None:
     try:
         with zipfile.ZipFile(path) as archive:
@@ -293,10 +354,8 @@ def _preflight_xlsx(path: Path) -> None:
             ):
                 _error("xlsx_too_large", "标准答案 XLSX 解压内容超过安全限制。")
             actual_cells = 0
-            for member in members:
-                if not re.fullmatch(r"xl/worksheets/sheet\d+\.xml", member.filename):
-                    continue
-                with archive.open(member) as source:
+            for part_name in _worksheet_parts(archive, members):
+                with archive.open(part_name) as source:
                     for event, element in ElementTree.iterparse(source, events=("start", "end")):
                         tag = element.tag.rsplit("}", 1)[-1]
                         if event == "start" and tag == "dimension":

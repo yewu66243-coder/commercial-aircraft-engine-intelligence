@@ -1017,8 +1017,21 @@ def load_ground_truth(task: str) -> Dict[str, Any]:
             legacy_payload = read_ground_truth_json(path)
         except GroundTruthValidationError as error:
             return _invalid_ground_truth(path, error.code, error.message)
-        is_legacy_payload = _is_recognized_legacy_payload(legacy_payload)
         is_generic_fallback = path.name.lower() == "ground_truth.json"
+        legacy_file_names = {
+            f"{_safe_name(task)}.json",
+            f"{_safe_name(task)[:30]}.json",
+        }
+        # Historic evaluator files were selected by task filename, regardless
+        # of whether their entity rows already happen to use canonical keys.
+        # Do not apply this compatibility path to hashed uploads or the shared
+        # fallback file, which retain strict upload task semantics.
+        is_legacy_task_file = path.name in legacy_file_names
+        is_legacy_payload = _is_recognized_legacy_payload(legacy_payload) or (
+            is_legacy_task_file
+            and isinstance(legacy_payload, dict)
+            and isinstance(legacy_payload.get("entities"), list)
+        )
         if is_generic_fallback:
             if not isinstance(legacy_payload, dict):
                 return _invalid_ground_truth(
