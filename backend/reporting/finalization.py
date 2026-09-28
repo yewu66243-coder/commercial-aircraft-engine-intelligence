@@ -19,6 +19,8 @@ _STYLE_ACTIONS = ('不作', '不进行', '不据此', '无法据此', '不对')
 _STYLE_JUDGMENTS = ('判断', '推断', '结论', '区分', '定性')
 _STYLE_SOURCE_WORDS = ('文献', '资料', '原文')
 _STYLE_GAP_WORDS = ('未说明', '未涉及', '未取得', '未建立')
+_STYLE_REPORT_SUBJECT_RE = re.compile(r'本报告|本文|(?<![\u4e00-\u9fff])报告')
+_STYLE_THIRD_PARTY_RE = re.compile(r'监管机构|航空公司|制造商|运营商|公司|企业|机构')
 _STYLE_SCOPE_ONLY_RE = re.compile(
     r'^\s*(?:受资料范围限制|鉴于证据不足)[，,]?\s*(?:本报告\s*)?'
     r'(?:不作|不进行|不据此|无法据此|不对)[^，,；;。！？.!?]{0,160}'
@@ -51,17 +53,23 @@ def _style_clauses(sentence):
 
 def _report_owns_action(lead):
     """Recognize a report subject, not a report recording another actor."""
-    marker_end = -1
-    for marker in ('本报告', '本文'):
-        position = lead.rfind(marker)
-        if position >= 0:
-            marker_end = max(marker_end, position + len(marker))
-    if marker_end < 0 and lead.lstrip().startswith('报告'):
-        marker_end = lead.index('报告') + len('报告')
-    if marker_end < 0:
+    reports = list(_STYLE_REPORT_SUBJECT_RE.finditer(lead))
+    if not reports:
         return False
-    adjunct = lead[marker_end:].strip()
-    return not adjunct or adjunct.startswith(('根据', '依据', '基于', '就', '对', '在', '据'))
+    last_report = reports[-1].start()
+    for actor in _STYLE_THIRD_PARTY_RE.finditer(lead):
+        if actor.start() <= last_report:
+            continue
+        tail = lead[actor.end():].strip()
+        if tail not in ('', '仍', '也', '均', '尚', '暂', '还', '将', '并'):
+            continue  # A distant name is part of the report's topic, not its subject.
+        before = lead[:actor.start()].rstrip()
+        if before.endswith(('对', '针对', '关于', '依据', '根据', '基于', '就', '向')):
+            continue  # The third party is the object of the report's judgment.
+        # A nearby third-party name is the more recent subject. If its role is
+        # unclear, preserving the sentence is safer than deleting its claim.
+        return False
+    return True
 
 
 def _formal_style_edits(sentence):

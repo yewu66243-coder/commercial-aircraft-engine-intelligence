@@ -238,6 +238,30 @@ def test_implicit_followup_keeps_nearest_company_subject():
 
 
 @pytest.mark.parametrize('sentence', [
+    '本报告依据访谈记录公司不作市场判断。',
+    '本报告指出监管机构不作适航判断。',
+    '本报告记录监管机构仍不作适航判断。',
+])
+def test_nearest_third_party_subject_owns_judgment(sentence):
+    report = '# S\n' + sentence + '\n'
+    cleaned, audit = clean_formal_report_style(report)
+    assert cleaned == report
+    assert audit['removed_count'] == 0
+
+
+@pytest.mark.parametrize('sentence', [
+    '本报告针对市场不作判断。',
+    '本报告对监管机构不作性质判断。',
+    '本报告针对监管机构行为不作区分判断。',
+    '本报告分析航空公司机队数据后不作判断。',
+])
+def test_report_subject_survives_adverbials_and_third_party_objects(sentence):
+    cleaned, audit = clean_formal_report_style('# S\n' + sentence + '\n')
+    assert cleaned == '# S\n'
+    assert audit['removed_count'] == 1
+
+
+@pytest.mark.parametrize('sentence', [
     '本报告不对 EASA CS-E.510 作结论。',
     '本报告根据 FAR Part 33.4 不作定性判断。',
 ])
