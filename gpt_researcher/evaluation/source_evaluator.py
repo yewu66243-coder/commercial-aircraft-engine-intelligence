@@ -8,8 +8,10 @@ from gpt_researcher.evaluation.entity_evaluator import (
     URL_RE,
     _extract_evidence_map,
     _important_terms,
+    _is_table_separator,
     _numbers_in_text,
     _read_url_text,
+    _split_markdown_row,
     _term_hit_count,
 )
 
@@ -56,43 +58,74 @@ def _strip_markdown_for_claim(text: str) -> str:
 def _extract_url_claim_relationships(report: str) -> List[Dict[str, str]]:
     body = _analysis_report_body(report)
     relationships: List[Dict[str, str]] = []
-    in_evidence_list = False
+    previous_claim = ""
 
-    for line in body.splitlines():
+    lines = body.splitlines()
+    for index, line in enumerate(lines):
         stripped = line.strip()
         if not stripped:
+            previous_claim = ""
             continue
-        if "证据来源" in stripped or "来源列表" in stripped:
-            in_evidence_list = True
+        if re.match(r"^#{1,6}\s+", stripped) or re.fullmatch(r"(?:证据来源|来源列表)\s*[：:]?", stripped):
+            previous_claim = ""
             continue
-        if in_evidence_list:
-            if stripped.startswith("#") and "证据来源" not in stripped and "来源列表" not in stripped:
-                in_evidence_list = False
-            else:
-                continue
         if _line_is_evidence_source(stripped):
+            previous_claim = ""
             continue
 
-        for match in URL_REF_RE.finditer(line):
-            preceding_parts = re.split(
-                r"[。！？!?；;|，]|" + URL_REF_RE.pattern,
-                line[: match.start()],
-                flags=re.IGNORECASE,
-            )
-            claim = next(
-                (
-                    cleaned
-                    for part in reversed(preceding_parts)
-                    if (cleaned := _strip_markdown_for_claim(part))
-                ),
-                "",
-            )
-            if not claim:
+        line_relationships: List[tuple[str, str]] = []
+        cells = _split_markdown_row(stripped)
+        if cells:
+            next_cells = _split_markdown_row(lines[index + 1]) if index + 1 < len(lines) else []
+            if _is_table_separator(cells) or (next_cells and _is_table_separator(next_cells)):
+                previous_claim = ""
                 continue
+            pending_parts: List[str] = []
+            last_claim = ""
+            for cell in cells:
+                last_end = 0
+                for match in URL_REF_RE.finditer(cell):
+                    part = _strip_markdown_for_claim(cell[last_end : match.start()])
+                    if part:
+                        pending_parts.append(part)
+                    claim = " ".join(pending_parts) or last_claim
+                    if claim:
+                        line_relationships.append((match.group(0), claim))
+                        last_claim = claim
+                    pending_parts = []
+                    last_end = match.end()
+                tail = _strip_markdown_for_claim(cell[last_end:])
+                if tail:
+                    pending_parts.append(tail)
+            previous_claim = ""
+        else:
+            refs = list(URL_REF_RE.finditer(line))
+            if refs and not _strip_markdown_for_claim(line):
+                line_relationships.extend((match.group(0), previous_claim) for match in refs if previous_claim)
+            else:
+                for match in refs:
+                    preceding_parts = re.split(
+                        r"[。！？!?；;|，]|" + URL_REF_RE.pattern,
+                        line[: match.start()],
+                        flags=re.IGNORECASE,
+                    )
+                    claim = next(
+                        (
+                            cleaned
+                            for part in reversed(preceding_parts)
+                            if (cleaned := _strip_markdown_for_claim(part))
+                        ),
+                        "",
+                    )
+                    if claim:
+                        line_relationships.append((match.group(0), claim))
+            previous_claim = "" if refs else _strip_markdown_for_claim(line)
+
+        for ref, claim in line_relationships:
             relationships.append(
                 {
                     "relationship_id": f"relationship-{len(relationships) + 1:06d}",
-                    "ref": _normalize_ref(match.group(0)),
+                    "ref": _normalize_ref(ref),
                     "claim": claim,
                 }
             )
@@ -305,7 +338,11 @@ def prune_redundant_unchecked_url_citations(
 
 def _url_for_ref(ref: str, evidence_map: Dict[str, str]) -> str:
     mapped = next(
-        (value for key, value in evidence_map.items() if _normalize_ref(key) == _normalize_ref(ref)),
+        (
+            value
+            for key, value in evidence_map.items()
+            if URL_REF_RE.fullmatch(key.strip()) and _normalize_ref(key) == _normalize_ref(ref)
+        ),
         "",
     )
     match = URL_RE.search(mapped)

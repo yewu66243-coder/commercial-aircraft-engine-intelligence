@@ -2,6 +2,8 @@ from __future__ import annotations
 
 from unittest.mock import patch
 
+import pytest
+
 from gpt_researcher.evaluation import source_evaluator
 
 
@@ -226,4 +228,104 @@ def test_two_claims_in_one_paragraph_keep_nearest_citations() -> None:
     assert [(item["ref"], item["claim"]) for item in relationships] == [
         ("[URL1]", "甲型发动机已经交付"),
         ("[URL2]", "乙型发动机仍在试验"),
+    ]
+
+
+@pytest.mark.parametrize("local_first", [True, False])
+def test_url_lookup_ignores_local_ref_with_same_number(local_first: bool) -> None:
+    entries = [
+        ("[原文1]", "local.pdf https://example.com/wrong"),
+        ("[URL1]", "https://example.com/right"),
+    ]
+    evidence_map = dict(entries if local_first else reversed(entries))
+
+    assert source_evaluator._url_for_ref("[URL1]", evidence_map) == "https://example.com/right"
+    assert source_evaluator._url_for_ref("[URL1]", {"[原文1]": entries[0][1]}) == ""
+
+
+def test_table_claim_includes_all_data_cells_for_real_matching() -> None:
+    report = """| 类型 | 数值 | 引用 |
+| --- | --- | --- |
+| 甲型发动机 | 100 | [URL1] |
+
+## 证据来源
+[URL1] https://example.com/right
+"""
+    with patch.object(source_evaluator, "_read_url_text", return_value="乙型发动机 100"):
+        result = source_evaluator.evaluate_public_url_sources(report)
+
+    assert result["relationships"][0]["claim"] == "甲型发动机 100"
+    assert result["relationships"][0]["status"] != "supported"
+
+
+def test_table_escaped_pipe_stays_inside_one_claim_cell() -> None:
+    report = r"| 甲型\|改型发动机 | 100 | [URL1] |"
+
+    relationships = source_evaluator._extract_url_claim_relationships(report)
+
+    assert [(item["ref"], item["claim"]) for item in relationships] == [
+        ("[URL1]", "甲型 改型发动机 100"),
+    ]
+
+
+def test_table_header_and_separator_are_not_claim_relationships() -> None:
+    report = """| 类型 | [URL1] |
+| --- | --- |
+| 甲型发动机 | [URL2] |
+"""
+
+    relationships = source_evaluator._extract_url_claim_relationships(report)
+
+    assert [(item["ref"], item["claim"]) for item in relationships] == [
+        ("[URL2]", "甲型发动机"),
+    ]
+
+
+def test_narrative_evidence_phrase_does_not_hide_following_claims() -> None:
+    report = """该结论的证据来源如下。
+甲型发动机已经交付。[URL1]
+乙型发动机仍在试验。[URL2]
+
+## 证据来源
+[URL1] https://example.com/one
+[URL2] https://example.com/two
+"""
+
+    relationships = source_evaluator._extract_url_claim_relationships(report)
+
+    assert [item["ref"] for item in relationships] == ["[URL1]", "[URL2]"]
+
+
+def test_body_after_evidence_entries_is_parsed_again() -> None:
+    report = """## 证据来源
+[URL1] https://example.com/one
+证据来源:
+[URL2] https://example.com/two
+甲型发动机已经交付。[URL1]
+"""
+
+    relationships = source_evaluator._extract_url_claim_relationships(report)
+
+    assert [(item["ref"], item["claim"]) for item in relationships] == [
+        ("[URL1]", "甲型发动机已经交付"),
+    ]
+
+
+def test_standalone_next_line_citation_uses_previous_claim_only_without_boundary() -> None:
+    report = """甲型发动机已经交付。
+[URL1]
+
+乙型发动机仍在试验。
+
+[URL2]
+## 分析
+[URL3]
+| 丙型发动机已交付 |
+[URL4]
+"""
+
+    relationships = source_evaluator._extract_url_claim_relationships(report)
+
+    assert [(item["ref"], item["claim"]) for item in relationships] == [
+        ("[URL1]", "甲型发动机已经交付"),
     ]
