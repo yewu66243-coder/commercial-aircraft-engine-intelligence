@@ -15,16 +15,17 @@ from .image_evidence import insert_missing_figures, normalize_figure_sources
 from .source_grounding import pack_sources, source_text
 
 
-_STYLE_SENTENCE_RE = re.compile(r'[^。！？.!?]+[。！？.!?](?:[ \t]*\[[^\]]+\])*|[^。！？.!?]+$')
-_STYLE_REPORT_ACTION_RE = re.compile(
-    r'本报告.*(?:不作|不进行|不据此|无法据此|不对).*(?:判断|推断|结论|区分|定性)')
-_STYLE_SOURCE_GAP_RE = re.compile(
-    r'(?:文献|资料|原文).*(?:未说明|未涉及|未取得|未建立|未将.*建立关联)')
-_STYLE_NEGATIVE_CONCLUSION_RE = re.compile(
-    r'(?:不作|不进行|不据此|无法据此|不对).*(?:判断|推断|结论|区分|定性)')
+_STYLE_ACTIONS = ('不作', '不进行', '不据此', '无法据此', '不对')
+_STYLE_JUDGMENTS = ('判断', '推断', '结论', '区分', '定性')
+_STYLE_SOURCE_WORDS = ('文献', '资料', '原文')
+_STYLE_GAP_WORDS = ('未说明', '未涉及', '未取得', '未建立')
+_STYLE_SCOPE_ONLY_RE = re.compile(
+    r'^\s*(?:受资料范围限制|鉴于证据不足)[，,]?\s*(?:本报告\s*)?'
+    r'(?:不作|不进行|不据此|无法据此|不对)[^，,；;。！？.!?]{0,160}'
+    r'(?:判断|推断|结论|区分|定性)[^，,；;。！？.!?]{0,160}[。！？.!?]?'
+    r'(?:\s*\[(?:(?:原文|URL|文献|来源)\s*\d+|\d+)\])*\s*$', re.I)
 _STYLE_RETRACTION_RE = re.compile(
     r'[，,；;]\s*((?:因此|故)(?:无法证实|不作确定性结论)[^。！？.!?]*[。！？.!?]?(?:\[[^\]]+\])*)$')
-_STYLE_ORPHAN_RE = re.compile(r'^(?:\s*\[(?:URL|原文|来源URL)\s*\d+\]\s*)+$', re.I)
 _STYLE_EMPTY_RE = re.compile(r'^[\s，,；;：:。.!！？?（）()\[\]、]*(?:因此|故|所以|并且)?[\s，,；;：:。.!！？?（）()\[\]、]*$')
 _STYLE_LIST_PREFIX_RE = re.compile(r'^\s*(?:[-*+]|\d+[.)])\s+')
 _STYLE_CAPTION_PREFIX_RE = re.compile(
@@ -33,14 +34,124 @@ _STYLE_CAPTION_PREFIX_RE = re.compile(
 
 def _formal_style_rule(sentence):
     """Match a withdrawal of judgment, never a bare source limitation."""
-    if _STYLE_REPORT_ACTION_RE.search(sentence):
+    def earliest(words, start=0):
+        positions = [sentence.find(word, start) for word in words]
+        return min((position for position in positions if position >= 0), default=-1)
+
+    action = earliest(_STYLE_ACTIONS)
+    if action < 0 or earliest(_STYLE_JUDGMENTS, action) < 0:
+        return None
+    source = earliest(_STYLE_SOURCE_WORDS)
+    gap = earliest(_STYLE_GAP_WORDS, source) if source >= 0 else -1
+    if gap < 0 and source >= 0:
+        gap = sentence.find('未将', source)
+        if gap >= 0 and sentence.find('建立关联', gap) < 0:
+            gap = -1
+    has_source_gap = source >= 0 and gap >= 0
+    if re.match(r'^\s*(?:受资料范围限制|鉴于证据不足)', sentence):
+        if _STYLE_SCOPE_ONLY_RE.fullmatch(sentence):
+            return 'scope_preface_with_conclusion'
+        return 'source_gap_with_conclusion' if has_source_gap else None
+    if sentence.find('本报告') >= 0:
         return 'self_referential_conclusion'
-    if _STYLE_SOURCE_GAP_RE.search(sentence) and _STYLE_NEGATIVE_CONCLUSION_RE.search(sentence):
+    if has_source_gap:
         return 'source_gap_with_conclusion'
-    if (re.match(r'^\s*(?:受资料范围限制|鉴于证据不足)', sentence)
-            and _STYLE_NEGATIVE_CONCLUSION_RE.search(sentence)):
-        return 'scope_preface_with_conclusion'
     return None
+
+
+def _is_orphan_reference(text):
+    remaining = text.strip()
+    seen = False
+    while remaining:
+        match = REF_RE.match(remaining)
+        if not match:
+            return False
+        seen = True
+        remaining = remaining[match.end():].lstrip()
+    return seen
+
+
+def _formal_style_sentences(text):
+    """Scan sentence boundaries without splitting decimal or standard identifiers."""
+    start = 0
+    index = 0
+    while index < len(text):
+        character = text[index]
+        if character not in '。！？.!?':
+            index += 1
+            continue
+        if (character == '.' and index and index + 1 < len(text)
+                and text[index - 1].isascii() and text[index - 1].isalnum()
+                and text[index + 1].isascii() and text[index + 1].isalnum()):
+            index += 1
+            continue
+        end = index + 1
+        while True:
+            citation_start = end
+            while citation_start < len(text) and text[citation_start] in ' \t':
+                citation_start += 1
+            citation = REF_RE.match(text, citation_start)
+            if citation is None:
+                break
+            end = citation.end()
+        yield text[start:end]
+        start = end
+        index = end
+    if start < len(text):
+        yield text[start:]
+
+
+def _markdown_group_end(text, start, opening, closing):
+    depth = 0
+    index = start
+    while index < len(text):
+        if text[index] == '\\':
+            index += 2
+            continue
+        if text[index] == opening:
+            depth += 1
+        elif text[index] == closing:
+            depth -= 1
+            if depth == 0:
+                return index + 1
+        index += 1
+    return None
+
+
+def _protected_markdown_end(text, index):
+    if text[index] == '`':
+        run = 1
+        while index + run < len(text) and text[index + run] == '`':
+            run += 1
+        closing = text.find('`' * run, index + run)
+        return closing + run if closing >= 0 else None
+    label_start = index + 1 if text.startswith('![', index) else index
+    if label_start < len(text) and text[label_start] == '[':
+        label_end = _markdown_group_end(text, label_start, '[', ']')
+        if label_end is not None and label_end < len(text) and text[label_end] == '(':
+            return _markdown_group_end(text, label_end, '(', ')')
+    if text.startswith('<http://', index) or text.startswith('<https://', index):
+        closing = text.find('>', index + 1)
+        return closing + 1 if closing >= 0 else None
+    return None
+
+
+def _markdown_chunks(text):
+    """Yield prose and protected Markdown verbatim; no placeholder is inserted."""
+    start = 0
+    index = 0
+    while index < len(text):
+        end = _protected_markdown_end(text, index)
+        if end is None:
+            index += 1
+            continue
+        if start < index:
+            yield False, text[start:index]
+        yield True, text[index:end]
+        start = end
+        index = end
+    if start < len(text):
+        yield False, text[start:]
 
 
 def _clean_formal_style_text(text):
@@ -56,25 +167,28 @@ def _clean_formal_style_text(text):
         text = text[caption.end():]
     kept = []
     removed = []
-    for match in _STYLE_SENTENCE_RE.finditer(text):
-        sentence = match.group()
-        rule = _formal_style_rule(sentence)
-        if rule:
-            removed.append((rule, sentence.strip()))
+    for protected, chunk in _markdown_chunks(text):
+        if protected:
+            kept.append(chunk)
             continue
-        retraction = _STYLE_RETRACTION_RE.search(sentence)
-        if retraction:
-            removed.append(('retracted_conclusion', retraction.group()))
-            sentence = sentence[:retraction.start()] + '。'
-        if removed:
-            sentence = sentence.lstrip()
-        kept.append(sentence)
+        for sentence in _formal_style_sentences(chunk):
+            rule = _formal_style_rule(sentence)
+            if rule:
+                removed.append((rule, sentence.strip()))
+                continue
+            retraction = _STYLE_RETRACTION_RE.search(sentence)
+            if retraction:
+                removed.append(('retracted_conclusion', retraction.group()))
+                sentence = sentence[:retraction.start()] + '。'
+            if removed:
+                sentence = sentence.lstrip()
+            kept.append(sentence)
     if not removed:
         return original_text, []
     cleaned = ''.join(kept).strip()
     cleaned = re.sub(r' {2,}', ' ', cleaned)
     cleaned = re.sub(r'\(\s*\)|（\s*）', '', cleaned)
-    if _STYLE_ORPHAN_RE.fullmatch(cleaned) or _STYLE_EMPTY_RE.fullmatch(cleaned):
+    if _is_orphan_reference(cleaned) or _STYLE_EMPTY_RE.fullmatch(cleaned):
         cleaned = ''
     if cleaned:
         cleaned = prefix + cleaned
@@ -113,7 +227,24 @@ def clean_formal_report_style(report: str) -> tuple[str, dict[str, object]]:
     output = []
     section = ''
     orphan_after_removed_line = False
+    fence_character = ''
+    fence_length = 0
     for index, line in enumerate(lines):
+        if fence_character:
+            output.append(line)
+            if re.match(r'^[ \t]{0,3}' + re.escape(fence_character) +
+                        '{' + str(fence_length) + r',}[ \t]*$', line):
+                fence_character = ''
+                fence_length = 0
+            orphan_after_removed_line = False
+            continue
+        opening_fence = re.match(r'^[ \t]{0,3}(`{3,}|~{3,})', line)
+        if opening_fence:
+            marker = opening_fence.group(1)
+            fence_character, fence_length = marker[0], len(marker)
+            output.append(line)
+            orphan_after_removed_line = False
+            continue
         heading = re.match(r'^#{1,6}\s+(.+?)\s*$', line)
         if heading:
             section = heading.group(1).strip()
@@ -149,7 +280,7 @@ def clean_formal_report_style(report: str) -> tuple[str, dict[str, object]]:
                 orphan_after_removed_line = False
                 continue
             values = [cleaned if removed else cell.strip() for cell, cleaned, removed in edited]
-            values = [value if value and not _STYLE_ORPHAN_RE.fullmatch(value) else '—'
+            values = [value if value and not _is_orphan_reference(value) else '—'
                       for value in values]
             if all(value == '—' for value in values[1:]):
                 orphan_after_removed_line = False
@@ -168,12 +299,13 @@ def clean_formal_report_style(report: str) -> tuple[str, dict[str, object]]:
                 orphan_after_removed_line = False
             else:
                 orphan_after_removed_line = True
-        elif _STYLE_ORPHAN_RE.fullmatch(line) and orphan_after_removed_line:
+        elif _is_orphan_reference(line) and orphan_after_removed_line:
             # A citation on its own line can be left behind by a removed sentence.
             continue
         else:
             output.append(line)
-            orphan_after_removed_line = False
+            if line.strip():
+                orphan_after_removed_line = False
     audit = {'version': 'formal-style-cleanup-v1', 'removed_count': len(items),
              'removed_items': items}
     if not items:

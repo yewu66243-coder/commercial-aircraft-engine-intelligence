@@ -1,6 +1,7 @@
 """Regression tests for deterministic formal-report style cleanup."""
 
 import pytest
+from time import perf_counter
 
 from backend.reporting.finalization import clean_formal_report_style
 
@@ -168,6 +169,83 @@ def test_preserves_objective_caption_with_scope_preface():
     cleaned, audit = clean_formal_report_style(report)
     assert cleaned == report
     assert audit['removed_count'] == 0
+
+
+def test_scope_preface_keeps_verified_fact_before_judgment_withdrawal():
+    report = '# 结论\n鉴于证据不足，已核实其中30例事故，但不作进一步推断。\n'
+    cleaned, audit = clean_formal_report_style(report)
+    assert cleaned == report
+    assert audit['removed_count'] == 0
+
+
+def test_scope_preface_without_fact_is_removed():
+    cleaned, audit = clean_formal_report_style('# 结论\n鉴于证据不足，不作进一步推断。\n')
+    assert cleaned == '# 结论\n'
+    assert audit['removed_count'] == 1
+
+
+@pytest.mark.parametrize('sentence', [
+    '本报告不对 EASA CS-E.510 作结论。',
+    '本报告根据 FAR Part 33.4 不作定性判断。',
+])
+def test_dotted_technical_identifiers_do_not_split_sentence(sentence):
+    cleaned, audit = clean_formal_report_style('# 结论\n' + sentence + '\n')
+    assert cleaned == '# 结论\n'
+    assert audit['removed_count'] == 1
+    assert audit['removed_items'][0]['text'] == sentence
+
+
+def test_ascii_period_still_ends_sentence():
+    cleaned, audit = clean_formal_report_style('# S\n本报告不作结论.保留事实.\n')
+    assert cleaned == '# S\n保留事实.\n'
+    assert audit['removed_count'] == 1
+
+
+@pytest.mark.parametrize('protected', [
+    '[本报告不作结论。](https://example.com/guide)',
+    '![本报告不作结论。](https://example.com/chart.png)',
+    '`本报告不作结论。`',
+    '<https://example.com/本报告不作结论。>',
+])
+def test_markdown_inline_constructs_remain_byte_exact(protected):
+    report = '# S\n参见' + protected + '了解规范。\n'
+    cleaned, audit = clean_formal_report_style(report)
+    assert cleaned == report
+    assert audit['removed_count'] == 0
+
+
+@pytest.mark.parametrize('fence', ['```', '~~~'])
+def test_fenced_code_is_not_edited_and_stops_orphan_binding(fence):
+    report = ('# S\n文献未说明认证缺失对运营范围的具体影响，本报告不作该因果推断。\n'
+              + fence + 'python\n本报告不作结论。\n' + fence + '\n[URL1]\n')
+    cleaned, audit = clean_formal_report_style(report)
+    assert cleaned == '# S\n' + fence + 'python\n本报告不作结论。\n' + fence + '\n[URL1]\n'
+    assert audit['removed_count'] == 1
+
+
+@pytest.mark.parametrize('reference', ['[文献1]', '[来源1]', '[1]', '[原文 7]', '[URL1]'])
+def test_orphan_citation_after_blank_lines_is_removed(reference):
+    report = '# S\n' + DISCLAIMERS[4] + '\n\n\n' + reference + '\n保留事实。\n'
+    cleaned, audit = clean_formal_report_style(report)
+    assert reference not in cleaned
+    assert '保留事实。' in cleaned
+    assert audit['removed_count'] == 1
+
+
+def test_citation_after_retained_fact_and_blank_line_remains():
+    report = '# S\n' + DISCLAIMERS[4] + '\n\n保留事实。\n\n[文献1]\n'
+    cleaned, _ = clean_formal_report_style(report)
+    assert '保留事实。\n\n[文献1]' in cleaned
+
+
+def test_long_unpunctuated_line_is_linear_and_not_removed():
+    report = '# S\n' + '本报告' * 6667 + '\n'
+    started = perf_counter()
+    cleaned, audit = clean_formal_report_style(report)
+    elapsed = perf_counter() - started
+    assert cleaned == report
+    assert audit['removed_count'] == 0
+    assert elapsed < 2.0
 
 
 def test_cleanup_is_idempotent():
