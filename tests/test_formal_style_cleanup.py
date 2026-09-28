@@ -106,6 +106,20 @@ def test_drops_connector_only_residue_and_emptied_table_rows():
     assert audit['removed_count'] == 3
 
 
+@pytest.mark.parametrize('preserved_cell', [
+    '图 1：样本覆盖 2024—2026 年公开资料。',
+    '- 样本覆盖 2024—2026 年公开资料。',
+    '**表2：** 样本覆盖 2024—2026 年公开资料。',
+])
+def test_preserves_untouched_prefixed_table_cell_when_another_cell_is_removed(preserved_cell):
+    report = ('| 型号 | 图表说明 | 结论 |\n| --- | --- | --- |\n'
+              '| A | ' + preserved_cell + ' | ' + DISCLAIMERS[4] + ' |\n')
+    cleaned, audit = clean_formal_report_style(report)
+    assert cleaned == ('| 型号 | 图表说明 | 结论 |\n| --- | --- | --- |\n'
+                       '| A | ' + preserved_cell + ' | — |\n')
+    assert audit['removed_count'] == 1
+
+
 def test_heading_audit_tracks_nearest_section_across_body_and_caption():
     report = ('# 总报告\n\n## 摘要\n' + DISCLAIMERS[0] + '\n\n'
               '## 图表\n图 1：' + DISCLAIMERS[5] + '\n')

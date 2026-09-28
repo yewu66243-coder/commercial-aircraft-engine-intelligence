@@ -45,6 +45,7 @@ def _formal_style_rule(sentence):
 
 def _clean_formal_style_text(text):
     """Return edited text and exact removed spans for one line or table cell."""
+    original_text = text
     prefix = ''
     list_marker = _STYLE_LIST_PREFIX_RE.match(text)
     if list_marker:
@@ -69,7 +70,7 @@ def _clean_formal_style_text(text):
             sentence = sentence.lstrip()
         kept.append(sentence)
     if not removed:
-        return text, []
+        return original_text, []
     cleaned = ''.join(kept).strip()
     cleaned = re.sub(r' {2,}', ' ', cleaned)
     cleaned = re.sub(r'\(\s*\)|（\s*）', '', cleaned)
