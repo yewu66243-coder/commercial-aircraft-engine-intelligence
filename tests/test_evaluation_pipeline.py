@@ -73,7 +73,7 @@ def _request_method(call) -> str:
 
 
 def test_url_check_accepts_only_final_2xx_or_3xx():
-    with patch("three_agent_service.urlopen", return_value=_Response(302)) as opener:
+    with patch("gpt_researcher.evaluation.link_accessibility.urlopen", return_value=_Response(302)) as opener:
         result = ThreeAgentService._check_url_sync("https://example.com")
 
     assert result["accessible"] is True
@@ -83,7 +83,7 @@ def test_url_check_accepts_only_final_2xx_or_3xx():
 
 def test_head_403_retries_get_and_uses_get_result():
     denied = HTTPError("https://example.com", 403, "Forbidden", None, None)
-    with patch("three_agent_service.urlopen", side_effect=[denied, _Response(204)]) as opener:
+    with patch("gpt_researcher.evaluation.link_accessibility.urlopen", side_effect=[denied, _Response(204)]) as opener:
         result = ThreeAgentService._check_url_sync("https://example.com")
 
     assert result["accessible"] is True
@@ -94,7 +94,7 @@ def test_head_403_retries_get_and_uses_get_result():
 def test_head_405_retry_with_final_404_is_inaccessible():
     not_allowed = HTTPError("https://example.com", 405, "Method Not Allowed", None, None)
     not_found = HTTPError("https://example.com", 404, "Not Found", None, None)
-    with patch("three_agent_service.urlopen", side_effect=[not_allowed, not_found]):
+    with patch("gpt_researcher.evaluation.link_accessibility.urlopen", side_effect=[not_allowed, not_found]):
         result = ThreeAgentService._check_url_sync("https://example.com")
 
     assert result["accessible"] is False
@@ -104,7 +104,7 @@ def test_head_405_retry_with_final_404_is_inaccessible():
 
 def test_tls_failure_is_inaccessible_without_unverified_retry():
     error = URLError(ssl.SSLCertVerificationError("certificate verify failed"))
-    with patch("three_agent_service.urlopen", side_effect=error) as opener:
+    with patch("gpt_researcher.evaluation.link_accessibility.urlopen", side_effect=error) as opener:
         result = ThreeAgentService._check_url_sync("https://example.com")
 
     assert result["accessible"] is False

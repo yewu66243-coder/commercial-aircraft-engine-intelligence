@@ -13,9 +13,7 @@ from dataclasses import dataclass, replace
 from datetime import datetime
 from pathlib import Path
 from typing import Any, Dict, List, Optional
-from urllib.parse import quote, urlsplit, urlunsplit
-from urllib.error import HTTPError, URLError
-from urllib.request import Request, urlopen
+from urllib.parse import urlsplit
 
 from gpt_researcher import GPTResearcher
 # 👇 就是下面这一行，一定要确保有！
@@ -40,6 +38,13 @@ from gpt_researcher.document.local_index import SelectedLocalPaper, prepare_loca
 from gpt_researcher.document.local_image_extractor import extract_local_report_images
 from gpt_researcher.evaluation.entity_evaluator import evaluate_report_entities
 from gpt_researcher.evaluation.evaluation_summary import build_evaluation_summary
+from gpt_researcher.evaluation.link_accessibility import (
+    check_url_sync,
+    classify_url_error,
+    evaluate_link_accessibility,
+    extract_public_urls,
+    normalize_url_for_request,
+)
 from gpt_researcher.evaluation.source_evaluator import (
     evaluate_public_url_sources,
     prune_redundant_unchecked_url_citations,
@@ -564,185 +569,26 @@ class ThreeAgentService:
 
     @staticmethod
     def _extract_urls(report: str) -> List[str]:
-        terminators = set(' \t\r\n<>"\'`()|[]{}，。；;、（）】》”’')
-        urls = []
-        seen = set()
-        text = report or ""
-        for match in re.finditer(r"https?://", text):
-            start = match.start()
-            end = start
-            while end < len(text) and text[end] not in terminators:
-                end += 1
-            url = ThreeAgentService._clean_url_candidate(text[start:end])
-            if url and url not in seen:
-                urls.append(url)
-                seen.add(url)
-        return urls
-
-    @staticmethod
-    def _clean_url_candidate(url: str) -> str:
-        cleaned = (url or "").strip()
-        cleaned = cleaned.strip('<>"\'`')
-        cleaned = cleaned.rstrip(".,;:!?。；，、)]}）】》")
-        if not cleaned.startswith(("http://", "https://")):
-            return ""
-        try:
-            parsed = urlsplit(cleaned)
-        except ValueError:
-            return ""
-        if not parsed.scheme or not parsed.netloc:
-            return ""
-        return cleaned
+        return extract_public_urls(report)
 
     @staticmethod
     def _normalize_url_for_request(url: str) -> str:
-        parsed = urlsplit(url)
-        netloc = parsed.netloc.encode("idna").decode("ascii")
-        path = quote(parsed.path or "/", safe="/%:@-._~!$&'()*+,;=")
-        query = quote(parsed.query, safe="=&?/%:@-._~!$'()*+,;")
-        return urlunsplit((parsed.scheme, netloc, path, query, ""))
+        return normalize_url_for_request(url)
 
     @staticmethod
     def _classify_url_error(error: str, status_code: Optional[int] = None) -> str:
-        lower_error = (error or "").lower()
-        if status_code is not None:
-            return "http_status"
-        if "certificate_verify_failed" in lower_error or "certificate verify failed" in lower_error or "ssl" in lower_error:
-            return "ssl_certificate"
-        if "timed out" in lower_error or "timeout" in lower_error:
-            return "timeout"
-        if "codec can't encode" in lower_error or "ordinal not in range" in lower_error:
-            return "invalid_url_encoding"
-        if "no host" in lower_error or "name or service not known" in lower_error:
-            return "dns_or_host"
-        if "invalid" in lower_error:
-            return "invalid_url"
-        return "network_or_unknown"
+        return classify_url_error(error, status_code)
 
     @staticmethod
     def _check_url_sync(url: str, timeout: int = 6) -> Dict[str, Any]:
-        headers = {"User-Agent": "Mozilla/5.0 Intelligence-System-URL-Check"}
-        original_url = url
-        try:
-            checked_url = ThreeAgentService._normalize_url_for_request(url)
-        except Exception as exc:
-            return {
-                "url": original_url,
-                "checked_url": url,
-                "status_code": None,
-                "accessible": False,
-                "method": "normalize",
-                "ssl_verified": None,
-                "error": str(exc),
-                "failure_reason": "invalid_url_encoding",
-                "warning": "",
-            }
-
-        method = "HEAD"
-        while True:
-            try:
-                request = Request(checked_url, headers=headers, method=method)
-                with urlopen(request, timeout=timeout) as response:
-                    status_code = int(getattr(response, "status", 0) or response.getcode())
-                accessible = 200 <= status_code < 400
-                return {
-                    "url": original_url,
-                    "checked_url": checked_url,
-                    "status_code": status_code,
-                    "accessible": accessible,
-                    "method": method,
-                    "ssl_verified": True,
-                    "error": "",
-                    "failure_reason": "" if accessible else "http_status",
-                    "warning": "",
-                }
-            except HTTPError as exc:
-                status_code = int(exc.code)
-                if method == "HEAD" and status_code in {403, 405}:
-                    method = "GET"
-                    continue
-                return {
-                    "url": original_url,
-                    "checked_url": checked_url,
-                    "status_code": status_code,
-                    "accessible": False,
-                    "method": method,
-                    "ssl_verified": True,
-                    "error": str(exc),
-                    "failure_reason": "http_status",
-                    "warning": "",
-                }
-            except URLError as exc:
-                error = str(exc.reason)
-                failure_reason = ThreeAgentService._classify_url_error(error)
-                return {
-                    "url": original_url,
-                    "checked_url": checked_url,
-                    "status_code": None,
-                    "accessible": False,
-                    "method": method,
-                    "ssl_verified": True,
-                    "error": error,
-                    "failure_reason": failure_reason,
-                    "warning": "",
-                }
-            except Exception as exc:
-                error = str(exc)
-                failure_reason = ThreeAgentService._classify_url_error(error)
-                return {
-                    "url": original_url,
-                    "checked_url": checked_url,
-                    "status_code": None,
-                    "accessible": False,
-                    "method": method,
-                    "ssl_verified": True,
-                    "error": error,
-                    "failure_reason": failure_reason,
-                    "warning": "",
-                }
+        return check_url_sync(url, timeout)
 
     async def inspect_report_urls(
         self, report: str, max_urls: Optional[int] = None
     ) -> Dict[str, Any]:
-        urls = self._extract_urls(report)
-        checked_urls = urls if max_urls is None else urls[: max(0, int(max_urls))]
-        skipped_count = max(0, len(urls) - len(checked_urls))
-        if not checked_urls:
-            return {
-                "total_urls": 0,
-                "checked_urls": 0,
-                "accessible_urls": 0,
-                "failed_urls": 0,
-                "accessibility_rate": None,
-                "skipped_urls": skipped_count,
-                "ssl_unverified_accessible_urls": 0,
-                "failure_reasons": {},
-                "results": [],
-            }
-
-        tasks = [asyncio.to_thread(self._check_url_sync, url) for url in checked_urls]
-        results = await asyncio.gather(*tasks)
-        accessible_count = sum(1 for item in results if item.get("accessible"))
-        failed_count = len(results) - accessible_count
-        ssl_unverified_count = sum(
-            1 for item in results if item.get("accessible") and item.get("ssl_verified") is False
+        return await evaluate_link_accessibility(
+            report, max_urls=max_urls, checker=self._check_url_sync
         )
-        failure_reasons: Dict[str, int] = {}
-        for item in results:
-            reason = item.get("failure_reason") or ("accessible" if item.get("accessible") else "network_or_unknown")
-            failure_reasons[reason] = failure_reasons.get(reason, 0) + 1
-        rate = round(accessible_count / len(results), 4) if results else None
-        return {
-            "total_urls": len(urls),
-            "checked_urls": len(results),
-            "accessible_urls": accessible_count,
-            "failed_urls": failed_count,
-            "accessibility_rate": rate,
-            "skipped_urls": skipped_count,
-            "ssl_unverified_accessible_urls": ssl_unverified_count,
-            "failure_reasons": failure_reasons,
-            "results": results,
-        }
 
     def build_run_statistics_section(self, stats: Dict[str, Any]) -> str:
         url_stats = stats["url_check"]
