@@ -205,6 +205,38 @@ def test_still_removes_report_owned_disclaimers(sentence):
     assert audit['removed_count'] == 1
 
 
+def test_removes_later_report_disclaimer_after_company_judgment():
+    report = '# S\n公司不作市场判断，本报告不作结论。\n'
+    cleaned, audit = clean_formal_report_style(report)
+    assert cleaned == '# S\n公司不作市场判断。\n'
+    assert audit['removed_count'] == 1
+    assert '本报告不作结论' in audit['removed_items'][0]['text']
+    assert '公司不作市场判断' not in audit['removed_items'][0]['text']
+
+
+def test_removes_only_later_disclaimer_after_verified_fact():
+    report = '# S\n文献未说明价格，但已核实30例事故，本报告不作进一步推断。\n'
+    cleaned, audit = clean_formal_report_style(report)
+    assert cleaned == '# S\n文献未说明价格，但已核实30例事故。\n'
+    assert audit['removed_count'] == 1
+    assert '本报告不作进一步推断' in audit['removed_items'][0]['text']
+    assert '已核实30例事故' not in audit['removed_items'][0]['text']
+
+
+def test_report_recording_company_judgment_is_not_a_disclaimer():
+    report = '# S\n本报告记录公司不作市场判断。\n'
+    cleaned, audit = clean_formal_report_style(report)
+    assert cleaned == report
+    assert audit['removed_count'] == 0
+
+
+def test_implicit_followup_keeps_nearest_company_subject():
+    report = '# S\n本报告记录公司不作市场判断，不作结论。\n'
+    cleaned, audit = clean_formal_report_style(report)
+    assert cleaned == report
+    assert audit['removed_count'] == 0
+
+
 @pytest.mark.parametrize('sentence', [
     '本报告不对 EASA CS-E.510 作结论。',
     '本报告根据 FAR Part 33.4 不作定性判断。',

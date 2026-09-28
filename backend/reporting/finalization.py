@@ -32,52 +32,108 @@ _STYLE_CAPTION_PREFIX_RE = re.compile(
     r'^\s*(?:\*\*(?:图|表)\s*\d+\s*[:：.．]\*\*|(?:图|表)\s*\d+\s*[:：.．])\s*')
 
 
-def _formal_style_rule(sentence):
-    """Match a withdrawal of judgment, never a bare source limitation."""
-    def earliest(text, words, start=0):
-        positions = [text.find(word, start) for word in words]
-        return min((position for position in positions if position >= 0), default=-1)
+def _style_first(text, words, start=0):
+    positions = [text.find(word, start) for word in words]
+    return min((position for position in positions if position >= 0), default=-1)
 
+
+def _style_clauses(sentence):
+    """Keep each clause's original separator for partial deletion."""
+    clauses = []
+    start = 0
+    for index, character in enumerate(sentence):
+        if character in '，,；;':
+            clauses.append((sentence[start:index], character))
+            start = index + 1
+    clauses.append((sentence[start:], ''))
+    return clauses
+
+
+def _report_owns_action(lead):
+    """Recognize a report subject, not a report recording another actor."""
+    marker_end = -1
+    for marker in ('本报告', '本文'):
+        position = lead.rfind(marker)
+        if position >= 0:
+            marker_end = max(marker_end, position + len(marker))
+    if marker_end < 0 and lead.lstrip().startswith('报告'):
+        marker_end = lead.index('报告') + len('报告')
+    if marker_end < 0:
+        return False
+    adjunct = lead[marker_end:].strip()
+    return not adjunct or adjunct.startswith(('根据', '依据', '基于', '就', '对', '在', '据'))
+
+
+def _formal_style_edits(sentence):
+    """Return kept prose and audited disclaimer clauses from one sentence."""
     scope_preface = bool(re.match(r'^\s*(?:受资料范围限制|鉴于证据不足)', sentence))
     if scope_preface and _STYLE_SCOPE_ONLY_RE.fullmatch(sentence):
-        return 'scope_preface_with_conclusion'
+        return '', [('scope_preface_with_conclusion', sentence.strip())]
 
-    clauses = re.split(r'[，,；;]', sentence)
+    clauses = _style_clauses(sentence)
+    connectors = {'', '但', '因此', '故', '所以', '则', '对此'}
+    substantive_prefix = [0]
+    for body, _ in clauses:
+        substantive_prefix.append(substantive_prefix[-1] + (body.strip() not in connectors))
     source_seen = False
+    report_seen = False
     gap_clause = -1
-    action_clause = -1
-    action_position = -1
-    for index, clause in enumerate(clauses):
-        source_seen |= earliest(clause, _STYLE_SOURCE_WORDS) >= 0
-        if source_seen and (earliest(clause, _STYLE_GAP_WORDS) >= 0
-                            or ('未将' in clause and '建立关联' in clause)):
+    candidates = []
+    for index, (body, _) in enumerate(clauses):
+        source_seen |= _style_first(body, _STYLE_SOURCE_WORDS) >= 0
+        if source_seen and (_style_first(body, _STYLE_GAP_WORDS) >= 0
+                            or ('未将' in body and '建立关联' in body)):
             gap_clause = index
-        action = earliest(clause, _STYLE_ACTIONS)
-        if action >= 0 and earliest(clause, _STYLE_JUDGMENTS, action) >= 0:
-            action_clause, action_position = index, action
-            break
-    if action_clause < 0:
-        return None
+        action = _style_first(body, _STYLE_ACTIONS)
+        if action < 0 or _style_first(body, _STYLE_JUDGMENTS, action) < 0:
+            report_seen |= '本报告' in body or '本文' in body
+            continue
+        lead = body[:action].strip()
+        explicit = _report_owns_action(lead)
+        implied = lead in connectors
+        if not explicit and not implied:
+            # A named actor in this clause becomes the nearest subject for
+            # a following subjectless judgment, even if the report quoted it.
+            report_seen = False
+            continue
+        rationale = gap_clause if gap_clause >= 0 else (0 if scope_preface else -1)
+        intervening_fact = (rationale >= 0 and
+                            substantive_prefix[index] > substantive_prefix[rationale + 1])
+        if not explicit and (intervening_fact or not (scope_preface or gap_clause >= 0 or report_seen)):
+            report_seen |= '本报告' in body or '本文' in body
+            continue
+        rule = ('source_gap_with_conclusion' if gap_clause >= 0
+                else 'self_referential_conclusion')
+        candidates.append((index, rule, intervening_fact))
+        report_seen |= '本报告' in body or '本文' in body
+    if not candidates:
+        return sentence, []
 
-    current = clauses[action_clause]
-    lead = current[:action_position].strip()
-    owns_action = ('本报告' in lead or '本文' in lead
-                   or lead.startswith('报告'))
-    implied_action = lead in ('', '但', '因此', '故', '所以', '则', '对此')
-    if not owns_action and not implied_action:
-        return None
-    rationale_clause = gap_clause if gap_clause >= 0 else (0 if scope_preface else -1)
-    if rationale_clause >= 0:
-        connectors = {'', '但', '因此', '故', '所以', '则', '对此'}
-        if any(clause.strip() not in connectors
-               for clause in clauses[rationale_clause + 1:action_clause]):
-            return None
-    if scope_preface:
-        return 'source_gap_with_conclusion' if gap_clause >= 0 else None
-    if owns_action or any('本报告' in clause or '本文' in clause
-                          for clause in clauses[:action_clause]):
-        return 'self_referential_conclusion'
-    return 'source_gap_with_conclusion' if gap_clause >= 0 else None
+    if len(candidates) == 1:
+        index, rule, intervening_fact = candidates[0]
+        if index == len(clauses) - 1 and (
+                len(clauses) == 1 or
+                (gap_clause >= 0 and not intervening_fact) or
+                (index == 1 and sentence.lstrip().startswith('因此涉及'))):
+            return '', [(rule, sentence.strip())]
+
+    removed_indexes = {index for index, _, _ in candidates}
+    kept_indexes = [index for index in range(len(clauses)) if index not in removed_indexes]
+    if not kept_indexes:
+        return '', [(rule, sentence.strip()) for _, rule, _ in candidates]
+    kept = clauses[kept_indexes[0]][0]
+    if kept_indexes[0] > 0:
+        kept = re.sub(r'^\s*(?:但|因此|故|所以)[，,]?\s*', '', kept)
+    for previous, current in zip(kept_indexes, kept_indexes[1:]):
+        kept += (clauses[previous][1] or '，') + clauses[current][0]
+    if kept_indexes[-1] < len(clauses) - 1 and not kept.rstrip().endswith(tuple('。！？.!?')):
+        kept = kept.rstrip() + (sentence[-1] if sentence[-1] in '。！？.!?' else '。')
+    removed = []
+    for index, rule, _ in candidates:
+        body = clauses[index][0]
+        marker = clauses[index - 1][1] if index > 0 else clauses[index][1]
+        removed.append((rule, (marker + body if index > 0 else body + marker).strip()))
+    return kept, removed
 
 
 def _is_orphan_reference(text):
@@ -197,9 +253,11 @@ def _clean_formal_style_text(text):
             kept.append(chunk)
             continue
         for sentence in _formal_style_sentences(chunk):
-            rule = _formal_style_rule(sentence)
-            if rule:
-                removed.append((rule, sentence.strip()))
+            edited, clause_removals = _formal_style_edits(sentence)
+            if clause_removals:
+                removed.extend(clause_removals)
+                if edited:
+                    kept.append(edited)
                 continue
             retraction = _STYLE_RETRACTION_RE.search(sentence)
             if retraction:
