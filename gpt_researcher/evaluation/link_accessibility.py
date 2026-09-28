@@ -17,7 +17,7 @@ _URL_TERMINATORS = set(' \t\r\n<>"\'`()|[]{}，。；;、（）】》”’')
 _TRAILING_URL_PUNCTUATION = ".,;:!?。；，、)]}）】》"
 
 
-def _clean_url_candidate(url: str) -> str:
+def clean_url_candidate(url: str) -> str:
     cleaned = (url or "").strip().strip('<>"\'`').rstrip(_TRAILING_URL_PUNCTUATION)
     if not cleaned.startswith(("http://", "https://")):
         return ""
@@ -42,7 +42,7 @@ def extract_public_urls(report: str) -> list[str]:
         end = start
         while end < len(text) and text[end] not in _URL_TERMINATORS:
             end += 1
-        url = _clean_url_candidate(text[start:end])
+        url = clean_url_candidate(text[start:end])
         if url and url not in seen:
             urls.append(url)
             seen.add(url)
@@ -75,7 +75,17 @@ def classify_url_error(error: str, status_code: int | None = None) -> str:
         return "dns_or_host"
     if any(
         marker in lower_error
-        for marker in ("connection refused", "connection reset", "connection aborted", "connection error", "remote end closed", "network is unreachable")
+        for marker in (
+            "connection refused",
+            "actively refused",
+            "winerror 10061",
+            "errno 10061",
+            "connection reset",
+            "connection aborted",
+            "connection error",
+            "remote end closed",
+            "network is unreachable",
+        )
     ):
         return "connection"
     if "invalid" in lower_error or "unknown url type" in lower_error:
@@ -142,6 +152,18 @@ def check_url_sync(url: str, timeout: int = 6) -> UrlCheckResult:
             }
         except HTTPError as exc:
             status_code = int(exc.code)
+            if 300 <= status_code < 400:
+                return {
+                    "url": original_url,
+                    "checked_url": checked_url,
+                    "status_code": status_code,
+                    "accessible": True,
+                    "method": method,
+                    "ssl_verified": True,
+                    "error": "",
+                    "failure_reason": "",
+                    "warning": "",
+                }
             if method == "HEAD" and status_code in {403, 405}:
                 method = "GET"
                 continue

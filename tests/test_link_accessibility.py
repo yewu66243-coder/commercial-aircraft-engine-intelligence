@@ -81,6 +81,18 @@ def test_check_url_sync_marks_http_errors_inaccessible(status: int) -> None:
     assert result["failure_reason"] == "http_status"
 
 
+@pytest.mark.parametrize("status", [304, 307])
+def test_check_url_sync_accepts_3xx_reported_as_http_error(status: int) -> None:
+    error = HTTPError("https://example.com", status, "Redirect", None, None)
+    with patch("gpt_researcher.evaluation.link_accessibility.urlopen", side_effect=error):
+        result = check_url_sync("https://example.com")
+
+    assert result["accessible"] is True
+    assert result["status_code"] == status
+    assert result["method"] == "HEAD"
+    assert result["failure_reason"] == ""
+
+
 @pytest.mark.parametrize(
     ("error", "reason"),
     [
@@ -88,6 +100,16 @@ def test_check_url_sync_marks_http_errors_inaccessible(status: int) -> None:
         (URLError(socket.gaierror("name or service not known")), "dns_or_host"),
         (URLError(ssl.SSLCertVerificationError("certificate verify failed")), "ssl_certificate"),
         (URLError("connection refused"), "connection"),
+        (URLError("actively refused"), "connection"),
+        (
+            URLError(
+                OSError(
+                    10061,
+                    "No connection could be made because the target machine actively refused it",
+                )
+            ),
+            "connection",
+        ),
     ],
 )
 def test_check_url_sync_classifies_network_errors(error: URLError, reason: str) -> None:

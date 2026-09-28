@@ -72,6 +72,10 @@ def _request_method(call) -> str:
     return call.args[0].get_method()
 
 
+def test_service_clean_url_candidate_remains_compatible() -> None:
+    assert ThreeAgentService._clean_url_candidate("https://example.test，") == "https://example.test"
+
+
 def test_url_check_accepts_only_final_2xx_or_3xx():
     with patch("gpt_researcher.evaluation.link_accessibility.urlopen", return_value=_Response(302)) as opener:
         result = ThreeAgentService._check_url_sync("https://example.com")

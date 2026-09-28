@@ -40,6 +40,7 @@ from gpt_researcher.evaluation.entity_evaluator import evaluate_report_entities
 from gpt_researcher.evaluation.evaluation_summary import build_evaluation_summary
 from gpt_researcher.evaluation.link_accessibility import (
     check_url_sync,
+    clean_url_candidate,
     classify_url_error,
     evaluate_link_accessibility,
     extract_public_urls,
@@ -570,6 +571,10 @@ class ThreeAgentService:
     @staticmethod
     def _extract_urls(report: str) -> List[str]:
         return extract_public_urls(report)
+
+    @staticmethod
+    def _clean_url_candidate(url: str) -> str:
+        return clean_url_candidate(url)
 
     @staticmethod
     def _normalize_url_for_request(url: str) -> str:
