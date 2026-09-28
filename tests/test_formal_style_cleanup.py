@@ -58,6 +58,25 @@ def test_removes_orphan_citations_and_empty_paragraphs():
     assert audit['removed_count'] == 1
 
 
+def test_keeps_isolated_citation_after_retained_fact():
+    report = ('# S\n' + DISCLAIMERS[4] + '\n\n'
+              '保留事实。\n[原文 7]\n')
+    cleaned, audit = clean_formal_report_style(report)
+    assert cleaned == '# S\n\n保留事实。\n[原文 7]\n'
+    assert audit['removed_count'] == 1
+
+
+@pytest.mark.parametrize('boundary', [
+    '## 下一节\n',
+    '| 型号 | 信息 |\n| --- | --- |\n| A | 保留事实。 |\n',
+])
+def test_does_not_bind_orphan_citation_across_heading_or_table(boundary):
+    report = '# S\n' + DISCLAIMERS[4] + '\n' + boundary + '[原文 7]\n'
+    cleaned, audit = clean_formal_report_style(report)
+    assert '[原文 7]\n' in cleaned
+    assert audit['removed_count'] == 1
+
+
 def test_removes_spaced_inline_citation_bound_to_deleted_sentence():
     report = '# 讨论\n\n' + DISCLAIMERS[2] + ' [原文1] 后续检索仍在进行。\n'
     cleaned, audit = clean_formal_report_style(report)

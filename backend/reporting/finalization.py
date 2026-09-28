@@ -76,19 +76,23 @@ def clean_formal_report_style(report: str) -> tuple[str, dict[str, object]]:
     lines = report.splitlines()
     output = []
     section = ''
+    orphan_after_removed_line = False
     for index, line in enumerate(lines):
         heading = re.match(r'^#{1,6}\s+(.+?)\s*$', line)
         if heading:
             section = heading.group(1).strip()
             output.append(line)
+            orphan_after_removed_line = False
             continue
         if re.match(r'^\s*\|?\s*:?-{3,}', line):
             output.append(line)
+            orphan_after_removed_line = False
             continue
         if line.lstrip().startswith('|') and line.rstrip().endswith('|'):
             # The row immediately before a separator is the header.
             if index + 1 < len(lines) and re.match(r'^\s*\|?\s*:?-{3,}', lines[index + 1]):
                 output.append(line)
+                orphan_after_removed_line = False
                 continue
             cells = line.strip().strip('|').split('|')
             edited = []
@@ -101,12 +105,15 @@ def clean_formal_report_style(report: str) -> tuple[str, dict[str, object]]:
                              for rule, text in removed)
             if not row_changed:
                 output.append(line)
+                orphan_after_removed_line = False
                 continue
             edited = [cell if cell and not _STYLE_ORPHAN_RE.fullmatch(cell) else '—'
                       for cell in edited]
             if all(cell == '—' for cell in edited[1:]):
+                orphan_after_removed_line = False
                 continue
             output.append('| ' + ' | '.join(edited) + ' |')
+            orphan_after_removed_line = False
             continue
         cleaned, removed = _clean_formal_style_text(line)
         items.extend({'section': section, 'rule': rule, 'text': text}
@@ -114,11 +121,15 @@ def clean_formal_report_style(report: str) -> tuple[str, dict[str, object]]:
         if removed:
             if cleaned:
                 output.append(cleaned)
-        elif _STYLE_ORPHAN_RE.fullmatch(line) and items:
+                orphan_after_removed_line = False
+            else:
+                orphan_after_removed_line = True
+        elif _STYLE_ORPHAN_RE.fullmatch(line) and orphan_after_removed_line:
             # A citation on its own line can be left behind by a removed sentence.
             continue
         else:
             output.append(line)
+            orphan_after_removed_line = False
     audit = {'version': 'formal-style-cleanup-v1', 'removed_count': len(items),
              'removed_items': items}
     if not items:
