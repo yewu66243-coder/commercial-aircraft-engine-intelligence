@@ -15,6 +15,121 @@ from .image_evidence import insert_missing_figures, normalize_figure_sources
 from .source_grounding import pack_sources, source_text
 
 
+_STYLE_SENTENCE_RE = re.compile(r'[^。！？.!?]+[。！？.!?](?:[ \t]*\[[^\]]+\])*|[^。！？.!?]+$')
+_STYLE_REPORT_ACTION_RE = re.compile(
+    r'本报告.*(?:不作|不进行|不据此|无法据此|不对).*(?:判断|推断|结论|区分|定性)')
+_STYLE_SOURCE_GAP_RE = re.compile(
+    r'(?:文献|资料|原文).*(?:未说明|未涉及|未取得|未建立|未将.*建立关联)')
+_STYLE_NEGATIVE_CONCLUSION_RE = re.compile(
+    r'(?:不作|不进行|不据此|无法据此|不对).*(?:判断|推断|结论|区分|定性)')
+_STYLE_RETRACTION_RE = re.compile(
+    r'[，,；;]\s*((?:因此|故)(?:无法证实|不作确定性结论)[^。！？.!?]*[。！？.!?]?(?:\[[^\]]+\])*)$')
+_STYLE_ORPHAN_RE = re.compile(r'^(?:\s*\[(?:URL|原文|来源URL)\s*\d+\]\s*)+$', re.I)
+_STYLE_EMPTY_RE = re.compile(r'^[\s，,；;：:。.!！？?（）()\[\]、]*(?:因此|故|所以|并且)?[\s，,；;：:。.!！？?（）()\[\]、]*$')
+
+
+def _formal_style_rule(sentence):
+    """Match a withdrawal of judgment, never a bare source limitation."""
+    if _STYLE_REPORT_ACTION_RE.search(sentence):
+        return 'self_referential_conclusion'
+    if _STYLE_SOURCE_GAP_RE.search(sentence) and _STYLE_NEGATIVE_CONCLUSION_RE.search(sentence):
+        return 'source_gap_with_conclusion'
+    if (re.match(r'^\s*(?:受资料范围限制|鉴于证据不足)', sentence)
+            and _STYLE_NEGATIVE_CONCLUSION_RE.search(sentence)):
+        return 'scope_preface_with_conclusion'
+    return None
+
+
+def _clean_formal_style_text(text):
+    """Return edited text and exact removed spans for one line or table cell."""
+    kept = []
+    removed = []
+    for match in _STYLE_SENTENCE_RE.finditer(text):
+        sentence = match.group()
+        rule = _formal_style_rule(sentence)
+        if rule:
+            removed.append((rule, sentence.strip()))
+            continue
+        retraction = _STYLE_RETRACTION_RE.search(sentence)
+        if retraction:
+            removed.append(('retracted_conclusion', retraction.group()))
+            sentence = sentence[:retraction.start()] + '。'
+        if removed:
+            sentence = sentence.lstrip()
+        kept.append(sentence)
+    if not removed:
+        return text, []
+    cleaned = ''.join(kept).strip()
+    cleaned = re.sub(r' {2,}', ' ', cleaned)
+    cleaned = re.sub(r'\(\s*\)|（\s*）', '', cleaned)
+    if _STYLE_ORPHAN_RE.fullmatch(cleaned) or _STYLE_EMPTY_RE.fullmatch(cleaned):
+        cleaned = ''
+    return cleaned, removed
+
+
+def clean_formal_report_style(report: str) -> tuple[str, dict[str, object]]:
+    """Remove self-referential report disclaimers after editorial work.
+
+    The audit stores only removed text and its nearest Markdown heading.
+    """
+    items = []
+    lines = report.splitlines()
+    output = []
+    section = ''
+    for index, line in enumerate(lines):
+        heading = re.match(r'^#{1,6}\s+(.+?)\s*$', line)
+        if heading:
+            section = heading.group(1).strip()
+            output.append(line)
+            continue
+        if re.match(r'^\s*\|?\s*:?-{3,}', line):
+            output.append(line)
+            continue
+        if line.lstrip().startswith('|') and line.rstrip().endswith('|'):
+            # The row immediately before a separator is the header.
+            if index + 1 < len(lines) and re.match(r'^\s*\|?\s*:?-{3,}', lines[index + 1]):
+                output.append(line)
+                continue
+            cells = line.strip().strip('|').split('|')
+            edited = []
+            row_changed = False
+            for cell in cells:
+                cleaned, removed = _clean_formal_style_text(cell.strip())
+                edited.append(cleaned)
+                row_changed |= bool(removed)
+                items.extend({'section': section, 'rule': rule, 'text': text}
+                             for rule, text in removed)
+            if not row_changed:
+                output.append(line)
+                continue
+            edited = [cell if cell and not _STYLE_ORPHAN_RE.fullmatch(cell) else '—'
+                      for cell in edited]
+            if all(cell == '—' for cell in edited[1:]):
+                continue
+            output.append('| ' + ' | '.join(edited) + ' |')
+            continue
+        cleaned, removed = _clean_formal_style_text(line)
+        items.extend({'section': section, 'rule': rule, 'text': text}
+                     for rule, text in removed)
+        if removed:
+            if cleaned:
+                output.append(cleaned)
+        elif _STYLE_ORPHAN_RE.fullmatch(line) and items:
+            # A citation on its own line can be left behind by a removed sentence.
+            continue
+        else:
+            output.append(line)
+    audit = {'version': 'formal-style-cleanup-v1', 'removed_count': len(items),
+             'removed_items': items}
+    if not items:
+        return report, audit
+    cleaned = '\n'.join(output)
+    cleaned = re.sub(r'\n{3,}', '\n\n', cleaned)
+    if report.endswith('\n'):
+        cleaned += '\n'
+    return cleaned, audit
+
+
 def source_passages(originals):
     """Stable, immutable passages copied from the actual extracted source pages."""
     passages = []
