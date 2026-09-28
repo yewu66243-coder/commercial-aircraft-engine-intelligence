@@ -411,16 +411,12 @@ def evaluate_public_url_sources(report: str, threshold: float = PUBLIC_URL_SOURC
         ref = item["ref"]
         url = url_by_ref[ref]
         source_text = source_text_by_url.get(url, "")
+        check = _check_claims_against_source([item["claim"]], source_text)
         if not url:
             check = {
-                "status": "unchecked",
-                "confidence": 0.0,
+                **check,
                 "reason": "正文引用了该 URL 编号，但证据来源列表中未找到对应真实 URL。",
-                "matched_terms": [],
-                "matched_numbers": [],
             }
-        else:
-            check = _check_claims_against_source([item["claim"]], source_text)
         checked_relationships.append(
             {
                 **item,

@@ -63,7 +63,11 @@ class FormalPipelineTests(unittest.TestCase):
             stack.enter_context(patch.object(service, 'writer_agent', new=AsyncMock(return_value=annotated)))
             stack.enter_context(patch.object(service, 'inspect_report_urls', new=AsyncMock(return_value=url_check)))
             stack.enter_context(patch.object(service, 'append_evaluation_record', side_effect=lambda record: saved.append(record) or 'record.json'))
-            source_check = stack.enter_context(patch('three_agent_service.evaluate_public_url_sources', return_value={'supported_count': 1}))
+            source_check = stack.enter_context(patch('three_agent_service.evaluate_public_url_sources', return_value={
+                'relationship_count': 2,
+                'supported_count': 1,
+                'partially_supported_count': 1,
+            }))
             stack.enter_context(patch('three_agent_service.prune_redundant_unchecked_url_citations', side_effect=lambda text, stats: (text, {'changed': False})))
             stack.enter_context(patch('three_agent_service.evaluate_report_entities', return_value={'extracted_count': 1, 'auto_evidence_eval': {'unchecked_count': 1}}))
             md = stack.enter_context(patch('three_agent_service.write_text_to_md', new=AsyncMock(return_value='outputs/report.md')))
@@ -84,6 +88,10 @@ class FormalPipelineTests(unittest.TestCase):
         self.assertIn('该点待后续核验', saved[0]['evidence_report'])
         self.assertEqual(len(saved[0]['verification_notes']), 1)
         self.assertFalse(any('文件全部生成完毕' in item['message'] for item in result['trace']))
+        self.assertTrue(any(
+            '2 条断言—公开链接关系' in item['message'] and '完全支撑 1 条' in item['message']
+            for item in result['trace']
+        ))
 
     def test_writer_failure_is_explicit_draft_in_service(self):
         from three_agent_service import ThreeAgentService, ThreeAgentRequestData

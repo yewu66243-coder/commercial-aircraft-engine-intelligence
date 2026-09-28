@@ -850,26 +850,26 @@ class ThreeAgentService:
             f"| 可访问 URL 数量 | {url_stats['accessible_urls']} |\n",
             f"| 异常 URL 数量 | {url_stats['failed_urls']} |\n",
             f"| URL 可访问率 | {rate_text} |\n",
-            f"| 正文引用 URL 编号数量 | {url_source_eval.get('cited_url_ref_count', 0)} |\n",
-            f"| 公开URL溯源支撑通过数量 | {url_source_eval.get('supported_count', 0)} |\n",
-            f"| 公开URL溯源部分支撑数量 | {url_source_eval.get('partially_supported_count', 0)} |\n",
-            f"| 公开URL溯源未支撑数量 | {url_source_eval.get('unsupported_count', 0)} |\n",
-            f"| 公开URL溯源未核验数量 | {url_source_eval.get('unchecked_count', 0)} |\n",
+            f"| 断言—公开链接关系数量 | {url_source_eval.get('relationship_count', 0)} |\n",
+            f"| 公开链接支撑关系数量 | {url_source_eval.get('supported_count', 0)} |\n",
+            f"| 公开链接部分支撑关系数量 | {url_source_eval.get('partially_supported_count', 0)} |\n",
+            f"| 公开链接未支撑关系数量 | {url_source_eval.get('unsupported_count', 0)} |\n",
+            f"| 公开链接未核验关系数量 | {url_source_eval.get('unchecked_count', 0)} |\n",
             f"| 已剔除冗余未核验URL引用数量 | {len(url_cleanup.get('removed_redundant_url_refs') or [])} |\n",
             f"| 已替换为本地原文引用的URL数量 | {len(url_cleanup.get('replaced_url_refs_with_local_refs') or {})} |\n",
             f"| 已移除冗余URL来源条目数量 | {len(url_cleanup.get('removed_evidence_source_refs') or [])} |\n",
             f"| 唯一证据未核验URL风险数量 | {len(url_cleanup.get('sole_unchecked_url_risks') or [])} |\n",
-            f"| 公开信息溯源链接准确率 | {url_source_accuracy_text} |\n",
-            f"| 公开信息溯源链接准确率要求 | {url_source_requirement_text} |\n",
+            f"| 断言—公开链接关系支撑准确率 | {url_source_accuracy_text} |\n",
+            f"| 断言—公开链接关系支撑准确率要求 | {url_source_requirement_text} |\n",
             f"| SSL 降级后可访问 URL 数量 | {url_stats.get('ssl_unverified_accessible_urls', 0)} |\n",
             f"| 异常原因统计 | {self._escape_markdown_table_cell(failure_reason_text)} |\n",
             f"| 异常 URL 摘要 | {self._escape_markdown_table_cell(failed_preview)} |\n",
         ]
         rows.append(
-            "\n> 注：URL 可访问率只检测链接能否打开；公开信息溯源链接准确率会进一步读取正文引用的 URL 内容，并判断其是否支撑引用句。\n"
+            "\n> 注：URL 可访问率只检测链接能否打开；关系支撑准确率会进一步读取所引 URL 的正文，并逐条判断其是否支撑相邻断言。\n"
         )
         rows.append(
-            "> 注：公开信息溯源链接准确率的分母为正文中被 `[URLn]` 引用的公开链接编号；无法读取正文的 URL 按未核验计入分母。\n"
+            "> 注：关系支撑准确率的分母为正文中的断言—公开链接关系总数；分子仅计完全支撑的关系。部分支撑、未支撑及未核验关系均计入分母。\n"
         )
         rows.append(
             "> 注：若某条未核验 URL 与本地 `[原文n]` 同时支撑同一句结论，系统会自动删除该 URL 正文引用和证据来源条目；若 URL 是唯一证据，则保留并计入溯源风险。\n"
@@ -1458,10 +1458,11 @@ class ThreeAgentService:
         )
         self._log(
             "Evaluation Agent",
-            f"公开 URL 溯源支撑核验通过 {public_url_source_eval.get('supported_count', 0)} 个，"
-            f"部分支撑 {public_url_source_eval.get('partially_supported_count', 0)} 个，"
-            f"未支撑 {public_url_source_eval.get('unsupported_count', 0)} 个，"
-            f"未核验 {public_url_source_eval.get('unchecked_count', 0)} 个；"
+            f"共 {public_url_source_eval.get('relationship_count', 0)} 条断言—公开链接关系："
+            f"完全支撑 {public_url_source_eval.get('supported_count', 0)} 条，"
+            f"部分支撑 {public_url_source_eval.get('partially_supported_count', 0)} 条，"
+            f"未支撑 {public_url_source_eval.get('unsupported_count', 0)} 条，"
+            f"未核验 {public_url_source_eval.get('unchecked_count', 0)} 条；"
             f"已移除冗余未核验 URL {len(public_url_cleanup.get('removed_redundant_url_refs') or [])} 个。",
         )
         stats_ready_elapsed = time.perf_counter() - started_perf

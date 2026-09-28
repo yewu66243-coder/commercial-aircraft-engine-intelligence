@@ -12,6 +12,48 @@ import pytest
 from three_agent_service import ThreeAgentRequestData, ThreeAgentService
 
 
+def test_run_statistics_uses_relationship_denominator_for_public_support() -> None:
+    service = ThreeAgentService(ThreeAgentRequestData(task="关系口径"))
+    stats = {
+        "run_id": "test-run",
+        "task": "关系口径",
+        "report_source": "web",
+        "query_domain_count": 0,
+        "selected_source_count": 0,
+        "duration_seconds": 1.0,
+        "duration_minutes": 0.02,
+        "url_check": {
+            "total_urls": 1,
+            "checked_urls": 1,
+            "accessible_urls": 1,
+            "failed_urls": 0,
+            "accessibility_rate": 1.0,
+        },
+        "public_url_source_eval": {
+            "relationship_count": 3,
+            "cited_url_ref_count": 1,
+            "unique_url_count": 1,
+            "supported_count": 1,
+            "partially_supported_count": 1,
+            "unsupported_count": 0,
+            "unchecked_count": 1,
+            "support_accuracy": 1 / 3,
+            "threshold": 0.98,
+            "requirement_met": False,
+        },
+    }
+
+    section = service.build_run_statistics_section(stats)
+
+    assert "| 断言—公开链接关系数量 | 3 |" in section
+    assert "| 公开链接支撑关系数量 | 1 |" in section
+    assert "| 公开链接部分支撑关系数量 | 1 |" in section
+    assert "| 公开链接未核验关系数量 | 1 |" in section
+    assert "正文引用 URL 编号数量" not in section
+    assert "分母为正文中的断言—公开链接关系总数" in section
+    assert "分子仅计完全支撑的关系" in section
+
+
 class _Response:
     def __init__(self, status: int):
         self.status = status

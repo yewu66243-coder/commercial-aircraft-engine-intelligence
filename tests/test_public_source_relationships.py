@@ -86,6 +86,37 @@ def test_unchecked_relationship_remains_in_denominator() -> None:
     assert result["results"][1]["source_readable"] is False
 
 
+def test_missing_url_mapping_still_checks_each_relationship() -> None:
+    report = """甲型发动机已经交付。[URL1]
+乙型发动机仍在试验。[URL2]
+
+## 证据来源
+[URL1] https://example.com/one
+"""
+    def check(claims: list[str], source_text: str) -> dict:
+        assert len(claims) == 1
+        return {
+            "status": "supported" if source_text else "unchecked",
+            "confidence": 1.0 if source_text else 0.3,
+            "reason": "checker reason",
+            "matched_terms": ["乙型"] if not source_text else [],
+            "matched_numbers": [],
+        }
+
+    with patch.object(source_evaluator, "_read_url_text", return_value="source") as reader, patch.object(
+        source_evaluator, "_check_claims_against_source", side_effect=check
+    ) as checker:
+        result = source_evaluator.evaluate_public_url_sources(report)
+
+    reader.assert_called_once_with("https://example.com/one")
+    assert checker.call_count == 2
+    assert [call.args[1] for call in checker.call_args_list] == ["source", ""]
+    assert result["relationships"][1]["status"] == "unchecked"
+    assert result["relationships"][1]["confidence"] == 0.3
+    assert result["relationships"][1]["matched_terms"] == ["乙型"]
+    assert "证据来源列表" in result["relationships"][1]["reason"]
+
+
 def test_no_public_citations_have_no_accuracy() -> None:
     result = source_evaluator.evaluate_public_url_sources("只有本地证据。[原文1]")
 
