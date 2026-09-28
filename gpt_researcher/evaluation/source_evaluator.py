@@ -59,6 +59,7 @@ def _extract_url_claim_relationships(report: str) -> List[Dict[str, str]]:
     body = _analysis_report_body(report)
     relationships: List[Dict[str, str]] = []
     previous_claim = ""
+    in_evidence_directory = False
 
     lines = body.splitlines()
     for index, line in enumerate(lines):
@@ -66,7 +67,15 @@ def _extract_url_claim_relationships(report: str) -> List[Dict[str, str]]:
         if not stripped:
             previous_claim = ""
             continue
-        if re.match(r"^#{1,6}\s+", stripped) or re.fullmatch(r"(?:证据来源|来源列表)\s*[：:]?", stripped):
+        heading = re.match(r"^#{1,6}\s+(.+?)\s*#*\s*$", stripped)
+        if heading:
+            in_evidence_directory = bool(re.search(r"证据来源|来源列表", heading.group(1)))
+            previous_claim = ""
+            continue
+        if in_evidence_directory:
+            previous_claim = ""
+            continue
+        if re.fullmatch(r"(?:证据来源|来源列表)\s*[：:]?", stripped):
             previous_claim = ""
             continue
         if _line_is_evidence_source(stripped):

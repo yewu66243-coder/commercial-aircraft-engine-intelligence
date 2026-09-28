@@ -296,11 +296,12 @@ def test_narrative_evidence_phrase_does_not_hide_following_claims() -> None:
     assert [item["ref"] for item in relationships] == ["[URL1]", "[URL2]"]
 
 
-def test_body_after_evidence_entries_is_parsed_again() -> None:
+def test_next_heading_after_evidence_entries_restores_claim_parsing() -> None:
     report = """## 证据来源
 [URL1] https://example.com/one
 证据来源:
 [URL2] https://example.com/two
+## 分析
 甲型发动机已经交付。[URL1]
 """
 
@@ -308,6 +309,37 @@ def test_body_after_evidence_entries_is_parsed_again() -> None:
 
     assert [(item["ref"], item["claim"]) for item in relationships] == [
         ("[URL1]", "甲型发动机已经交付"),
+    ]
+
+
+def test_evidence_directory_table_and_bullets_do_not_create_relationships() -> None:
+    report = """## 证据来源列表
+| 来源 | 引用 | 链接 |
+| --- | --- | --- |
+| FAA | [URL1] | https://example.com/one |
+- 另见 FAA [URL2] https://example.com/two
+"""
+
+    with patch.object(source_evaluator, "_read_url_text") as reader:
+        result = source_evaluator.evaluate_public_url_sources(report)
+
+    reader.assert_not_called()
+    assert result["relationship_count"] == 0
+    assert result["relationships"] == []
+    assert result["support_accuracy"] is None
+
+
+def test_next_markdown_heading_ends_evidence_directory_interval() -> None:
+    report = """## 证据来源列表
+| FAA | [URL1] | https://example.com/one |
+### 分析
+甲型发动机已经交付。[URL2]
+"""
+
+    relationships = source_evaluator._extract_url_claim_relationships(report)
+
+    assert [(item["ref"], item["claim"]) for item in relationships] == [
+        ("[URL2]", "甲型发动机已经交付"),
     ]
 
 
