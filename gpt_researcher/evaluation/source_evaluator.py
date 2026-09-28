@@ -19,6 +19,10 @@ from gpt_researcher.evaluation.entity_evaluator import (
 PUBLIC_URL_SOURCE_THRESHOLD = 0.98
 URL_REF_RE = re.compile(r"\[URL\s*\d+\]", re.IGNORECASE)
 LOCAL_REF_RE = re.compile(r"\[(?:原文|文献)\s*\d+\]", re.IGNORECASE)
+EVIDENCE_DIRECTORY_TITLE_RE = re.compile(
+    r"(?:(?:\d+(?:\.\d+)*[.、．]?|[一二三四五六七八九十]+[、.．])\s*)?"
+    r"(?:证据来源列表|证据来源|来源列表)\s*[：:]?"
+)
 
 
 def _analysis_report_body(report: str) -> str:
@@ -69,7 +73,7 @@ def _extract_url_claim_relationships(report: str) -> List[Dict[str, str]]:
             continue
         heading = re.match(r"^#{1,6}\s+(.+?)\s*#*\s*$", stripped)
         if heading:
-            in_evidence_directory = bool(re.search(r"证据来源|来源列表", heading.group(1)))
+            in_evidence_directory = bool(EVIDENCE_DIRECTORY_TITLE_RE.fullmatch(heading.group(1).strip()))
             previous_claim = ""
             continue
         if in_evidence_directory:

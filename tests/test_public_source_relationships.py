@@ -343,6 +343,32 @@ def test_next_markdown_heading_ends_evidence_directory_interval() -> None:
     ]
 
 
+@pytest.mark.parametrize(
+    "title",
+    ["证据来源与可靠性分析", "证据来源说明", "来源列表评价", "证据来源方法"],
+)
+def test_extended_evidence_heading_is_analysis_not_directory(title: str) -> None:
+    report = f"## {title}\n甲型发动机已交付。[URL1]\n"
+
+    relationships = source_evaluator._extract_url_claim_relationships(report)
+
+    assert [(item["ref"], item["claim"]) for item in relationships] == [
+        ("[URL1]", "甲型发动机已交付"),
+    ]
+
+
+@pytest.mark.parametrize(
+    "title",
+    ["证据来源", "来源列表", "证据来源列表", "8. 证据来源", "八、证据来源："],
+)
+def test_exact_evidence_heading_starts_directory(title: str) -> None:
+    report = f"## {title}\n| FAA | [URL1] | https://example.com/one |\n"
+
+    relationships = source_evaluator._extract_url_claim_relationships(report)
+
+    assert relationships == []
+
+
 def test_standalone_next_line_citation_uses_previous_claim_only_without_boundary() -> None:
     report = """甲型发动机已经交付。
 [URL1]
