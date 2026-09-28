@@ -539,3 +539,84 @@ def test_legacy_category_overrides_type_and_normalizes_equivalent_task(tmp_path,
 
     assert truth["status"] == "loaded"
     assert truth["entities"][0]["category"] == "model"
+
+
+def test_xlsx_preflight_rejects_excessive_actual_cell_nodes(tmp_path, monkeypatch):
+    path = tmp_path / "many-cells.xlsx"
+    cells = b"<c r=\"A1\"/>" * 120_000
+    sheet_xml = (
+        b'<worksheet xmlns="http://schemas.openxmlformats.org/spreadsheetml/2006/main">'
+        b'<dimension ref="A1:B2"/><sheetData><row r="1">' + cells + b"</row></sheetData></worksheet>"
+    )
+    with zipfile.ZipFile(path, "w", compression=zipfile.ZIP_DEFLATED) as archive:
+        archive.writestr("xl/worksheets/sheet1.xml", sheet_xml)
+
+    monkeypatch.setattr(ground_truth_io, "load_workbook", lambda *_args, **_kwargs: pytest.fail("opened"))
+    with pytest.raises(GroundTruthValidationError) as exc_info:
+        load_ground_truth_upload(path, TASK)
+    _assert_error(exc_info, "xlsx_too_large")
+
+
+def test_evaluator_loads_canonical_hashed_ground_truth_after_persist(tmp_path, monkeypatch):
+    metadata = persist_ground_truth_upload(
+        json.dumps(_valid_payload(), ensure_ascii=False).encode("utf-8"), "truth.json", TASK, tmp_path
+    )
+    monkeypatch.setattr(entity_evaluator, "get_ground_truth_dir", lambda: tmp_path)
+
+    result = entity_evaluator.load_ground_truth(TASK)
+
+    assert result["status"] == "loaded"
+    assert result["path"].endswith(metadata["stored_name"])
+
+
+def test_evaluator_rejects_oversized_file_before_json_parsing(tmp_path, monkeypatch):
+    task = "oversized-evaluator"
+    (tmp_path / f"{task}.json").write_bytes(b"{" + b" " * (MAX_UPLOAD_BYTES + 1))
+    monkeypatch.setattr(entity_evaluator, "get_ground_truth_dir", lambda: tmp_path)
+    monkeypatch.setattr(ground_truth_io.json, "load", lambda _handle: pytest.fail("parsed oversized file"))
+
+    result = entity_evaluator.load_ground_truth(task)
+
+    assert result["status"] == "invalid_ground_truth"
+    assert result["error_code"] == "file_too_large"
+
+
+@pytest.mark.parametrize("declared_task", [None, ""])
+def test_legacy_evaluator_maps_null_or_empty_task_to_requested_task(tmp_path, monkeypatch, declared_task):
+    task = "legacy-no-task"
+    (tmp_path / f"{task}.json").write_text(
+        json.dumps({"task": declared_task, "entities": [{"name": "LEAP"}]}), encoding="utf-8"
+    )
+    monkeypatch.setattr(entity_evaluator, "get_ground_truth_dir", lambda: tmp_path)
+
+    result = entity_evaluator.load_ground_truth(task)
+
+    assert result["status"] == "loaded"
+    assert result["entities"][0]["name"] == "LEAP"
+
+
+def test_unpaired_surrogates_are_rejected_before_persistence(tmp_path):
+    content = b'{"entities":[{"type":"model","name":"\\ud800"}]}'
+    path = tmp_path / "surrogate.json"
+    path.write_bytes(content)
+
+    with pytest.raises(GroundTruthValidationError) as exc_info:
+        load_ground_truth_upload(path, TASK)
+    _assert_error(exc_info, "invalid_text")
+
+    destination = tmp_path / "stored"
+    with pytest.raises(GroundTruthValidationError) as exc_info:
+        persist_ground_truth_upload(content, "surrogate.json", TASK, destination)
+    _assert_error(exc_info, "invalid_text")
+    assert list(destination.iterdir()) == []
+
+
+def test_persist_rejects_unpaired_surrogate_task_before_hashing(tmp_path):
+    destination = tmp_path / "stored"
+    content = json.dumps(_valid_payload(), ensure_ascii=False).encode("utf-8")
+
+    with pytest.raises(GroundTruthValidationError) as exc_info:
+        persist_ground_truth_upload(content, "truth.json", "\ud800", destination)
+
+    _assert_error(exc_info, "invalid_text")
+    assert list(destination.iterdir()) == []

@@ -18,8 +18,9 @@ from urllib.request import Request, urlopen
 from gpt_researcher.evaluation.ground_truth_io import (
     GroundTruthValidationError,
     canonicalize_ground_truth_payload,
-    load_ground_truth_upload,
+    ground_truth_path_for_task,
     read_ground_truth_json,
+    validate_ground_truth_upload_path,
 )
 
 
@@ -855,6 +856,7 @@ def _ground_truth_candidates(task: str) -> List[Path]:
     directory = get_ground_truth_dir()
     safe_task = _safe_name(task)
     return [
+        ground_truth_path_for_task(task, directory),
         directory / f"{safe_task}.json",
         directory / f"{safe_task[:30]}.json",
         directory / "ground_truth.json",
@@ -976,7 +978,9 @@ def _legacy_payload_for_unified_validation(payload: Any, task: str) -> Any:
         normalized_legacy_entities.append(item)
     converted["entities"] = normalized_legacy_entities
     declared_task = converted.get("task")
-    if isinstance(declared_task, str) and _normalize_entity(declared_task) == _normalize_entity(task):
+    if declared_task is None or declared_task == "":
+        converted["task"] = task
+    elif isinstance(declared_task, str) and _normalize_entity(declared_task) == _normalize_entity(task):
         converted["task"] = task
     return converted
 
@@ -1006,6 +1010,10 @@ def load_ground_truth(task: str) -> Dict[str, Any]:
             continue
         legacy_payload: Any = None
         try:
+            # Reject unsupported, empty, or oversized files before parsing.  The
+            # evaluator retains legacy adaptation below, but shares the upload
+            # boundary so old task files cannot bypass safety limits.
+            validate_ground_truth_upload_path(path)
             legacy_payload = read_ground_truth_json(path)
         except GroundTruthValidationError as error:
             return _invalid_ground_truth(path, error.code, error.message)
@@ -1030,7 +1038,9 @@ def load_ground_truth(task: str) -> Dict[str, Any]:
                     "通用标准答案声明的任务与当前任务不一致。",
                 )
         try:
-            canonical = load_ground_truth_upload(path, task)
+            # Reuse the already-decoded JSON.  Parsing again used to make the
+            # evaluator inspect oversized input before the shared size guard.
+            canonical = canonicalize_ground_truth_payload(legacy_payload, task)
         except GroundTruthValidationError as primary_error:
             if primary_error.code not in {"invalid_schema", "invalid_entity", "invalid_aliases"} and not (
                 primary_error.code == "task_mismatch" and is_legacy_payload

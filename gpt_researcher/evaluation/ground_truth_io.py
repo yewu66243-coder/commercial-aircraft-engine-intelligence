@@ -13,6 +13,7 @@ from collections import Counter
 from decimal import Decimal, InvalidOperation
 from pathlib import Path
 from typing import Any
+from xml.etree import ElementTree
 
 from openpyxl import load_workbook
 
@@ -69,11 +70,19 @@ def _clean_aliases(value: Any, location: str = "") -> list[str]:
     aliases: list[str] = []
     seen: set[str] = set()
     for alias in value:
+        _validate_utf8_text(alias, location)
         cleaned = _normalized_key(alias)
         if cleaned and cleaned not in seen:
             seen.add(cleaned)
             aliases.append(cleaned)
     return aliases
+
+
+def _validate_utf8_text(value: str, location: str = "") -> None:
+    try:
+        value.encode("utf-8", "strict")
+    except UnicodeError:
+        _error("invalid_text", f"标准答案包含无法编码为 UTF-8 的文本。{location}")
 
 
 def _normalized_unit(value: Any) -> str:
@@ -135,6 +144,8 @@ def _validate_parameter_fields(
         value = entity["value"]
         if isinstance(value, bool) or not isinstance(value, (int, float, str)):
             _error("invalid_parameter", f"标准答案参数值必须是数值或数值字符串。{location}")
+        if isinstance(value, str):
+            _validate_utf8_text(value, location)
         try:
             _parse_parameter_number(value, entity.get("unit"))
         except ValueError:
@@ -144,6 +155,7 @@ def _validate_parameter_fields(
         unit = entity["unit"]
         if not isinstance(unit, str):
             _error("invalid_parameter", f"标准答案参数的单位必须是字符串。{location}")
+        _validate_utf8_text(unit, location)
         normalized["unit"] = unit.strip()
 
     tolerance = entity.get("tolerance", 0.01)
@@ -166,12 +178,16 @@ def canonicalize_ground_truth_payload(payload: Any, expected_task: str) -> dict[
     if not isinstance(payload, dict):
         _error("invalid_schema", "标准答案顶层结构必须是对象。")
 
+    if not isinstance(expected_task, str):
+        _error("invalid_text", "标准答案任务文本无效。")
+    _validate_utf8_text(expected_task)
     if "task" not in payload:
         task = expected_task
     elif not isinstance(payload["task"], str) or payload["task"] != expected_task:
         _error("task_mismatch", "标准答案声明的任务与当前任务不一致。")
     else:
         task = payload["task"]
+    _validate_utf8_text(task)
 
     entities = payload.get("entities")
     if not isinstance(entities, list):
@@ -192,6 +208,8 @@ def canonicalize_ground_truth_payload(payload: Any, expected_task: str) -> dict[
         name = entity.get("name")
         if not isinstance(raw_type, str) or not raw_type.strip() or not isinstance(name, str) or not name.strip():
             _error("invalid_entity", f"标准答案实体缺少有效类别或名称。{location}")
+        _validate_utf8_text(raw_type, location)
+        _validate_utf8_text(name, location)
 
         normalized = {
             "type": _normalize_category(raw_type),
@@ -235,6 +253,12 @@ def _validate_upload_path(path: Path) -> None:
         _error("file_too_large", "标准答案文件不能超过 5 MiB。")
 
 
+def validate_ground_truth_upload_path(path: str | Path) -> Path:
+    upload_path = Path(path)
+    _validate_upload_path(upload_path)
+    return upload_path
+
+
 def read_ground_truth_json(path: str | Path) -> Any:
     """Read JSON with a single safe error boundary shared by legacy callers."""
     try:
@@ -268,16 +292,26 @@ def _preflight_xlsx(path: Path) -> None:
                 member.file_size > MAX_XLSX_MEMBER_BYTES for member in members
             ):
                 _error("xlsx_too_large", "标准答案 XLSX 解压内容超过安全限制。")
+            actual_cells = 0
             for member in members:
                 if not re.fullmatch(r"xl/worksheets/sheet\d+\.xml", member.filename):
                     continue
-                content = archive.read(member)
-                dimension = re.search(rb"<dimension\b[^>]*\bref\s*=\s*[\"']([^\"']+)", content)
-                if dimension and _dimension_cell_count(dimension.group(1).decode("ascii", "ignore")) > MAX_XLSX_CELLS:
-                    _error("xlsx_too_large", "标准答案 XLSX 声明的工作表范围超过安全限制。")
+                with archive.open(member) as source:
+                    for event, element in ElementTree.iterparse(source, events=("start", "end")):
+                        tag = element.tag.rsplit("}", 1)[-1]
+                        if event == "start" and tag == "dimension":
+                            reference = element.attrib.get("ref", "")
+                            if _dimension_cell_count(reference) > MAX_XLSX_CELLS:
+                                _error("xlsx_too_large", "标准答案 XLSX 声明的工作表范围超过安全限制。")
+                        elif event == "start" and tag == "c":
+                            actual_cells += 1
+                            if actual_cells > MAX_XLSX_CELLS:
+                                _error("xlsx_too_large", "标准答案 XLSX 实际单元格数量超过安全限制。")
+                        elif event == "end":
+                            element.clear()
     except GroundTruthValidationError:
         raise
-    except (OSError, zipfile.BadZipFile, ValueError):
+    except (OSError, zipfile.BadZipFile, ValueError, ElementTree.ParseError):
         _error("invalid_excel", "标准答案 XLSX 文件无法读取。")
 
 
@@ -375,8 +409,7 @@ def _xlsx_payload(path: Path) -> dict[str, Any]:
 
 def load_ground_truth_upload(path: str | Path, expected_task: str) -> dict[str, Any]:
     """Load a JSON or XLSX upload and return its validated canonical form."""
-    upload_path = Path(path)
-    _validate_upload_path(upload_path)
+    upload_path = validate_ground_truth_upload_path(path)
     if upload_path.suffix.lower() == ".json":
         payload = read_ground_truth_json(upload_path)
     else:
@@ -385,6 +418,9 @@ def load_ground_truth_upload(path: str | Path, expected_task: str) -> dict[str, 
 
 
 def ground_truth_path_for_task(task: str, destination_dir: str | Path) -> Path:
+    if not isinstance(task, str):
+        _error("invalid_text", "标准答案任务文本无效。")
+    _validate_utf8_text(task)
     digest = hashlib.sha256(task.encode("utf-8")).hexdigest()[:20]
     return Path(destination_dir) / f"{digest}.json"
 
