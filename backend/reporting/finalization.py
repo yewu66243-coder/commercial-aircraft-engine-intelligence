@@ -84,6 +84,25 @@ def _clean_formal_style_text(text):
     return cleaned, removed
 
 
+def _split_markdown_table_cells(line):
+    """Split on pipes preceded by an even number of backslashes."""
+    delimiters = []
+    for index, character in enumerate(line):
+        if character != '|':
+            continue
+        backslashes = 0
+        cursor = index - 1
+        while cursor >= 0 and line[cursor] == '\\':
+            backslashes += 1
+            cursor -= 1
+        if backslashes % 2 == 0:
+            delimiters.append(index)
+    if len(delimiters) < 2:
+        return None
+    cells = [line[left + 1:right] for left, right in zip(delimiters, delimiters[1:])]
+    return line[:delimiters[0] + 1], cells, line[delimiters[-1]:]
+
+
 def clean_formal_report_style(report: str) -> tuple[str, dict[str, object]]:
     """Remove self-referential report disclaimers after editorial work.
 
@@ -111,12 +130,17 @@ def clean_formal_report_style(report: str) -> tuple[str, dict[str, object]]:
                 output.append(line)
                 orphan_after_removed_line = False
                 continue
-            cells = line.strip().strip('|').split('|')
+            split = _split_markdown_table_cells(line)
+            if split is None:
+                output.append(line)
+                orphan_after_removed_line = False
+                continue
+            row_prefix, cells, row_suffix = split
             edited = []
             row_changed = False
             for cell in cells:
                 cleaned, removed = _clean_formal_style_text(cell.strip())
-                edited.append(cleaned)
+                edited.append((cell, cleaned, bool(removed)))
                 row_changed |= bool(removed)
                 items.extend({'section': section, 'rule': rule, 'text': text}
                              for rule, text in removed)
@@ -124,12 +148,15 @@ def clean_formal_report_style(report: str) -> tuple[str, dict[str, object]]:
                 output.append(line)
                 orphan_after_removed_line = False
                 continue
-            edited = [cell if cell and not _STYLE_ORPHAN_RE.fullmatch(cell) else '—'
-                      for cell in edited]
-            if all(cell == '—' for cell in edited[1:]):
+            values = [cleaned if removed else cell.strip() for cell, cleaned, removed in edited]
+            values = [value if value and not _STYLE_ORPHAN_RE.fullmatch(value) else '—'
+                      for value in values]
+            if all(value == '—' for value in values[1:]):
                 orphan_after_removed_line = False
                 continue
-            output.append('| ' + ' | '.join(edited) + ' |')
+            rebuilt = [cell if not removed and value == cell.strip() else f' {value} '
+                       for (cell, _, removed), value in zip(edited, values)]
+            output.append(row_prefix + '|'.join(rebuilt) + row_suffix)
             orphan_after_removed_line = False
             continue
         cleaned, removed = _clean_formal_style_text(line)

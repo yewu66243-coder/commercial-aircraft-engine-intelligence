@@ -120,6 +120,24 @@ def test_preserves_untouched_prefixed_table_cell_when_another_cell_is_removed(pr
     assert audit['removed_count'] == 1
 
 
+def test_preserves_escaped_pipes_in_untouched_table_cell():
+    report = ('| 型号 | 依据 | 结论 |\n| --- | --- | --- |\n'
+              '| A | ' + r'FADEC \| 控制 \| 调度' + ' | ' + DISCLAIMERS[4] + ' |\n')
+    cleaned, audit = clean_formal_report_style(report)
+    assert cleaned == ('| 型号 | 依据 | 结论 |\n| --- | --- | --- |\n'
+                       '| A | ' + r'FADEC \| 控制 \| 调度' + ' | — |\n')
+    assert audit['removed_count'] == 1
+
+
+def test_even_number_of_backslashes_does_not_escape_table_delimiter():
+    report = ('| 型号 | 依据一 | 依据二 | 结论 |\n| --- | --- | --- | --- |\n'
+              '| A | ' + r'FADEC \\' + '| 控制 | ' + DISCLAIMERS[4] + ' |\n')
+    cleaned, audit = clean_formal_report_style(report)
+    assert cleaned == ('| 型号 | 依据一 | 依据二 | 结论 |\n| --- | --- | --- | --- |\n'
+                       '| A | ' + r'FADEC \\' + '| 控制 | — |\n')
+    assert audit['removed_count'] == 1
+
+
 def test_heading_audit_tracks_nearest_section_across_body_and_caption():
     report = ('# 总报告\n\n## 摘要\n' + DISCLAIMERS[0] + '\n\n'
               '## 图表\n图 1：' + DISCLAIMERS[5] + '\n')
