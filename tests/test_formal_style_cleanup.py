@@ -185,6 +185,27 @@ def test_scope_preface_without_fact_is_removed():
 
 
 @pytest.mark.parametrize('sentence', [
+    '本报告调查结果显示，公司不作市场判断。',
+    '文献未说明价格，但已核实30例事故，不作进一步推断。',
+])
+def test_keeps_independent_facts_and_non_report_judgments(sentence):
+    report = '# S\n' + sentence + '\n'
+    cleaned, audit = clean_formal_report_style(report)
+    assert cleaned == report
+    assert audit['removed_count'] == 0
+
+
+@pytest.mark.parametrize('sentence', [
+    '本报告不作市场判断。',
+    '文献未说明价格，本报告不作进一步推断。',
+])
+def test_still_removes_report_owned_disclaimers(sentence):
+    cleaned, audit = clean_formal_report_style('# S\n' + sentence + '\n')
+    assert cleaned == '# S\n'
+    assert audit['removed_count'] == 1
+
+
+@pytest.mark.parametrize('sentence', [
     '本报告不对 EASA CS-E.510 作结论。',
     '本报告根据 FAR Part 33.4 不作定性判断。',
 ])
@@ -240,6 +261,16 @@ def test_citation_after_retained_fact_and_blank_line_remains():
 
 def test_long_unpunctuated_line_is_linear_and_not_removed():
     report = '# S\n' + '本报告' * 6667 + '\n'
+    started = perf_counter()
+    cleaned, audit = clean_formal_report_style(report)
+    elapsed = perf_counter() - started
+    assert cleaned == report
+    assert audit['removed_count'] == 0
+    assert elapsed < 2.0
+
+
+def test_many_unmatched_markdown_brackets_are_linear_and_unchanged():
+    report = '# S\n' + '[' * 20000 + '\n'
     started = perf_counter()
     cleaned, audit = clean_formal_report_style(report)
     elapsed = perf_counter() - started

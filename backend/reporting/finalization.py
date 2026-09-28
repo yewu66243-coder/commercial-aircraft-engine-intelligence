@@ -34,29 +34,50 @@ _STYLE_CAPTION_PREFIX_RE = re.compile(
 
 def _formal_style_rule(sentence):
     """Match a withdrawal of judgment, never a bare source limitation."""
-    def earliest(words, start=0):
-        positions = [sentence.find(word, start) for word in words]
+    def earliest(text, words, start=0):
+        positions = [text.find(word, start) for word in words]
         return min((position for position in positions if position >= 0), default=-1)
 
-    action = earliest(_STYLE_ACTIONS)
-    if action < 0 or earliest(_STYLE_JUDGMENTS, action) < 0:
+    scope_preface = bool(re.match(r'^\s*(?:受资料范围限制|鉴于证据不足)', sentence))
+    if scope_preface and _STYLE_SCOPE_ONLY_RE.fullmatch(sentence):
+        return 'scope_preface_with_conclusion'
+
+    clauses = re.split(r'[，,；;]', sentence)
+    source_seen = False
+    gap_clause = -1
+    action_clause = -1
+    action_position = -1
+    for index, clause in enumerate(clauses):
+        source_seen |= earliest(clause, _STYLE_SOURCE_WORDS) >= 0
+        if source_seen and (earliest(clause, _STYLE_GAP_WORDS) >= 0
+                            or ('未将' in clause and '建立关联' in clause)):
+            gap_clause = index
+        action = earliest(clause, _STYLE_ACTIONS)
+        if action >= 0 and earliest(clause, _STYLE_JUDGMENTS, action) >= 0:
+            action_clause, action_position = index, action
+            break
+    if action_clause < 0:
         return None
-    source = earliest(_STYLE_SOURCE_WORDS)
-    gap = earliest(_STYLE_GAP_WORDS, source) if source >= 0 else -1
-    if gap < 0 and source >= 0:
-        gap = sentence.find('未将', source)
-        if gap >= 0 and sentence.find('建立关联', gap) < 0:
-            gap = -1
-    has_source_gap = source >= 0 and gap >= 0
-    if re.match(r'^\s*(?:受资料范围限制|鉴于证据不足)', sentence):
-        if _STYLE_SCOPE_ONLY_RE.fullmatch(sentence):
-            return 'scope_preface_with_conclusion'
-        return 'source_gap_with_conclusion' if has_source_gap else None
-    if sentence.find('本报告') >= 0:
+
+    current = clauses[action_clause]
+    lead = current[:action_position].strip()
+    owns_action = ('本报告' in lead or '本文' in lead
+                   or lead.startswith('报告'))
+    implied_action = lead in ('', '但', '因此', '故', '所以', '则', '对此')
+    if not owns_action and not implied_action:
+        return None
+    rationale_clause = gap_clause if gap_clause >= 0 else (0 if scope_preface else -1)
+    if rationale_clause >= 0:
+        connectors = {'', '但', '因此', '故', '所以', '则', '对此'}
+        if any(clause.strip() not in connectors
+               for clause in clauses[rationale_clause + 1:action_clause]):
+            return None
+    if scope_preface:
+        return 'source_gap_with_conclusion' if gap_clause >= 0 else None
+    if owns_action or any('本报告' in clause or '本文' in clause
+                          for clause in clauses[:action_clause]):
         return 'self_referential_conclusion'
-    if has_source_gap:
-        return 'source_gap_with_conclusion'
-    return None
+    return 'source_gap_with_conclusion' if gap_clause >= 0 else None
 
 
 def _is_orphan_reference(text):
@@ -101,24 +122,27 @@ def _formal_style_sentences(text):
         yield text[start:]
 
 
-def _markdown_group_end(text, start, opening, closing):
-    depth = 0
-    index = start
+def _markdown_pair_ends(text):
+    """Pair unescaped Markdown brackets once, including nested groups."""
+    stacks = {'[': [], '(': []}
+    pairs = {}
+    index = 0
     while index < len(text):
         if text[index] == '\\':
             index += 2
             continue
-        if text[index] == opening:
-            depth += 1
-        elif text[index] == closing:
-            depth -= 1
-            if depth == 0:
-                return index + 1
+        character = text[index]
+        if character in stacks:
+            stacks[character].append(index)
+        elif character == ']' and stacks['[']:
+            pairs[stacks['['].pop()] = index + 1
+        elif character == ')' and stacks['(']:
+            pairs[stacks['('].pop()] = index + 1
         index += 1
-    return None
+    return pairs
 
 
-def _protected_markdown_end(text, index):
+def _protected_markdown_end(text, index, pairs):
     if text[index] == '`':
         run = 1
         while index + run < len(text) and text[index + run] == '`':
@@ -127,9 +151,9 @@ def _protected_markdown_end(text, index):
         return closing + run if closing >= 0 else None
     label_start = index + 1 if text.startswith('![', index) else index
     if label_start < len(text) and text[label_start] == '[':
-        label_end = _markdown_group_end(text, label_start, '[', ']')
+        label_end = pairs.get(label_start)
         if label_end is not None and label_end < len(text) and text[label_end] == '(':
-            return _markdown_group_end(text, label_end, '(', ')')
+            return pairs.get(label_end)
     if text.startswith('<http://', index) or text.startswith('<https://', index):
         closing = text.find('>', index + 1)
         return closing + 1 if closing >= 0 else None
@@ -138,10 +162,11 @@ def _protected_markdown_end(text, index):
 
 def _markdown_chunks(text):
     """Yield prose and protected Markdown verbatim; no placeholder is inserted."""
+    pairs = _markdown_pair_ends(text)
     start = 0
     index = 0
     while index < len(text):
-        end = _protected_markdown_end(text, index)
+        end = _protected_markdown_end(text, index, pairs)
         if end is None:
             index += 1
             continue
