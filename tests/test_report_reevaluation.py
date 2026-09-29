@@ -221,7 +221,7 @@ def test_evaluate_saved_report_scores_with_the_specified_ground_truth(tmp_path, 
 
     entity = result["entity_eval"]
     assert entity["mode"] == "strict"
-    assert entity["ground_truth_path"] == str(specified)
+    assert entity["ground_truth_path"] == specified.name
     assert [item["name"] for item in entity["expected_entities"]] == ["指定实体"]
     assert entity["metrics"]["overall"]["f1"] == 1.0
     assert result["evaluation_summary"]["entity"]["overall"]["f1"] == 1.0
