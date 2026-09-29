@@ -74,6 +74,14 @@ def _safe_url_without_userinfo(url: str) -> str:
         return ""
 
 
+def _has_url_userinfo(url: str) -> bool:
+    try:
+        parsed = urlsplit(url)
+        return "@" in parsed.netloc or parsed.username is not None or parsed.password is not None
+    except (TypeError, ValueError):
+        return False
+
+
 def extract_public_urls(report: str) -> list[str]:
     """Return distinct HTTP(S) URLs in first-appearance order."""
     urls: list[str] = []
@@ -183,6 +191,18 @@ def _failure_result(
     }
 
 
+def _userinfo_failure_result(url: str) -> UrlCheckResult:
+    safe_url = _safe_url_without_userinfo(url)
+    return _failure_result(
+        safe_url,
+        checked_url=safe_url,
+        method="normalize",
+        error="embedded credentials are not permitted",
+        failure_reason="invalid_url",
+        ssl_verified=None,
+    )
+
+
 def check_url_sync(url: str, timeout: int = 6) -> UrlCheckResult:
     """Synchronously check an HTTP(S) URL, retrying GET when HEAD is rejected."""
     headers = {"User-Agent": "Mozilla/5.0 Intelligence-System-URL-Check"}
@@ -190,15 +210,7 @@ def check_url_sync(url: str, timeout: int = 6) -> UrlCheckResult:
     try:
         checked_url = normalize_url_for_request(url)
     except _UserinfoNotAllowedError:
-        safe_url = _safe_url_without_userinfo(url)
-        return _failure_result(
-            safe_url,
-            checked_url=safe_url,
-            method="normalize",
-            error="embedded credentials are not permitted",
-            failure_reason="invalid_url",
-            ssl_verified=None,
-        )
+        return _userinfo_failure_result(url)
     except Exception as exc:
         return _failure_result(
             original_url,
@@ -300,23 +312,26 @@ async def evaluate_link_accessibility(
     checked_urls = urls[:check_limit]
     skipped_count = len(urls) - len(checked_urls)
 
-    if checked_urls:
-        raw_results = await asyncio.gather(
-            *(asyncio.to_thread(checker, url) for url in checked_urls),
-            return_exceptions=True,
-        )
-        results: list[UrlCheckResult] = []
-        for url, result in zip(checked_urls, raw_results):
-            if isinstance(result, Exception):
-                results.append(_checker_exception_result(url, result))
-            elif isinstance(result, dict):
-                results.append(result)
-            else:
-                results.append(
-                    _checker_exception_result(url, TypeError("checker must return a dict"))
-                )
-    else:
-        results = []
+    checker_urls = [url for url in checked_urls if not _has_url_userinfo(url)]
+    raw_results = await asyncio.gather(
+        *(asyncio.to_thread(checker, url) for url in checker_urls),
+        return_exceptions=True,
+    )
+    checker_results = iter(raw_results)
+    results: list[UrlCheckResult] = []
+    for url in checked_urls:
+        if _has_url_userinfo(url):
+            results.append(_userinfo_failure_result(url))
+            continue
+        result = next(checker_results)
+        if isinstance(result, Exception):
+            results.append(_checker_exception_result(url, result))
+        elif isinstance(result, dict):
+            results.append(result)
+        else:
+            results.append(
+                _checker_exception_result(url, TypeError("checker must return a dict"))
+            )
 
     accessible_count = sum(1 for item in results if item.get("accessible"))
     failed_count = len(results) - accessible_count

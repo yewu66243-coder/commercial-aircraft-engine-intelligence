@@ -255,6 +255,37 @@ def test_evaluate_link_accessibility_handles_no_urls_and_zero_max_urls() -> None
     assert zero_urls["skipped_urls"] == 2
 
 
+def test_evaluate_link_accessibility_blocks_userinfo_before_injected_checker() -> None:
+    calls: list[str] = []
+
+    def checker(url: str) -> dict[str, object]:
+        calls.append(url)
+        return {"url": url, "accessible": True, "ssl_verified": True, "failure_reason": ""}
+
+    result = asyncio.run(
+        evaluate_link_accessibility(
+            "https://user:secret@example.com/private?token=abc "
+            "https://example.com/checked https://example.com/skipped",
+            max_urls=2,
+            checker=checker,
+        )
+    )
+
+    rejected = result["results"][0]
+    assert calls == ["https://example.com/checked"]
+    assert result["total_urls"] == 3
+    assert result["checked_urls"] == 2
+    assert result["skipped_urls"] == 1
+    assert rejected["accessible"] is False
+    assert rejected["method"] == "normalize"
+    assert rejected["failure_reason"] == "invalid_url"
+    assert all(
+        forbidden not in str(value).lower()
+        for value in rejected.values()
+        for forbidden in ("user", "secret", "token")
+    )
+
+
 def test_evaluate_link_accessibility_limits_checks_and_converts_checker_exception() -> None:
     calls: list[str] = []
 
