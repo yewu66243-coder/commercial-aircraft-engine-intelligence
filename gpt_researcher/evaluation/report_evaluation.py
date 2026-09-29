@@ -6,7 +6,7 @@ import asyncio
 from datetime import datetime
 import logging
 from pathlib import Path
-from typing import Any
+from typing import Any, Iterable
 
 from backend.reporting.evaluation_report import (
     export_evaluation_report,
@@ -32,6 +32,11 @@ class SavedReportUnavailableError(ValueError):
 
 def _default_ground_truth_dir() -> Path:
     return Path(__file__).resolve().parents[2] / "outputs" / "records" / "entity_ground_truths"
+
+
+def _default_output_dir() -> Path:
+    """Anchor exports to the project root so downloads do not depend on the CWD."""
+    return Path(__file__).resolve().parents[2] / "outputs" / "evaluations"
 
 
 def resolve_active_ground_truth_path(
@@ -106,11 +111,18 @@ async def _evaluate_sources(report: str) -> dict[str, Any]:
 
 
 async def _evaluate_entities(
-    report: str, task: str, ground_truth_path: str | Path | None
+    report: str,
+    task: str,
+    ground_truth_path: str | Path | None,
+    selected_sources: Iterable[Any] | None,
 ) -> dict[str, Any]:
     try:
         return await asyncio.to_thread(
-            evaluate_report_entities, report, task, ground_truth_path=ground_truth_path
+            evaluate_report_entities,
+            report,
+            task,
+            selected_sources or (),
+            ground_truth_path=ground_truth_path,
         )
     except Exception as error:
         LOGGER.exception("Entity evaluation failed")
@@ -124,7 +136,8 @@ async def evaluate_saved_report(
     report: str,
     style_cleanup: dict[str, object] | None,
     ground_truth_path: str | Path | None,
-    output_dir: str | Path = "outputs/evaluations",
+    selected_sources: Iterable[Any] | None = None,
+    output_dir: str | Path | None = None,
 ) -> dict[str, object]:
     """Evaluate the supplied text as-is; this function never edits or regenerates it."""
     if not isinstance(report, str) or not report.strip():
@@ -137,7 +150,7 @@ async def evaluate_saved_report(
     url_check, url_source_eval, entity_eval = await asyncio.gather(
         _evaluate_accessibility(report),
         _evaluate_sources(report),
-        _evaluate_entities(report, task, ground_truth_path),
+        _evaluate_entities(report, task, ground_truth_path, selected_sources),
     )
 
     initial_summary = build_evaluation_summary(
@@ -162,7 +175,7 @@ async def evaluate_saved_report(
             task=task,
             run_id=run_id,
             evaluated_at=evaluated_at,
-            output_dir=output_dir,
+            output_dir=output_dir or _default_output_dir(),
         )
         if isinstance(exported, dict):
             paths.update(exported)
@@ -195,7 +208,8 @@ async def reevaluate_saved_run(
     store: EvaluationRecordStore,
     run_id: str,
     ground_truth_path: str | Path | None,
-    output_dir: str | Path = "outputs/evaluations",
+    selected_sources: Iterable[Any] | None = None,
+    output_dir: str | Path | None = None,
 ) -> dict[str, object]:
     """Reevaluate one stored report and append, never replace, its history."""
     record = store.get_run(run_id)
@@ -209,15 +223,23 @@ async def reevaluate_saved_run(
         raise SavedReportUnavailableError("已保存的报告任务信息不可用。")
     style_cleanup = record.get("report_style_cleanup")
     if not isinstance(style_cleanup, dict):
-        style_cleanup = record.get("evaluation_summary", {}).get("style_cleanup")
+        summary = record.get("evaluation_summary")
+        if isinstance(summary, dict):
+            style_cleanup = summary.get("style_cleanup")
     if not isinstance(style_cleanup, dict):
         style_cleanup = None
+    if selected_sources is None:
+        # Reevaluation never reruns selection, so reuse the saved file names to
+        # keep evidence support scoring identical to the original run.
+        saved_sources = record.get("selected_source_files")
+        selected_sources = saved_sources if isinstance(saved_sources, list) else []
     result = await evaluate_saved_report(
         task=task,
         run_id=run_id,
         report=report,
         style_cleanup=style_cleanup,
         ground_truth_path=ground_truth_path,
+        selected_sources=selected_sources,
         output_dir=output_dir,
     )
     store.append_reevaluation(run_id, result)

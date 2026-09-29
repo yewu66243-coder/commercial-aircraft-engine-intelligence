@@ -23,6 +23,14 @@ ENTITY_REPORT = (
     "| 型号 | 指定实体 | engine | - |\n"
 )
 
+LOCAL_EVIDENCE_REPORT = (
+    "# 已清理报告\n\n"
+    "## 实体与参数清单\n"
+    "| 类别 | 实体/参数 | 数值/描述 | 证据 |\n"
+    "| --- | --- | --- | --- |\n"
+    "| 型号 | PW1000G | engine | spec.pdf |\n"
+)
+
 
 def _write_truth(path: Path, name: str, task: str = "GTF") -> None:
     path.write_text(
@@ -91,7 +99,8 @@ def test_evaluate_saved_report_uses_exact_saved_text_and_adds_export_paths(tmp_p
 
     url_evaluator.assert_awaited_once_with(REPORT)
     source_evaluator.assert_called_once_with(REPORT)
-    entity_evaluator.assert_called_once_with(REPORT, "GTF", ground_truth_path=tmp_path / "truth.json")
+    assert entity_evaluator.call_args.args == (REPORT, "GTF", ())
+    assert entity_evaluator.call_args.kwargs["ground_truth_path"] == tmp_path / "truth.json"
     assert renderer.call_args.kwargs["summary"]["evaluation_report_paths"] == {
         "markdown": "", "word": "", "pdf": ""
     }
@@ -152,7 +161,8 @@ def test_reevaluate_saved_run_appends_history_without_generating_a_report(tmp_pa
     evaluator.assert_awaited_once_with(
         task="GTF", run_id="run-1", report=REPORT,
         style_cleanup={"removed_count": 4},
-        ground_truth_path=tmp_path / "new-truth.json", output_dir=tmp_path,
+        ground_truth_path=tmp_path / "new-truth.json",
+        selected_sources=[], output_dir=tmp_path,
     )
     assert result == fresh
     saved = store.get_run("run-1")
@@ -215,6 +225,84 @@ def test_evaluate_saved_report_scores_with_the_specified_ground_truth(tmp_path, 
     assert [item["name"] for item in entity["expected_entities"]] == ["指定实体"]
     assert entity["metrics"]["overall"]["f1"] == 1.0
     assert result["evaluation_summary"]["entity"]["overall"]["f1"] == 1.0
+
+
+def test_evaluate_saved_report_passes_selected_sources_to_evidence_scoring(tmp_path):
+    _, urls, support = _raw_results()
+    sources = [Mock(file_name="spec.pdf")]
+
+    with (
+        patch.object(report_evaluation, "evaluate_link_accessibility", AsyncMock(return_value=urls)),
+        patch.object(report_evaluation, "evaluate_public_url_sources", Mock(return_value=support)),
+        patch.object(report_evaluation, "export_evaluation_report", new=AsyncMock(return_value={
+            "markdown": "/outputs/evaluations/eval.md", "word": "", "pdf": "", "errors": []
+        })),
+    ):
+        with_sources = asyncio.run(report_evaluation.evaluate_saved_report(
+            task="GTF", run_id="run-sources", report=LOCAL_EVIDENCE_REPORT,
+            style_cleanup=None, ground_truth_path=None, selected_sources=sources,
+            output_dir=tmp_path,
+        ))
+        without_sources = asyncio.run(report_evaluation.evaluate_saved_report(
+            task="GTF", run_id="run-sources", report=LOCAL_EVIDENCE_REPORT,
+            style_cleanup=None, ground_truth_path=None, output_dir=tmp_path,
+        ))
+
+    assert with_sources["entity_eval"]["evidence_supported_count"] == 1
+    assert without_sources["entity_eval"]["evidence_supported_count"] == 0
+
+
+def test_reevaluate_saved_run_restores_saved_sources_without_generating_a_report(tmp_path):
+    store = EvaluationRecordStore(tmp_path / "records.json")
+    store.append_run({
+        "run_id": "run-1", "task": "GTF", "evidence_report": LOCAL_EVIDENCE_REPORT,
+        "selected_source_files": ["spec.pdf"],
+        "report_style_cleanup": {"removed_count": 1},
+    })
+    _, urls, support = _raw_results()
+
+    with (
+        patch.object(report_evaluation, "evaluate_link_accessibility", AsyncMock(return_value=urls)),
+        patch.object(report_evaluation, "evaluate_public_url_sources", Mock(return_value=support)),
+        patch.object(report_evaluation, "export_evaluation_report", new=AsyncMock(return_value={
+            "markdown": "/outputs/evaluations/eval.md", "word": "", "pdf": "", "errors": []
+        })),
+    ):
+        result = asyncio.run(report_evaluation.reevaluate_saved_run(
+            store=store, run_id="run-1", ground_truth_path=None, output_dir=tmp_path,
+        ))
+
+    assert result["entity_eval"]["evidence_supported_count"] == 1
+    assert result["entity_eval"]["extracted_count"] == 1
+    assert result["public_url_source_eval"] == support
+    history = store.get_run("run-1")["reevaluations"]
+    assert len(history) == 1
+    assert history[0]["evaluated_at"] == result["evaluated_at"]
+
+
+def test_export_failure_keeps_metrics_and_reports_a_safe_error(tmp_path):
+    _, urls, support = _raw_results()
+    with (
+        patch.object(report_evaluation, "evaluate_link_accessibility", AsyncMock(return_value=urls)),
+        patch.object(report_evaluation, "evaluate_public_url_sources", Mock(return_value=support)),
+        patch.object(report_evaluation, "evaluate_report_entities", Mock(return_value=_raw_results()[0])),
+        patch.object(report_evaluation, "export_evaluation_report",
+                     new=AsyncMock(side_effect=RuntimeError("disk full"))),
+    ):
+        result = asyncio.run(report_evaluation.evaluate_saved_report(
+            task="GTF", run_id="run-export", report=REPORT,
+            style_cleanup=None, ground_truth_path=None, output_dir=tmp_path,
+        ))
+
+    assert result["evaluation_summary"]["entity"]["mode"] == "strict"
+    assert result["evaluation_report_paths"] == {"markdown": "", "word": "", "pdf": ""}
+    assert result["evaluation_report_errors"][0]["code"] == "export_failed"
+    assert "disk full" not in repr(result)
+
+
+def test_default_output_dir_is_anchored_to_the_project_root():
+    assert report_evaluation._default_output_dir().is_absolute()
+    assert report_evaluation._default_output_dir().parts[-2:] == ("outputs", "evaluations")
 
 
 def test_evaluate_saved_report_without_ground_truth_stays_in_proxy_mode(tmp_path, monkeypatch):

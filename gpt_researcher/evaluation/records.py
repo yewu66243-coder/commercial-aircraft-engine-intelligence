@@ -2,8 +2,10 @@
 
 from __future__ import annotations
 
+import contextlib
 import copy
 import json
+import logging
 import os
 from pathlib import Path
 import shutil
@@ -13,6 +15,8 @@ import time
 import uuid
 from typing import Any
 
+
+LOGGER = logging.getLogger(__name__)
 
 _LOCKS_GUARD = threading.Lock()
 _LOCKS: dict[str, threading.RLock] = {}
@@ -40,12 +44,16 @@ class EvaluationRecordStore:
         return copy.deepcopy(value)
 
     def _backup_corrupt(self) -> None:
+        """Best-effort copy of an unreadable file; failures must not mask the read error."""
         if not self.path.exists():
             return
         backup = self.path.with_name(
             f"{self.path.stem}.broken_{time.time_ns()}_{uuid.uuid4().hex[:8]}{self.path.suffix}"
         )
-        shutil.copy2(self.path, backup)
+        try:
+            shutil.copy2(self.path, backup)
+        except OSError:
+            LOGGER.warning("Could not back up unreadable evaluation records file")
 
     def _read_unlocked(self) -> list[dict[str, Any]]:
         if not self.path.exists():
@@ -67,14 +75,21 @@ class EvaluationRecordStore:
         )
         temporary = Path(temporary_name)
         try:
-            with os.fdopen(descriptor, "w", encoding="utf-8", newline="\n") as stream:
+            stream = os.fdopen(descriptor, "w", encoding="utf-8", newline="\n")
+        except BaseException:
+            with contextlib.suppress(OSError):
+                os.close(descriptor)
+            raise
+        try:
+            with stream:
                 json.dump(records, stream, ensure_ascii=False, indent=2)
                 stream.write("\n")
                 stream.flush()
                 os.fsync(stream.fileno())
             os.replace(temporary, self.path)
         finally:
-            temporary.unlink(missing_ok=True)
+            with contextlib.suppress(OSError):
+                temporary.unlink(missing_ok=True)
 
     @staticmethod
     def _validated_record(record: dict[str, Any]) -> dict[str, Any]:

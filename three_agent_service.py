@@ -642,7 +642,6 @@ class ThreeAgentService:
     def build_run_statistics_section(self, stats: Dict[str, Any]) -> str:
         url_stats = stats["url_check"]
         url_source_eval = stats.get("public_url_source_eval") or {}
-        url_cleanup = stats.get("public_url_cleanup") or {}
         entity_eval = stats.get("entity_eval") or {}
         auto_evidence_eval = entity_eval.get("auto_evidence_eval") or {}
         rate = url_stats.get("accessibility_rate")
@@ -752,10 +751,6 @@ class ThreeAgentService:
             f"| 公开链接部分支撑关系数量 | {url_source_eval.get('partially_supported_count', 0)} |\n",
             f"| 公开链接未支撑关系数量 | {url_source_eval.get('unsupported_count', 0)} |\n",
             f"| 公开链接未核验关系数量 | {url_source_eval.get('unchecked_count', 0)} |\n",
-            f"| 已剔除冗余未核验URL引用数量 | {len(url_cleanup.get('removed_redundant_url_refs') or [])} |\n",
-            f"| 已替换为本地原文引用的URL数量 | {len(url_cleanup.get('replaced_url_refs_with_local_refs') or {})} |\n",
-            f"| 已移除冗余URL来源条目数量 | {len(url_cleanup.get('removed_evidence_source_refs') or [])} |\n",
-            f"| 唯一证据未核验URL风险数量 | {len(url_cleanup.get('sole_unchecked_url_risks') or [])} |\n",
             f"| 断言—公开链接关系支撑准确率 | {url_source_accuracy_text} |\n",
             f"| 断言—公开链接关系支撑准确率要求 | {url_source_requirement_text} |\n",
             f"| SSL 降级后可访问 URL 数量 | {url_stats.get('ssl_unverified_accessible_urls', 0)} |\n",
@@ -1250,6 +1245,7 @@ class ThreeAgentService:
                 report=cleaned_report,
                 style_cleanup=report_style_cleanup,
                 ground_truth_path=resolve_active_ground_truth_path(self.request.task),
+                selected_sources=self.selected_local_papers,
             )
         except Exception as exc:
             logging.getLogger(__name__).exception("Evaluation orchestration failed")
@@ -1295,7 +1291,6 @@ class ThreeAgentService:
         public_url_source_eval = evaluation["public_url_source_eval"]
         evaluation_summary = evaluation["evaluation_summary"]
         evaluation_report_paths = evaluation["evaluation_report_paths"]
-        public_url_cleanup: Dict[str, Any] = {}
         self._log(
             "Evaluation Agent",
             f"已抽取 {entity_eval.get('extracted_count', 0)} 个实体/参数，"
@@ -1308,8 +1303,7 @@ class ThreeAgentService:
             f"完全支撑 {public_url_source_eval.get('supported_count', 0)} 条，"
             f"部分支撑 {public_url_source_eval.get('partially_supported_count', 0)} 条，"
             f"未支撑 {public_url_source_eval.get('unsupported_count', 0)} 条，"
-            f"未核验 {public_url_source_eval.get('unchecked_count', 0)} 条；"
-            f"已移除冗余未核验 URL {len(public_url_cleanup.get('removed_redundant_url_refs') or [])} 个。",
+            f"未核验 {public_url_source_eval.get('unchecked_count', 0)} 条。",
         )
         stats_ready_elapsed = time.perf_counter() - started_perf
         inserted_report_image_count = self.count_inserted_report_images(cleaned_report)
@@ -1359,7 +1353,6 @@ class ThreeAgentService:
             "report_image_candidate_count": len(self.report_images),
             "url_check": url_check,
             "public_url_source_eval": public_url_source_eval,
-            "public_url_cleanup": public_url_cleanup,
             "started_at": started_at,
             "stats_ready_at": self._now_iso(),
             "duration_seconds": round(stats_ready_elapsed, 2),

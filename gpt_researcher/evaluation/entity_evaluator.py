@@ -742,6 +742,10 @@ def _run_auto_evidence_check(entities: List[Dict[str, Any]], report: str) -> Dic
 def _selected_file_names(selected_sources: Iterable[Any]) -> List[str]:
     names = []
     for item in selected_sources or []:
+        if isinstance(item, str):
+            if item.strip():
+                names.append(item)
+            continue
         name = getattr(item, "file_name", None)
         if name is None and isinstance(item, dict):
             name = item.get("file_name")
