@@ -38,6 +38,13 @@ _STATE = {
 }
 _WINDOWS_RESERVED = {"CON", "PRN", "AUX", "NUL", *(f"COM{i}" for i in range(1, 10)),
                      *(f"LPT{i}" for i in range(1, 10))}
+_CREDENTIAL_PATTERNS = (
+    re.compile(r"\bauthorization\s*:\s*(?:bearer|basic)\s+[^\r\n|]+", re.IGNORECASE),
+    re.compile(r"\bbearer\s+[^\s|;,]+", re.IGNORECASE),
+    re.compile(r"\b(?:x-api-key|api-key)\s*:\s*[^\r\n|]+", re.IGNORECASE),
+    re.compile(r"\b(?:set-cookie|cookie)\s*:\s*[^\r\n|]+", re.IGNORECASE),
+    re.compile(r"\b(?:api[_-]?key|token|secret|password)\s*[:=]\s*[^\s|,;&]+", re.IGNORECASE),
+)
 
 
 def _mapping(value: object) -> dict:
@@ -48,18 +55,22 @@ def _list(value: object) -> list:
     return value if isinstance(value, list) else []
 
 
+def _redact_credentials(value: str) -> str:
+    for pattern in _CREDENTIAL_PATTERNS:
+        value = pattern.sub("[凭据已隐藏]", value)
+    return value
+
+
 def _text(value: object, limit: int = 500) -> str:
     if isinstance(value, bool) or not isinstance(value, (str, int, float)):
         return "—"
     if isinstance(value, float) and not math.isfinite(value):
         return "—"
-    result = str(value)
+    result = _redact_credentials(str(value))
     result = re.sub(r"[\x00-\x1f\x7f]+", " ", result)
     result = re.sub(r"(?i)(?:[A-Z]:[\\/](?!/)|\\\\)[^\s|]+", "[路径已隐藏]", result)
     result = re.sub(r"(?i)(?<!\w)/(?:Users|home|tmp|var|private|mnt|etc)/[^\s|]+",
                     "[路径已隐藏]", result)
-    result = re.sub(r"(?i)\b(?:api[_-]?key|authorization|bearer|token|secret)\s*[:=]\s*\S+",
-                    "[凭据已隐藏]", result)
     result = result.strip()
     return (result[:limit] + "…") if len(result) > limit else result or "—"
 

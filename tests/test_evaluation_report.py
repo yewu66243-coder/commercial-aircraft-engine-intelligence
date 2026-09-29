@@ -103,6 +103,39 @@ def test_summary_whitelist_and_raw_secrets_never_leak():
         assert secret not in report
 
 
+def test_real_summary_and_raw_fields_redact_complete_credential_values():
+    entity, urls, support = _results()
+    credential_text = "\n".join((
+        "Authorization: Bearer AUTH_BEARER_SECRET",
+        "authorization : Basic AUTH_BASIC_SECRET",
+        "Bearer BARE_BEARER_SECRET",
+        "X-API-Key: X_API_KEY_SECRET",
+        "API-Key : API_KEY_HEADER_SECRET",
+        "Cookie: session=COOKIE_SECRET; theme=light",
+        "Set-Cookie: session=SET_COOKIE_SECRET; Path=/",
+        "https://example.test/?api_key=QUERY_API_SECRET&token=QUERY_TOKEN_SECRET"
+        "&secret=QUERY_SECRET_VALUE&password=QUERY_PASSWORD_SECRET",
+        "ordinary tokenization remains visible",
+    ))
+    support["relationships"][0]["claim"] = credential_text
+    summary = build_evaluation_summary(entity, urls, support)
+    summary["entity"]["matched"] = [{"entity": "Authorization: Bearer ENTITY_HEADER_SECRET"}]
+    summary["public_links"]["accessibility"]["results"][0]["failure_reason"] = (
+        "Cookie: session=RAW_FIELD_COOKIE_SECRET")
+
+    report = _report(summary, entity=entity, urls=urls, support=support)
+
+    for secret in (
+        "AUTH_BEARER_SECRET", "AUTH_BASIC_SECRET", "BARE_BEARER_SECRET", "X_API_KEY_SECRET",
+        "API_KEY_HEADER_SECRET", "COOKIE_SECRET", "SET_COOKIE_SECRET", "QUERY_API_SECRET",
+        "QUERY_TOKEN_SECRET", "QUERY_SECRET_VALUE", "QUERY_PASSWORD_SECRET",
+        "ENTITY_HEADER_SECRET", "RAW_FIELD_COOKIE_SECRET",
+    ):
+        assert secret not in report
+    assert "[凭据已隐藏]" in report
+    assert "tokenization" in report
+
+
 def test_table_cells_escape_pipes_backslashes_newlines_and_truncate():
     entity, urls, support = _results()
     long_claim = "A" * 1200 + "TAIL_SECRET"
