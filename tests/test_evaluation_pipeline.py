@@ -228,9 +228,11 @@ def test_pipeline_publishes_failed_evaluations_without_blocking_exports(
     assert all(result["export_status"].values())
     assert md_export.await_count == pdf_export.await_count == word_export.await_count == 1
     summary = result["run_statistics"]["evaluation_summary"]
-    assert summary["status"] == "failed"
+    assert summary["status"] == "partial"
     assert summary["entity"]["status"] == "evaluation_failed"
     assert summary["public_links"]["status"] == "evaluation_failed"
+    assert summary["public_links"]["claim_support"]["status"] == "no_public_relationships"
+    assert summary["public_links"]["accessibility_rate"] is None
     assert "private" not in repr(summary)
     assert result["run_statistics"]["url_check"]["total_urls"] == expected_url_count
 
@@ -295,5 +297,11 @@ def test_summary_assembly_failure_does_not_block_exports():
         result = asyncio.run(service.run())
 
     assert all(export.await_count == 1 for export in exports)
-    assert result["run_statistics"]["evaluation_summary"]["status"] == "failed"
-    assert "private summary" not in repr(result["run_statistics"]["evaluation_summary"])
+    summary = result["run_statistics"]["evaluation_summary"]
+    assert summary["status"] == "failed"
+    assert summary["entity"]["matched"] == []
+    assert summary["public_links"]["accessibility"]["status"] == "evaluation_failed"
+    assert summary["public_links"]["accessibility_rate"] is None
+    assert summary["style_cleanup"] == {"removed_count": 0}
+    assert summary["evaluation_report_paths"] == {"markdown": "", "word": "", "pdf": ""}
+    assert "private summary" not in repr(summary)

@@ -1270,7 +1270,11 @@ class ThreeAgentService:
                 "evaluation_error": type(exc).__name__,
             }
         try:
-            evaluation_summary = build_evaluation_summary(entity_eval, url_check)
+            evaluation_summary = build_evaluation_summary(
+                entity_eval,
+                url_check,
+                public_url_source_eval,
+            )
         except Exception:
             logging.getLogger(__name__).exception("Evaluation summary assembly failed")
             evaluation_summary = {
@@ -1282,10 +1286,38 @@ class ThreeAgentService:
                     "threshold": 0.90,
                     "overall": None,
                     "categories": {},
+                    "matched": [],
+                    "false_positives": [],
+                    "false_negatives": [],
                     "proxy_evidence_support_rate": None,
                     "message": "实体抽取测评汇总未完成。",
                 },
                 "public_links": {
+                    "accessibility": {
+                        "status": "evaluation_failed",
+                        "threshold": 0.98,
+                        "total_count": 0,
+                        "checked_count": 0,
+                        "accessible_count": 0,
+                        "inaccessible_count": 0,
+                        "rate": None,
+                        "requirement_met": None,
+                        "results": [],
+                    },
+                    "claim_support": {
+                        "status": "evaluation_failed",
+                        "threshold": 0.90,
+                        "relationship_count": 0,
+                        "supported_count": 0,
+                        "partially_supported_count": 0,
+                        "unsupported_count": 0,
+                        "unchecked_count": 0,
+                        "accuracy": None,
+                        "requirement_met": None,
+                        "relationships": [],
+                    },
+                    "details": {"accessibility": [], "claim_support": []},
+                    # Deprecated aliases for the existing evaluation panel.
                     "status": "evaluation_failed",
                     "threshold": 0.98,
                     "total_count": 0,
@@ -1302,6 +1334,8 @@ class ThreeAgentService:
                         "message": "测评结果汇总未完成，报告导出已继续。",
                     }
                 ],
+                "style_cleanup": {"removed_count": 0},
+                "evaluation_report_paths": {"markdown": "", "word": "", "pdf": ""},
             }
         self._log(
             "Evaluation Agent",
@@ -1487,7 +1521,10 @@ class ThreeAgentService:
                     "time_requirement_met": completed_elapsed <= 30 * 60,
                     "url_accessibility_requirement_met": evaluation_summary[
                         "public_links"
-                    ]["requirement_met"],
+                    ].get("accessibility", {}).get(
+                        "requirement_met",
+                        evaluation_summary["public_links"].get("requirement_met"),
+                    ),
                     "url_requirement_met": (
                         public_url_source_eval.get("requirement_met")
                     ),

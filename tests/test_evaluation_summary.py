@@ -26,7 +26,17 @@ def _strict_entity(f1: float | None = 0.9) -> dict:
                 "recall": 1.0,
                 "f1": f1,
             },
-            "categories": {"organization": {"f1": 1.0}},
+            "categories": {
+                "organization": {
+                    "label": "机构",
+                    "true_positive": 1,
+                    "false_positive": 0,
+                    "false_negative": 0,
+                    "precision": 1.0,
+                    "recall": 1.0,
+                    "f1": 1.0,
+                }
+            },
             "matches": [{"entity": "A"}],
             "correct_entities": [{"entity": "A"}],
             "wrong_entities": [{"entity": "B"}],
@@ -66,8 +76,8 @@ def test_strict_summary_exposes_metrics_details_and_dual_link_evaluations():
         {"removed_count": 2, "removed_items": ["secret finding"]},
         {
             "markdown": "/outputs/evaluations/report.md",
-            "word": "outputs%2Fevaluations%2Freport.docx",
-            "pdf": "C:/private/report.pdf",
+            "word": "/outputs/evaluations/report.docx",
+            "pdf": "/outputs/evaluations/report.pdf",
             "other": "/outputs/evaluations/ignored.txt",
         },
     )
@@ -83,7 +93,8 @@ def test_strict_summary_exposes_metrics_details_and_dual_link_evaluations():
         "f1": 0.9,
         "requirement_met": True,
     }
-    assert summary["entity"]["categories"] == _strict_entity()["metrics"]["categories"]
+    assert summary["entity"]["categories"]["organization"]["label"] == "机构"
+    assert summary["entity"]["categories"]["organization"]["requirement_met"] is True
     assert summary["entity"]["matched"] == [{"entity": "A"}]
     assert summary["entity"]["false_positives"] == [{"entity": "B"}]
     assert summary["entity"]["false_negatives"] == [{"entity": "C"}]
@@ -98,7 +109,7 @@ def test_strict_summary_exposes_metrics_details_and_dual_link_evaluations():
     assert summary["evaluation_report_paths"] == {
         "markdown": "/outputs/evaluations/report.md",
         "word": "/outputs/evaluations/report.docx",
-        "pdf": "",
+        "pdf": "/outputs/evaluations/report.pdf",
     }
 
 
@@ -332,7 +343,10 @@ def test_invalid_strict_category_metrics_fail_entity_safely(bad_category):
 def test_valid_category_label_is_safely_normalized_without_losing_metrics():
     entity = _strict_entity()
     entity["metrics"]["categories"] = {
-        "organization": {"label": 7, "true_positive": 1, "precision": 1.0, "f1": 1.0}
+        "organization": {
+            "label": 7, "true_positive": 1, "false_positive": 0, "false_negative": 0,
+            "precision": 1.0, "recall": 1.0, "f1": 1.0,
+        }
     }
 
     summary = build_evaluation_summary(entity, _url_check(), _source_eval())
@@ -344,9 +358,117 @@ def test_valid_category_label_is_safely_normalized_without_losing_metrics():
 
 def test_overflowing_category_label_is_redacted_without_raising():
     entity = _strict_entity()
-    entity["metrics"]["categories"] = {"organization": {"label": 10**10000, "f1": 1.0}}
+    entity["metrics"]["categories"] = {
+        "organization": {
+            "label": 10**10000, "true_positive": 0, "false_positive": 0, "false_negative": 0,
+            "precision": None, "recall": None, "f1": None,
+        }
+    }
 
     summary = build_evaluation_summary(entity, _url_check(), _source_eval())
 
     assert summary["entity"]["status"] == "completed"
-    assert summary["entity"]["categories"]["organization"]["label"] == ""
+    assert summary["entity"]["categories"]["organization"]["label"] == "organization"
+
+
+def test_public_links_keep_deprecated_accessibility_aliases_for_existing_panel():
+    summary = build_evaluation_summary(_strict_entity(), _url_check(), _source_eval())
+
+    links = summary["public_links"]
+    assert links["status"] == links["accessibility"]["status"]
+    assert links["accessibility_rate"] == links["accessibility"]["rate"]
+    assert links["requirement_met"] == links["accessibility"]["requirement_met"]
+
+
+def test_completed_summary_whitelists_and_detaches_sensitive_details():
+    entity = _strict_entity()
+    entity["metrics"]["overall"]["debug"] = "private overall"
+    entity["metrics"]["categories"]["organization"] = {
+        "label": "机构",
+        "true_positive": 1,
+        "false_positive": 0,
+        "false_negative": 0,
+        "precision": 1.0,
+        "recall": 1.0,
+        "f1": 1.0,
+        "path": "C:/secret/category.json",
+    }
+    entity["matches"] = [{"entity": "A", "debug": "private", "path": "C:/secret/a"}]
+    urls = _url_check()
+    urls["results"] = [{
+        "url": "https://example.test", "checked_url": "https://example.test", "accessible": True,
+        "raw_error": "secret", "local_path": "C:/secret/url", "warning": "none",
+    }]
+    source = _source_eval()
+    source["relationships"] = [{
+        "relationship_id": "r1", "ref": "URL1", "url": "https://example.test", "claim": "claim",
+        "status": "supported", "debug": "secret", "local_path": "C:/secret/relationship",
+    }]
+
+    summary = build_evaluation_summary(entity, urls, source)
+    entity["matches"][0]["entity"] = "mutated"
+    urls["results"][0]["url"] = "https://mutated.test"
+    source["relationships"][0]["claim"] = "mutated"
+
+    assert summary["entity"]["overall"].keys() == {
+        "true_positive", "false_positive", "false_negative", "precision", "recall", "f1", "requirement_met"
+    }
+    assert summary["entity"]["categories"]["organization"].keys() == {
+        "label", "true_positive", "false_positive", "false_negative", "precision", "recall", "f1", "requirement_met"
+    }
+    assert summary["entity"]["matched"] == [{"entity": "A"}]
+    assert summary["public_links"]["details"]["accessibility"][0] == {
+        "url": "https://example.test", "checked_url": "https://example.test", "accessible": True, "warning": "none"
+    }
+    assert summary["public_links"]["details"]["claim_support"][0] == {
+        "relationship_id": "r1", "ref": "URL1", "url": "https://example.test", "claim": "claim", "status": "supported"
+    }
+    assert "secret" not in repr(summary)
+    assert "mutated" not in repr(summary)
+
+
+@pytest.mark.parametrize(
+    "paths",
+    [
+        {"markdown": "/outputs/evaluations/%252e%252e%252Fsecret.md"},
+        {"markdown": "/outputs/evaluations/report.md%0d%0aX-Injected: yes"},
+        {"markdown": "/outputs/evaluations/report.md%00secret"},
+        {"markdown": "/outputs/evaluations/report.pdf"},
+    ],
+)
+def test_report_paths_reject_encoded_dangerous_values_and_wrong_extensions(paths):
+    summary = build_evaluation_summary(_strict_entity(), _url_check(), _source_eval(), evaluation_report_paths=paths)
+
+    assert summary["evaluation_report_paths"]["markdown"] == ""
+
+
+def test_missing_or_inconsistent_metrics_fail_the_affected_component():
+    missing = _strict_entity()
+    del missing["metrics"]["overall"]["f1"]
+    bad_links = _url_check()
+    bad_links.update({"total_urls": 2, "checked_urls": 2, "accessible_urls": 2, "failed_urls": 1})
+    bad_support = _source_eval()
+    bad_support["relationship_count"] = 11
+
+    entity_summary = build_evaluation_summary(missing, _url_check(), _source_eval())
+    link_summary = build_evaluation_summary(_strict_entity(), bad_links, _source_eval())
+    support_summary = build_evaluation_summary(_strict_entity(), _url_check(), bad_support)
+
+    assert entity_summary["entity"]["status"] == "evaluation_failed"
+    assert entity_summary["entity"]["overall"] is None
+    assert link_summary["public_links"]["accessibility"]["status"] == "evaluation_failed"
+    assert link_summary["public_links"]["details"]["accessibility"] == []
+    assert support_summary["public_links"]["claim_support"]["status"] == "evaluation_failed"
+    assert support_summary["public_links"]["details"]["claim_support"] == []
+
+
+def test_malicious_numeric_subclass_never_escapes_summary_builder():
+    class ExplodingFloat(float):
+        def __float__(self):
+            raise RuntimeError("private number failure")
+
+    entity = _strict_entity(ExplodingFloat(0.9))
+    summary = build_evaluation_summary(entity, _url_check(), _source_eval())
+
+    assert summary["entity"]["status"] == "evaluation_failed"
+    assert "private number failure" not in repr(summary)
