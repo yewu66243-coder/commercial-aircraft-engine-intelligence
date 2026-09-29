@@ -9,13 +9,14 @@ from __future__ import annotations
 import asyncio
 from datetime import datetime, timezone
 import hashlib
+import html
 import math
 import os
 from pathlib import Path
 import re
 import tempfile
 import unicodedata
-from urllib.parse import urlsplit, urlunsplit
+from urllib.parse import unquote, urlsplit, urlunsplit
 
 from backend.reporting.document_export import render_pdf, render_word
 
@@ -39,12 +40,13 @@ _STATE = {
 _WINDOWS_RESERVED = {"CON", "PRN", "AUX", "NUL", *(f"COM{i}" for i in range(1, 10)),
                      *(f"LPT{i}" for i in range(1, 10))}
 _CREDENTIAL_PATTERNS = (
-    re.compile(r"\bauthorization\s*:\s*(?:bearer|basic)\s+[^\r\n|]+", re.IGNORECASE),
+    re.compile(r"\bauthorization\s*:\s*[^\r\n|]+", re.IGNORECASE),
     re.compile(r"\b(?:x-api-key|api-key)\s*:\s*[^\r\n|]+", re.IGNORECASE),
     re.compile(r"\b(?:set-cookie|cookie)\s*:\s*[^\r\n|]+", re.IGNORECASE),
     re.compile(r"\b(?:api[_-]?key|token|secret|password)\s*[:=]\s*[^\s|,;&]+", re.IGNORECASE),
 )
-_BARE_BEARER_PATTERN = re.compile(r"\bBearer\s+([^\s|;,]+)")
+_BARE_BEARER_PATTERN = re.compile(r"\b(bearer)\s+([^\s|;,]+)", re.IGNORECASE)
+_MAX_DETAIL_ROWS = 500
 
 
 def _mapping(value: object) -> dict:
@@ -56,9 +58,21 @@ def _list(value: object) -> list:
 
 
 def _redact_credentials(value: str) -> str:
+    for _ in range(2):
+        decoded = unquote(value)
+        if decoded == value:
+            break
+        value = decoded
     for pattern in _CREDENTIAL_PATTERNS:
         value = pattern.sub("[凭据已隐藏]", value)
-    return _BARE_BEARER_PATTERN.sub("[凭据已隐藏]", value)
+    return _BARE_BEARER_PATTERN.sub(_redact_bare_bearer, value)
+
+
+def _redact_bare_bearer(match: re.Match[str]) -> str:
+    scheme, token = match.group(1), match.group(2)
+    if scheme == "Bearer" or any(char.isdigit() or char.isupper() or char in "._-" for char in token):
+        return "[凭据已隐藏]"
+    return match.group(0)
 
 
 def _text(value: object, limit: int = 500) -> str:
@@ -76,7 +90,8 @@ def _text(value: object, limit: int = 500) -> str:
 
 
 def _cell(value: object, limit: int = 500) -> str:
-    return _text(value, limit).replace("\\", "\\\\").replace("|", "\\|")
+    result = html.escape(_text(value, limit), quote=False)
+    return re.sub(r"([\\|\[\]\(\)*_`])", r"\\\1", result)
 
 
 def _rate(value: object) -> str:
@@ -119,6 +134,10 @@ def _table(headers: tuple[str, ...], rows: list[tuple[object, ...]]) -> list[str
     lines.extend("| " + " | ".join(_cell(item, 1000 if i == 0 and "URL" in headers[0] else 500)
                                  for i, item in enumerate(row)) + " |" for row in rows)
     return lines
+
+
+def _truncated(items: list) -> tuple[list, bool]:
+    return items[:_MAX_DETAIL_ROWS], len(items) > _MAX_DETAIL_ROWS
 
 
 def _entity_name(value: object) -> str:
@@ -175,23 +194,28 @@ def render_evaluation_report_markdown(*, task: str, run_id: str, evaluated_at: s
     lines.extend(["", "### 分类结果", ""])
     categories = _mapping(entity.get("categories"))
     category_rows = []
-    for key in sorted(categories, key=str):
+    category_keys, categories_truncated = _truncated(sorted(categories, key=str))
+    for key in category_keys:
         item = _mapping(categories[key])
         category_rows.append((_text(item.get("label") or key), _count(item.get("true_positive")),
                               _count(item.get("false_positive")), _count(item.get("false_negative")),
                               _rate(item.get("precision")), _rate(item.get("recall")),
                               _rate(item.get("f1"))))
     lines.extend(_table(("分类", "TP", "FP", "FN", "P", "R", "F1"), category_rows))
+    if categories_truncated:
+        lines.extend(["", f"分类明细已截断，仅显示前{_MAX_DETAIL_ROWS}项。"])
     if not category_rows:
         lines.extend(["", "无分类结果或未执行严格实体评估。"])
     for key, title in (("matched", "Matched（正确匹配）"),
                        ("false_positives", "False positives（误报）"),
                        ("false_negatives", "False negatives（漏报）")):
-        items = _list(entity.get(key))
+        items, items_truncated = _truncated(_list(entity.get(key)))
         lines.extend(["", f"### {title}", ""])
         lines.extend(_table(("序号", "实体"), [(i, _entity_name(item)) for i, item in enumerate(items, 1)]))
         if not items:
             lines.extend(["", "无明细或未完成测评。"])
+        elif items_truncated:
+            lines.extend(["", f"明细已截断，仅显示前{_MAX_DETAIL_ROWS}项。"])
 
     lines.extend(["", "## 公开URL可访问性", "", f"状态：{_status(access.get('status'))}", "",
                   f"唯一URL可访问率：{_rate(access.get('rate'))}；阈值：98%；{_verdict(access.get('requirement_met'))}。",
@@ -199,7 +223,8 @@ def render_evaluation_report_markdown(*, task: str, run_id: str, evaluated_at: s
                   f"可访问：{_count(access.get('accessible_count'))}；不可访问：{_count(access.get('inaccessible_count'))}。",
                   "", "### 逐URL安全状态", ""])
     url_rows = []
-    for item in _list(access.get("results")):
+    access_items, access_truncated = _truncated(_list(access.get("results")))
+    for item in access_items:
         row = _mapping(item)
         status = "可访问" if row.get("accessible") is True else "不可访问" if row.get("accessible") is False else "未检查"
         url_rows.append((_url(row.get("url")), status, _count(row.get("status_code")),
@@ -207,6 +232,8 @@ def render_evaluation_report_markdown(*, task: str, run_id: str, evaluated_at: s
     lines.extend(_table(("URL", "安全状态", "HTTP状态", "失败原因", "方法"), url_rows))
     if not url_rows:
         lines.extend(["", "无公开URL明细。"])
+    elif access_truncated:
+        lines.extend(["", f"URL明细已截断，仅显示前{_MAX_DETAIL_ROWS}项。"])
 
     lines.extend(["", "## 断言—URL支撑测评", "", f"状态：{_status(support.get('status'))}", "",
                   f"断言—URL支撑准确率：{_rate(support.get('accuracy'))}；阈值：90%；{_verdict(support.get('requirement_met'))}。",
@@ -215,7 +242,8 @@ def render_evaluation_report_markdown(*, task: str, run_id: str, evaluated_at: s
                   f"未检查：{_count(support.get('unchecked_count'))}。",
                   "", "### 逐关系结果", ""])
     relation_rows = []
-    for item in _list(support.get("relationships")):
+    relationship_items, relationships_truncated = _truncated(_list(support.get("relationships")))
+    for item in relationship_items:
         row = _mapping(item)
         status = row.get("status") if row.get("status") in _REASONS else "unchecked"
         relation_rows.append((_text(row.get("claim"), 500), _url(row.get("url")), status,
@@ -223,6 +251,8 @@ def render_evaluation_report_markdown(*, task: str, run_id: str, evaluated_at: s
     lines.extend(_table(("断言", "URL", "状态", "置信度", "固定原因"), relation_rows))
     if not relation_rows:
         lines.extend(["", "无公开断言—URL关系明细。"])
+    elif relationships_truncated:
+        lines.extend(["", f"关系明细已截断，仅显示前{_MAX_DETAIL_ROWS}项。"])
 
     lines.extend(["", "## 错误与降级说明", ""])
     errors = _list(safe.get("errors"))
@@ -244,8 +274,8 @@ def render_evaluation_report_markdown(*, task: str, run_id: str, evaluated_at: s
 
 def _safe_component(value: str, limit: int, fallback: str) -> str:
     candidate = unicodedata.normalize("NFKC", value if isinstance(value, str) else "")
-    candidate = re.sub(r'[<>:"/\\|?*\x00-\x1f\x7f]+', "_", candidate)
-    candidate = re.sub(r"\s+", "_", candidate).strip(" ._")[:limit].rstrip(" ._")
+    candidate = "".join(char if char.isalnum() or char in "_.-" else "_" for char in candidate)
+    candidate = candidate.strip(" ._")[:limit].rstrip(" ._")
     if not candidate:
         return fallback
     if candidate.split(".", 1)[0].upper() in _WINDOWS_RESERVED:
@@ -276,54 +306,104 @@ def _write_markdown_atomic(destination: Path, markdown: str) -> None:
             os.unlink(temporary)
 
 
-def _reserve_path(folder: Path, stem: str) -> Path:
+def _reserve_path(folder: Path, stem: str) -> tuple[Path, Path]:
     for index in range(10000):
-        candidate = folder / f"{stem}{'_' + str(index) if index else ''}.md"
-        if any(candidate.with_suffix(ext).exists() for ext in (".md", ".docx", ".pdf")):
-            continue
+        base = folder / f"{stem}{'_' + str(index) if index else ''}"
+        candidate, lock = base.with_suffix(".md"), folder / f".{base.name}.lock"
         try:
-            descriptor = os.open(candidate, os.O_CREAT | os.O_EXCL | os.O_WRONLY, 0o600)
+            descriptor = os.open(lock, os.O_CREAT | os.O_EXCL | os.O_WRONLY, 0o600)
         except FileExistsError:
             continue
         os.close(descriptor)
-        return candidate
+        if any(base.with_suffix(ext).exists() for ext in (".md", ".docx", ".pdf")):
+            lock.unlink(missing_ok=True)
+            continue
+        return candidate, lock
     raise OSError("No available evaluation report filename")
+
+
+def _temporary_path(folder: Path, stem: str, suffix: str) -> Path:
+    descriptor, temporary = tempfile.mkstemp(prefix=f".{stem}-", suffix=f"{suffix}.tmp", dir=folder)
+    os.close(descriptor)
+    return Path(temporary)
+
+
+def _publish_no_overwrite(temporary: Path, destination: Path) -> None:
+    """Publish within one filesystem without replacing an existing report."""
+    os.link(temporary, destination)
+    temporary.unlink(missing_ok=True)
+
+
+async def _render_to_temporary(renderer, markdown: str, temporary: Path) -> None:
+    task = asyncio.create_task(asyncio.to_thread(renderer, markdown, temporary, base_path=Path.cwd()))
+    try:
+        await asyncio.shield(task)
+    except asyncio.CancelledError:
+        try:
+            await asyncio.shield(task)
+        except Exception:
+            pass
+        raise
 
 
 async def export_evaluation_report(*, markdown: str, task: str, run_id: str,
                                    evaluated_at: str, output_dir: str | Path = "outputs/evaluations") -> dict:
-    """Atomically save Markdown, then independently export Word and PDF."""
-    result = {"markdown": "", "word": "", "pdf": "", "errors": []}
-    path = None
+    """Safely publish independent Markdown, Word, and PDF report artifacts."""
+    folder = Path(output_dir)
     try:
-        folder = Path(output_dir)
         folder.mkdir(parents=True, exist_ok=True)
-        name = f"{_safe_component(task, 60, 'task')}_{_safe_component(run_id, 12, 'run')}_{_timestamp(evaluated_at)}"
-        path = _reserve_path(folder, name)
-        _write_markdown_atomic(path, markdown)
-        result["markdown"] = f"{_PUBLIC_DIR}/{path.name}"
     except Exception:
-        if path is not None:
+        return {"markdown": "", "word": "", "pdf": "", "errors": [
+            {"format": "markdown", "code": "export_failed", "message": "Markdown测评报告导出失败。"}]}
+    stem = f"{_safe_component(task, 60, 'task')}_{_safe_component(run_id, 12, 'run')}_{_timestamp(evaluated_at)}"
+    try:
+        for _ in range(10000):
+            result = {"markdown": "", "word": "", "pdf": "", "errors": []}
+            path, lock = _reserve_path(folder, stem)
+            temporary, published = [], []
             try:
-                path.unlink(missing_ok=True)
-            except OSError:
-                pass
-        result["errors"].append({"format": "markdown", "code": "export_failed",
-                                 "message": "Markdown测评报告导出失败。"})
-        return result
-
-    for kind, extension, renderer, message in (
-        ("word", ".docx", render_word, "Word测评报告导出失败。"),
-        ("pdf", ".pdf", render_pdf, "PDF测评报告导出失败。"),
-    ):
-        destination = path.with_suffix(extension)
-        try:
-            await asyncio.to_thread(renderer, markdown, destination, base_path=Path.cwd())
-            result[kind] = f"{_PUBLIC_DIR}/{destination.name}"
-        except Exception:
-            try:
-                destination.unlink(missing_ok=True)
-            except OSError:
-                pass
-            result["errors"].append({"format": kind, "code": "export_failed", "message": message})
-    return result
+                markdown_temp = _temporary_path(folder, path.stem, ".md")
+                temporary.append(markdown_temp)
+                _write_markdown_atomic(markdown_temp, markdown)
+                try:
+                    _publish_no_overwrite(markdown_temp, path)
+                except FileExistsError:
+                    continue
+                temporary.remove(markdown_temp)
+                published.append(path)
+                result["markdown"] = f"{_PUBLIC_DIR}/{path.name}"
+                for kind, extension, renderer, message in (
+                    ("word", ".docx", render_word, "Word测评报告导出失败。"),
+                    ("pdf", ".pdf", render_pdf, "PDF测评报告导出失败。"),
+                ):
+                    destination = path.with_suffix(extension)
+                    render_temp = _temporary_path(folder, path.stem, extension)
+                    temporary.append(render_temp)
+                    try:
+                        await _render_to_temporary(renderer, markdown, render_temp)
+                        _publish_no_overwrite(render_temp, destination)
+                        temporary.remove(render_temp)
+                        published.append(destination)
+                        result[kind] = f"{_PUBLIC_DIR}/{destination.name}"
+                    except asyncio.CancelledError:
+                        raise
+                    except Exception:
+                        result["errors"].append({"format": kind, "code": "export_failed", "message": message})
+                return result
+            except asyncio.CancelledError:
+                for item in published:
+                    item.unlink(missing_ok=True)
+                raise
+            except Exception:
+                result["errors"].append({"format": "markdown", "code": "export_failed",
+                                         "message": "Markdown测评报告导出失败。"})
+                return result
+            finally:
+                for item in temporary:
+                    item.unlink(missing_ok=True)
+                lock.unlink(missing_ok=True)
+    except Exception:
+        return {"markdown": "", "word": "", "pdf": "", "errors": [
+            {"format": "markdown", "code": "export_failed", "message": "Markdown测评报告导出失败。"}]}
+    return {"markdown": "", "word": "", "pdf": "", "errors": [
+        {"format": "markdown", "code": "export_failed", "message": "Markdown测评报告导出失败。"}]}

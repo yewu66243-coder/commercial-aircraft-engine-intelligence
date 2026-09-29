@@ -2,10 +2,12 @@ from __future__ import annotations
 
 import asyncio
 from pathlib import Path
+import threading
 
 import pytest
 
 from backend.reporting import evaluation_report
+from backend.reporting.document_export import build_report_html
 from gpt_researcher.evaluation.evaluation_summary import build_evaluation_summary
 
 
@@ -107,6 +109,7 @@ def test_real_summary_and_raw_fields_redact_complete_credential_values():
     entity, urls, support = _results()
     credential_text = "\n".join((
         "Authorization: Bearer AUTH_BEARER_SECRET",
+        "Authorization: Token AUTH_TOKEN_SCHEME_SECRET",
         "authorization : Basic AUTH_BASIC_SECRET",
         "Bearer BARE_BEARER_SECRET",
         "X-API-Key: X_API_KEY_SECRET",
@@ -126,13 +129,13 @@ def test_real_summary_and_raw_fields_redact_complete_credential_values():
     report = _report(summary, entity=entity, urls=urls, support=support)
 
     for secret in (
-        "AUTH_BEARER_SECRET", "AUTH_BASIC_SECRET", "BARE_BEARER_SECRET", "X_API_KEY_SECRET",
+        "AUTH_BEARER_SECRET", "AUTH_TOKEN_SCHEME_SECRET", "AUTH_BASIC_SECRET", "BARE_BEARER_SECRET", "X_API_KEY_SECRET",
         "API_KEY_HEADER_SECRET", "COOKIE_SECRET", "SET_COOKIE_SECRET", "QUERY_API_SECRET",
         "QUERY_TOKEN_SECRET", "QUERY_SECRET_VALUE", "QUERY_PASSWORD_SECRET",
         "ENTITY_HEADER_SECRET", "RAW_FIELD_COOKIE_SECRET",
     ):
         assert secret not in report
-    assert "[凭据已隐藏]" in report
+    assert r"\[凭据已隐藏\]" in report
     assert "tokenization" in report
 
 
@@ -146,6 +149,9 @@ def test_bare_bearer_redaction_requires_a_credential_like_value():
         "Bearer abc123",
         "Bearer password",
         "Bearer ABC",
+        "bearer LOWERCASE_SECRET123",
+        "Bearer%20ENCODED_BEARER_SECRET",
+        "https://example.test/?api_key%3DENCODED_QUERY_SECRET",
     ))
     summary = build_evaluation_summary(entity, urls, support)
 
@@ -158,6 +164,34 @@ def test_bare_bearer_redaction_requires_a_credential_like_value():
     assert "Bearer abc123" not in report
     assert "Bearer password" not in report
     assert "Bearer ABC" not in report
+    assert "LOWERCASE_SECRET123" not in report
+    assert "ENCODED_BEARER_SECRET" not in report
+    assert "ENCODED_QUERY_SECRET" not in report
+
+
+def test_dynamic_markdown_is_rendered_as_plain_text_without_html_or_links():
+    entity, urls, support = _results()
+    injected = "[CFM](https://evil.test) **engine** <img src=x> & `code`"
+    entity["metrics"]["matches"] = [{"entity": injected}]
+    summary = build_evaluation_summary(entity, urls, support)
+    report = _report(summary, entity=entity, urls=urls, support=support)
+    html = build_report_html(report)
+
+    assert "CFM" in report and "engine" in report and "code" in report
+    assert "href=\"https://evil.test\"" not in html
+    assert "<img" not in html
+    assert "<strong>engine</strong>" not in html
+    assert "img src=x" in html
+
+
+def test_detail_rows_are_limited_with_a_truncation_notice():
+    entity, urls, support = _results()
+    entity["metrics"]["matches"] = [{"entity": f"entity-{index}"} for index in range(501)]
+    report = _report(build_evaluation_summary(entity, urls, support), entity=entity, urls=urls, support=support)
+
+    assert "明细已截断，仅显示前500项。" in report
+    assert "entity-499" in report
+    assert "entity-500" not in report
 
 
 def test_table_cells_escape_pipes_backslashes_newlines_and_truncate():
@@ -249,7 +283,7 @@ def test_markdown_failure_skips_both_renderers_and_hides_exception(tmp_path, mon
     assert "PRIVATE" not in repr(result)
 
 
-@pytest.mark.parametrize("task", ["CON", "aux. ", 'bad<>:"/\\|?*name'])
+@pytest.mark.parametrize("task", ["CON", "aux. ", 'bad<>:"/\\|?*name', "A#B", "A%2FB"])
 def test_windows_filename_is_safe(tmp_path, monkeypatch, task):
     monkeypatch.setattr(evaluation_report, "render_word", lambda *_a, **_k: None)
     monkeypatch.setattr(evaluation_report, "render_pdf", lambda *_a, **_k: None)
@@ -259,8 +293,10 @@ def test_windows_filename_is_safe(tmp_path, monkeypatch, task):
     name = Path(result["markdown"]).name
     assert name
     assert not any(char in name for char in '<>:"/\\|?*')
+    assert "#" not in name and "%" not in name
     assert not name.split("_")[0].upper() in {"CON", "AUX", "NUL", "PRN"}
     assert (tmp_path / name).exists()
+    assert build_evaluation_summary(*_results(), evaluation_report_paths=result)["evaluation_report_paths"]["markdown"] == result["markdown"]
 
 
 def test_second_export_preserves_first_report(tmp_path, monkeypatch):
@@ -285,3 +321,74 @@ def test_invalid_non_string_timestamp_falls_back_to_safe_filename(tmp_path, monk
     assert result["errors"] == []
     assert "undated_" in result["markdown"]
     assert (tmp_path / Path(result["markdown"]).name).exists()
+
+
+def test_concurrent_exports_reserve_distinct_files_and_preserve_content(tmp_path, monkeypatch):
+    def renderer(text, destination, base_path=None):
+        Path(destination).write_text(text, encoding="utf-8")
+
+    monkeypatch.setattr(evaluation_report, "render_word", renderer)
+    monkeypatch.setattr(evaluation_report, "render_pdf", renderer)
+
+    async def run():
+        return await asyncio.gather(*(
+            evaluation_report.export_evaluation_report(
+                markdown=text, task="task", run_id="run", evaluated_at="2026-09-29T00:00:00Z",
+                output_dir=tmp_path)
+            for text in ("first", "second")
+        ))
+
+    first, second = asyncio.run(run())
+    assert first["markdown"] != second["markdown"]
+    assert (tmp_path / Path(first["markdown"]).name).read_text(encoding="utf-8") == "first"
+    assert (tmp_path / Path(second["markdown"]).name).read_text(encoding="utf-8") == "second"
+
+
+def test_publish_race_never_overwrites_competitor_file(tmp_path, monkeypatch):
+    original_publish = evaluation_report._publish_no_overwrite
+    raced = False
+
+    def publish(temp, destination):
+        nonlocal raced
+        if not raced and destination.suffix == ".md":
+            raced = True
+            destination.write_text("competitor", encoding="utf-8")
+        return original_publish(temp, destination)
+
+    monkeypatch.setattr(evaluation_report, "_publish_no_overwrite", publish)
+    monkeypatch.setattr(evaluation_report, "render_word", lambda text, destination, **_: Path(destination).write_text(text, encoding="utf-8"))
+    monkeypatch.setattr(evaluation_report, "render_pdf", lambda text, destination, **_: Path(destination).write_text(text, encoding="utf-8"))
+    result = asyncio.run(evaluation_report.export_evaluation_report(
+        markdown="ours", task="task", run_id="run", evaluated_at="2026-09-29T00:00:00Z",
+        output_dir=tmp_path))
+
+    assert raced
+    assert (tmp_path / "task_run_20260929T000000000000Z.md").read_text(encoding="utf-8") == "competitor"
+    assert (tmp_path / Path(result["markdown"]).name).read_text(encoding="utf-8") == "ours"
+
+
+def test_cancellation_waits_for_renderer_and_removes_outputs_temps_and_locks(tmp_path, monkeypatch):
+    started, release = threading.Event(), threading.Event()
+
+    def blocking_renderer(text, destination, base_path=None):
+        started.set()
+        release.wait(timeout=5)
+        Path(destination).write_text(text, encoding="utf-8")
+
+    monkeypatch.setattr(evaluation_report, "render_word", blocking_renderer)
+    monkeypatch.setattr(evaluation_report, "render_pdf", lambda *_a, **_k: pytest.fail("pdf called"))
+
+    async def run():
+        task = asyncio.create_task(evaluation_report.export_evaluation_report(
+            markdown="cancel", task="task", run_id="run", evaluated_at="2026-09-29T00:00:00Z",
+            output_dir=tmp_path))
+        await asyncio.to_thread(started.wait, 5)
+        task.cancel()
+        await asyncio.sleep(0)
+        assert not task.done()
+        release.set()
+        with pytest.raises(asyncio.CancelledError):
+            await task
+
+    asyncio.run(run())
+    assert not list(tmp_path.iterdir())
