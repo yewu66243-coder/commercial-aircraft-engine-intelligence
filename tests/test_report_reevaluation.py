@@ -300,6 +300,14 @@ def test_export_failure_keeps_metrics_and_reports_a_safe_error(tmp_path):
     assert "disk full" not in repr(result)
 
 
+def test_reevaluation_code_path_never_reaches_generation_services():
+    source = Path(report_evaluation.__file__).read_text(encoding="utf-8")
+
+    assert "three_agent_service" not in source
+    for agent in ("planner_agent", "research_agent", "writer_agent", "editorial_agent"):
+        assert agent not in source
+
+
 def test_default_output_dir_is_anchored_to_the_project_root():
     assert report_evaluation._default_output_dir().is_absolute()
     assert report_evaluation._default_output_dir().parts[-2:] == ("outputs", "evaluations")
