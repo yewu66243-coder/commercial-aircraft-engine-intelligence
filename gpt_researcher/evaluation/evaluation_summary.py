@@ -64,6 +64,54 @@ def _detail_list(value: Any) -> tuple[list[Any], bool]:
     return list(value), True
 
 
+def _metric_values(value: Any) -> tuple[dict[str, int], dict[str, float | None], bool]:
+    """Validate the shared count/rate contract used by strict metrics."""
+    if not isinstance(value, dict):
+        return {}, {}, False
+    counts: dict[str, int] = {}
+    rates: dict[str, float | None] = {}
+    for key in ("true_positive", "false_positive", "false_negative"):
+        count, valid = _count(value.get(key))
+        if not valid:
+            return {}, {}, False
+        counts[key] = count
+    for key in ("precision", "recall", "f1"):
+        rate, valid = _rate(value.get(key))
+        if not valid:
+            return {}, {}, False
+        rates[key] = rate
+    return counts, rates, True
+
+
+def _safe_display_string(value: Any) -> str:
+    if isinstance(value, str):
+        return value
+    if isinstance(value, bool) or not isinstance(value, (int, float)):
+        return ""
+    try:
+        return str(value)
+    except (OverflowError, ValueError):
+        return ""
+
+
+def _validated_categories(value: Any) -> tuple[dict[Any, dict[str, Any]], bool]:
+    """Copy categories only after applying the same metric validation as overall."""
+    if value is None:
+        return {}, True
+    if not isinstance(value, dict):
+        return {}, False
+    categories: dict[Any, dict[str, Any]] = {}
+    for category, metrics in value.items():
+        _, _, valid = _metric_values(metrics)
+        if not valid:
+            return {}, False
+        copied = dict(metrics)
+        if "label" in copied:
+            copied["label"] = _safe_display_string(copied["label"])
+        categories[category] = copied
+    return categories, True
+
+
 def _entity_details(source: dict[str, Any], metrics: dict[str, Any]) -> tuple[list[Any], list[Any], list[Any]]:
     """Use the evaluator's public names, with metrics as a stable fallback."""
     def get_list(*names: str) -> list[Any]:
@@ -124,28 +172,13 @@ def _entity_summary(value: Any) -> tuple[dict[str, Any], list[dict[str, str]]]:
         base["message"] = "已完成自动证据核验，严格实体指标仍需标准答案。"
         return base, []
 
-    overall_source = metrics.get("overall")
-    if not isinstance(overall_source, dict):
+    counts, rates, valid_overall = _metric_values(metrics.get("overall"))
+    categories, valid_categories = _validated_categories(metrics.get("categories"))
+    if not valid_overall or not valid_categories:
         base.update({"status": "evaluation_failed", "message": "实体抽取测评未完成。"})
         return base, [_error("entity", "evaluation_failed", "实体抽取测评未完成。")]
 
-    counts: dict[str, int] = {}
-    rates: dict[str, float | None] = {}
-    for key in ("true_positive", "false_positive", "false_negative"):
-        count, valid = _count(overall_source.get(key))
-        if not valid:
-            base.update({"status": "evaluation_failed", "message": "实体抽取测评未完成。"})
-            return base, [_error("entity", "evaluation_failed", "实体抽取测评未完成。")]
-        counts[key] = count
-    for key in ("precision", "recall", "f1"):
-        rate, valid = _rate(overall_source.get(key))
-        if not valid:
-            base.update({"status": "evaluation_failed", "message": "实体抽取测评未完成。"})
-            return base, [_error("entity", "evaluation_failed", "实体抽取测评未完成。")]
-        rates[key] = rate
-
-    categories = metrics.get("categories")
-    base["categories"] = dict(categories) if isinstance(categories, dict) else {}
+    base["categories"] = categories
     base["overall"] = {
         **counts,
         **rates,
@@ -352,10 +385,11 @@ def build_evaluation_summary(
     claim_support, support_errors = _claim_support_summary(url_source_eval)
     errors = entity_errors + accessibility_errors + support_errors
     components = (entity["status"], accessibility["status"], claim_support["status"])
+    participating_components = tuple(status for status in components if status != "not_evaluated")
     failed = {"evaluation_failed", "invalid_ground_truth"}
     if not errors:
         status = "completed"
-    elif all(component in failed for component in components):
+    elif participating_components and all(component in failed for component in participating_components):
         status = "failed"
     else:
         status = "partial"

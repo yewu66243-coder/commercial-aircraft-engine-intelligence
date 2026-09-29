@@ -2,6 +2,8 @@ from __future__ import annotations
 
 import math
 
+import pytest
+
 from gpt_researcher.evaluation.evaluation_summary import (
     ENTITY_THRESHOLD,
     PUBLIC_LINK_ACCESSIBILITY_THRESHOLD,
@@ -271,3 +273,80 @@ def test_overflowing_numeric_input_degrades_without_raising():
     summary = build_evaluation_summary(entity, _url_check(), _source_eval())
 
     assert summary["entity"]["status"] == "evaluation_failed"
+
+
+def test_omitted_claim_support_does_not_make_two_failed_legacy_parts_partial():
+    summary = build_evaluation_summary(
+        {"mode": "strict", "metrics": None},
+        {"evaluation_error": "private failure detail"},
+    )
+
+    assert summary["public_links"]["claim_support"]["status"] == "not_evaluated"
+    assert summary["status"] == "failed"
+
+
+def test_omitted_claim_support_preserves_partial_when_one_evaluated_part_succeeds():
+    summary = build_evaluation_summary(
+        {"mode": "strict", "metrics": None},
+        _url_check(),
+    )
+
+    assert summary["public_links"]["claim_support"]["status"] == "not_evaluated"
+    assert summary["status"] == "partial"
+
+
+def test_all_not_applicable_or_not_evaluated_parts_are_completed_without_errors():
+    summary = build_evaluation_summary({"mode": "proxy"}, {"total_urls": 0})
+
+    assert summary["entity"]["status"] == "proxy"
+    assert summary["public_links"]["accessibility"]["status"] == "no_public_urls"
+    assert summary["public_links"]["claim_support"]["status"] == "not_evaluated"
+    assert summary["status"] == "completed"
+    assert summary["errors"] == []
+
+
+@pytest.mark.parametrize(
+    "bad_category",
+    [
+        {"true_positive": -1},
+        {"f1": math.nan},
+        {"precision": True},
+        {"false_negative": "not-a-count"},
+    ],
+)
+def test_invalid_strict_category_metrics_fail_entity_safely(bad_category):
+    entity = _strict_entity()
+    entity["metrics"]["categories"] = {"organization": bad_category}
+
+    summary = build_evaluation_summary(entity, _url_check(), _source_eval())
+
+    assert summary["entity"]["status"] == "evaluation_failed"
+    assert summary["entity"]["overall"] is None
+    assert summary["errors"][0] == {
+        "scope": "entity",
+        "code": "evaluation_failed",
+        "message": "实体抽取测评未完成。",
+    }
+
+
+def test_valid_category_label_is_safely_normalized_without_losing_metrics():
+    entity = _strict_entity()
+    entity["metrics"]["categories"] = {
+        "organization": {"label": 7, "true_positive": 1, "precision": 1.0, "f1": 1.0}
+    }
+
+    summary = build_evaluation_summary(entity, _url_check(), _source_eval())
+
+    assert summary["entity"]["status"] == "completed"
+    assert summary["entity"]["categories"]["organization"]["label"] == "7"
+    assert summary["entity"]["categories"]["organization"]["true_positive"] == 1
+
+
+def test_overflowing_category_label_is_redacted_without_raising():
+    entity = _strict_entity()
+    entity["metrics"]["categories"] = {"organization": {"label": 10**10000, "f1": 1.0}}
+
+    summary = build_evaluation_summary(entity, _url_check(), _source_eval())
+
+    assert summary["entity"]["status"] == "completed"
+    assert summary["entity"]["categories"]["organization"]["label"] == ""
