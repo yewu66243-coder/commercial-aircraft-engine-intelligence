@@ -69,6 +69,7 @@ from gpt_researcher.evaluation.ground_truth_io import (
 )
 from gpt_researcher.evaluation.records import EvaluationRecordStore
 from gpt_researcher.evaluation.report_evaluation import (
+    SavedReportUnavailableError,
     evaluate_saved_report,
     resolve_active_ground_truth_path,
 )
@@ -256,20 +257,39 @@ async def reevaluate_report(run_id: str):
         )
     style_cleanup = record.get("report_style_cleanup")
     if not isinstance(style_cleanup, dict):
+        summary = record.get("evaluation_summary")
+        if isinstance(summary, dict):
+            style_cleanup = summary.get("style_cleanup")
+    if not isinstance(style_cleanup, dict):
         style_cleanup = None
 
-    result = await evaluate_saved_report(
-        task=task,
-        run_id=run_id,
-        report=report,
-        style_cleanup=style_cleanup,
-        ground_truth_path=resolve_active_ground_truth_path(
-            task,
-            EVALUATION_GROUND_TRUTH_DIR,
-        ),
-        output_dir=EVALUATION_REPORT_DIR,
-    )
-    evaluation_record_store.append_reevaluation(run_id, result)
+    saved_sources = record.get("selected_source_files")
+    try:
+        result = await evaluate_saved_report(
+            task=task,
+            run_id=run_id,
+            report=report,
+            style_cleanup=style_cleanup,
+            ground_truth_path=resolve_active_ground_truth_path(
+                task,
+                EVALUATION_GROUND_TRUTH_DIR,
+            ),
+            selected_sources=saved_sources if isinstance(saved_sources, list) else None,
+            output_dir=EVALUATION_REPORT_DIR,
+        )
+    except SavedReportUnavailableError as exc:
+        raise HTTPException(status_code=409, detail="该记录缺少可重新测评的最终正文。") from exc
+    except Exception as exc:
+        logger.exception("Report reevaluation failed for run %s", run_id)
+        raise HTTPException(
+            status_code=500,
+            detail={"code": "evaluation_failed", "message": "重新测评失败，请稍后重试。"},
+        ) from exc
+    try:
+        evaluation_record_store.append_reevaluation(run_id, result)
+    except Exception:
+        # The fresh evaluation stays usable; losing history must not discard it.
+        logger.exception("Could not append reevaluation history for run %s", run_id)
     return result
 
 

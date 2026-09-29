@@ -46,6 +46,14 @@ def resolve_active_ground_truth_path(
     return path if path.is_file() else None
 
 
+def _safe_ground_truth_name(value: Any) -> str:
+    """Expose only the file name; internal directories never reach clients or history."""
+    text = str(value or "").strip()
+    if not text:
+        return ""
+    return Path(text).name
+
+
 def _failed_entity(error: BaseException) -> dict[str, Any]:
     return {
         "status": "evaluation_failed",
@@ -192,9 +200,13 @@ async def evaluate_saved_report(
         style_cleanup=style_cleanup,
         evaluation_report_paths=paths,
     )
+    published_entity_eval = dict(entity_eval)
+    published_entity_eval["ground_truth_path"] = _safe_ground_truth_name(
+        entity_eval.get("ground_truth_path")
+    )
     return {
         "evaluated_at": evaluated_at,
-        "entity_eval": entity_eval,
+        "entity_eval": published_entity_eval,
         "url_check": url_check,
         "public_url_source_eval": url_source_eval,
         "evaluation_summary": final_summary,

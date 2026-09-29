@@ -260,9 +260,114 @@ def test_reevaluation_uses_current_ground_truth_without_starting_research(
         report=record["evidence_report"],
         style_cleanup=record["report_style_cleanup"],
         ground_truth_path=active_path,
+        selected_sources=None,
         output_dir=main.EVALUATION_REPORT_DIR,
     )
     assert store.appended == [("run-1", result)]
+
+
+def test_reevaluation_returns_409_when_saved_task_is_missing(
+    client: TestClient,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    store = _RecordStoreStub({"evidence_report": "最终正文"})
+    monkeypatch.setattr(main, "evaluation_record_store", store)
+
+    response = client.post("/api/report-evaluation/run-1")
+
+    assert response.status_code == 409
+    assert response.json()["detail"] == "该记录缺少可重新测评的任务信息。"
+    assert store.appended == []
+
+
+def test_reevaluation_reuses_saved_sources_and_hides_internal_paths(
+    client: TestClient,
+    ground_truth_dir: Path,
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    task = "GTF"
+    active_path = ground_truth_path_for_task(task, ground_truth_dir)
+    active_path.parent.mkdir(parents=True)
+    active_path.write_bytes(_valid_json(task))
+    store = _RecordStoreStub({
+        "task": task,
+        "evidence_report": "# 正文\n\n结论。",
+        "selected_source_files": ["spec.pdf"],
+    })
+    evaluator = AsyncMock(return_value={"evaluation_summary": {"status": "completed"}})
+    monkeypatch.setattr(main, "evaluation_record_store", store)
+    monkeypatch.setattr(main, "evaluate_saved_report", evaluator)
+
+    response = client.post("/api/report-evaluation/run-1")
+
+    assert response.status_code == 200
+    assert evaluator.await_args.kwargs["selected_sources"] == ["spec.pdf"]
+    assert str(active_path.parent) not in response.text
+    assert str(tmp_path.parent) not in response.text
+
+
+def test_reevaluation_with_real_store_appends_history_and_returns_partial(
+    client: TestClient,
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    from gpt_researcher.evaluation.records import EvaluationRecordStore
+
+    store = EvaluationRecordStore(tmp_path / "records.json")
+    store.append_run({
+        "run_id": "run-live",
+        "task": "GTF",
+        "evidence_report": "# 正文\n\n结论。",
+        "report_style_cleanup": {"removed_count": 1},
+    })
+    monkeypatch.setattr(main, "evaluation_record_store", store)
+    monkeypatch.setattr(
+        main, "evaluate_saved_report", AsyncMock(return_value={"status": "partial"})
+    )
+
+    response = client.post("/api/report-evaluation/run-live")
+
+    assert response.status_code == 200
+    assert store.get_run("run-live")["reevaluations"] == [{"status": "partial"}]
+
+
+def test_reevaluation_returns_500_with_safe_detail_when_orchestration_fails(
+    client: TestClient,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    store = _RecordStoreStub({"task": "GTF", "evidence_report": "正文"})
+    monkeypatch.setattr(main, "evaluation_record_store", store)
+    monkeypatch.setattr(
+        main, "evaluate_saved_report", AsyncMock(side_effect=RuntimeError("db secret leaked"))
+    )
+
+    response = client.post("/api/report-evaluation/run-1")
+
+    assert response.status_code == 500
+    assert response.json()["detail"]["code"] == "evaluation_failed"
+    assert "db secret leaked" not in response.text
+
+
+def test_reevaluation_still_returns_result_when_history_append_fails(
+    client: TestClient,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    class _FailingStore:
+        def get_run(self, run_id: str):
+            return {"task": "GTF", "evidence_report": "正文"}
+
+        def append_reevaluation(self, run_id: str, result: dict) -> None:
+            raise OSError("disk full")
+
+    result = {"evaluation_summary": {"status": "completed"}}
+    monkeypatch.setattr(main, "evaluation_record_store", _FailingStore())
+    monkeypatch.setattr(main, "evaluate_saved_report", AsyncMock(return_value=result))
+
+    response = client.post("/api/report-evaluation/run-1")
+
+    assert response.status_code == 200
+    assert response.json() == result
 
 
 def test_reevaluation_returns_partial_result_when_one_component_failed(
