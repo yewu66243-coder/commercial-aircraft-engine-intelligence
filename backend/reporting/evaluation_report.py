@@ -40,11 +40,11 @@ _WINDOWS_RESERVED = {"CON", "PRN", "AUX", "NUL", *(f"COM{i}" for i in range(1, 1
                      *(f"LPT{i}" for i in range(1, 10))}
 _CREDENTIAL_PATTERNS = (
     re.compile(r"\bauthorization\s*:\s*(?:bearer|basic)\s+[^\r\n|]+", re.IGNORECASE),
-    re.compile(r"\bbearer\s+[^\s|;,]+", re.IGNORECASE),
     re.compile(r"\b(?:x-api-key|api-key)\s*:\s*[^\r\n|]+", re.IGNORECASE),
     re.compile(r"\b(?:set-cookie|cookie)\s*:\s*[^\r\n|]+", re.IGNORECASE),
     re.compile(r"\b(?:api[_-]?key|token|secret|password)\s*[:=]\s*[^\s|,;&]+", re.IGNORECASE),
 )
+_BARE_BEARER_PATTERN = re.compile(r"\bBearer\s+([^\s|;,]+)")
 
 
 def _mapping(value: object) -> dict:
@@ -58,7 +58,15 @@ def _list(value: object) -> list:
 def _redact_credentials(value: str) -> str:
     for pattern in _CREDENTIAL_PATTERNS:
         value = pattern.sub("[凭据已隐藏]", value)
-    return value
+    return _BARE_BEARER_PATTERN.sub(_redact_bare_bearer, value)
+
+
+def _redact_bare_bearer(match: re.Match[str]) -> str:
+    token = match.group(1)
+    if len(token) >= 8 and (any(char.isdigit() or char.isupper() for char in token)
+                            or any(char in "._-" for char in token)):
+        return "[凭据已隐藏]"
+    return match.group(0)
 
 
 def _text(value: object, limit: int = 500) -> str:

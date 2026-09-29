@@ -136,6 +136,24 @@ def test_real_summary_and_raw_fields_redact_complete_credential_values():
     assert "tokenization" in report
 
 
+def test_bare_bearer_redaction_requires_a_credential_like_value():
+    entity, urls, support = _results()
+    support["relationships"][0]["claim"] = "\n".join((
+        "The bearer design supports the pylon.",
+        "A bearing and bearer structure needs inspection.",
+        "Bearer TOP_SECRET_TOKEN",
+        "Bearer eyJhbGciOiJIUzI1NiJ9.eyJzdWIiOiIxMjM0NTY3ODkwIn0.signature",
+    ))
+    summary = build_evaluation_summary(entity, urls, support)
+
+    report = _report(summary, entity=entity, urls=urls, support=support)
+
+    assert "The bearer design supports the pylon." in report
+    assert "bearing and bearer structure" in report
+    assert "TOP_SECRET_TOKEN" not in report
+    assert "eyJhbGciOiJIUzI1NiJ9" not in report
+
+
 def test_table_cells_escape_pipes_backslashes_newlines_and_truncate():
     entity, urls, support = _results()
     long_claim = "A" * 1200 + "TAIL_SECRET"
