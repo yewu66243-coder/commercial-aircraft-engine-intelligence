@@ -62,13 +62,46 @@ def test_extract_public_urls_preserves_balanced_delimiters_and_uppercase_scheme(
     ]
 
 
-def test_normalize_url_for_request_preserves_userinfo_ip_addresses_and_percent_encoding() -> None:
+def test_extract_public_urls_stops_at_gfm_table_pipes_including_escaped_pipes() -> None:
+    report = "| source | https://example.com/a | note |\n| source | https://example.org/b\\|note |"
+
+    assert extract_public_urls(report) == ["https://example.com/a", "https://example.org/b"]
+
+
+@pytest.mark.parametrize(
+    ("url", "secret"),
+    [
+        ("https://user:pass@example.com/a", "pass"),
+        ("https://user@example.com/a", "user"),
+        ("https://用户:密码@example.com/a", "密码"),
+    ],
+)
+def test_normalize_url_for_request_rejects_userinfo_without_leaking_it(
+    url: str, secret: str
+) -> None:
+    with pytest.raises(ValueError, match="userinfo"):
+        normalize_url_for_request(url)
+
+    result = check_url_sync(url)
+
+    assert result["accessible"] is False
+    assert result["method"] == "normalize"
+    assert result["failure_reason"] == "invalid_url"
+    assert secret not in str(result["url"])
+    assert secret not in str(result["checked_url"])
+    assert secret not in str(result["error"])
+
+
+def test_normalize_url_for_request_preserves_ip_addresses_and_normalizes_invalid_percent() -> None:
     assert normalize_url_for_request(
-        "HTTPS://user:pass@例子.测试/a%2Fb?next=%2F&arr%5B0%5D=1"
-    ) == "https://user:pass@xn--fsqu00a.xn--0zwm56d/a%2Fb?next=%2F&arr%5B0%5D=1"
+        "HTTPS://例子.测试/a%2Fb?next=%2F&arr%5B0%5D=1"
+    ) == "https://xn--fsqu00a.xn--0zwm56d/a%2Fb?next=%2F&arr%5B0%5D=1"
     assert normalize_url_for_request(
         "https://[2001:db8::1]:8443/a%2Fb?value=%25"
     ) == "https://[2001:db8::1]:8443/a%2Fb?value=%25"
+    assert normalize_url_for_request(
+        "https://example.com/a%2G?value=%&other=%zz"
+    ) == "https://example.com/a%252G?value=%25&other=%25zz"
 
 
 @pytest.mark.parametrize("status", [200, 302])

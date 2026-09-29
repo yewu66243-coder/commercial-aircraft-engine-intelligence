@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import asyncio
 import ipaddress
+import re
 from typing import Callable
 from urllib.error import HTTPError, URLError
 from urllib.parse import quote, urlsplit, urlunsplit
@@ -13,9 +14,14 @@ from urllib.request import Request, urlopen
 UrlCheckResult = dict[str, object]
 UrlChecker = Callable[[str], UrlCheckResult]
 
-_URL_SCAN_TERMINATORS = set('<>"\'`，。；、')
-_TRAILING_URL_PUNCTUATION = ".,;:!?。；，、"
+_URL_SCAN_TERMINATORS = set('<>"\'`，。；、|')
+_TRAILING_URL_PUNCTUATION = ".,;:!?。；，、" + "\\"
 _BRACKET_PAIRS = (("(", ")"), ("[", "]"), ("{", "}"), ("（", "）"), ("【", "】"), ("《", "》"))
+_INVALID_PERCENT_ESCAPE = re.compile(r"%(?![0-9A-Fa-f]{2})")
+
+
+class _UserinfoNotAllowedError(ValueError):
+    """Raised when a URL embeds credentials that the checker must not transmit."""
 
 
 def _trim_url_suffix(url: str) -> str:
@@ -44,6 +50,28 @@ def clean_url_candidate(url: str) -> str:
     if any(character in parsed.netloc for character in "，。；：、（）【】《》"):
         return ""
     return cleaned
+
+
+def _quote_url_component(value: str, safe: str) -> str:
+    return quote(_INVALID_PERCENT_ESCAPE.sub("%25", value), safe=safe)
+
+
+def _safe_url_without_userinfo(url: str) -> str:
+    """Return a display-safe URL without embedded credentials or query values."""
+    try:
+        parsed = urlsplit(url)
+        hostname = parsed.hostname
+        if not parsed.scheme or not hostname:
+            return ""
+        try:
+            port = parsed.port
+        except ValueError:
+            port = None
+        host = f"[{hostname}]" if ":" in hostname else hostname
+        netloc = f"{host}{f':{port}' if port is not None else ''}"
+        return urlunsplit((parsed.scheme.lower(), netloc, parsed.path or "/", "", ""))
+    except (TypeError, ValueError):
+        return ""
 
 
 def extract_public_urls(report: str) -> list[str]:
@@ -80,6 +108,8 @@ def normalize_url_for_request(url: str) -> str:
     scheme = parsed.scheme.lower()
     if scheme not in {"http", "https"} or not parsed.netloc or not parsed.hostname:
         raise ValueError("invalid public HTTP(S) URL")
+    if "@" in parsed.netloc or parsed.username is not None or parsed.password is not None:
+        raise _UserinfoNotAllowedError("URL userinfo is not allowed")
     hostname = parsed.hostname
     try:
         port = parsed.port
@@ -91,12 +121,9 @@ def normalize_url_for_request(url: str) -> str:
         host = hostname.encode("idna").decode("ascii")
     else:
         host = f"[{address.compressed}]" if address.version == 6 else address.compressed
-    userinfo = ""
-    if "@" in parsed.netloc:
-        userinfo = f"{parsed.netloc.rsplit('@', 1)[0]}@"
-    netloc = f"{userinfo}{host}{f':{port}' if port is not None else ''}"
-    path = quote(parsed.path or "/", safe="/%:@-._~!$&'()*+,;=")
-    query = quote(parsed.query, safe="=&?/%:@-._~!$'()*+,;")
+    netloc = f"{host}{f':{port}' if port is not None else ''}"
+    path = _quote_url_component(parsed.path or "/", safe="/%:@-._~!$&'()*+,;=")
+    query = _quote_url_component(parsed.query, safe="=&?/%:@-._~!$'()*+,;")
     return urlunsplit((scheme, netloc, path, query, ""))
 
 
@@ -162,6 +189,16 @@ def check_url_sync(url: str, timeout: int = 6) -> UrlCheckResult:
     original_url = url
     try:
         checked_url = normalize_url_for_request(url)
+    except _UserinfoNotAllowedError:
+        safe_url = _safe_url_without_userinfo(url)
+        return _failure_result(
+            safe_url,
+            checked_url=safe_url,
+            method="normalize",
+            error="embedded credentials are not permitted",
+            failure_reason="invalid_url",
+            ssl_verified=None,
+        )
     except Exception as exc:
         return _failure_result(
             original_url,
