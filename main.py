@@ -62,6 +62,25 @@ from gpt_researcher.intelligence_templates import (
     get_template_catalog,
     save_intelligence_template,
 )
+from gpt_researcher.evaluation.ground_truth_io import (
+    MAX_UPLOAD_BYTES as MAX_EVALUATION_UPLOAD_BYTES,
+    GroundTruthValidationError,
+    persist_ground_truth_upload,
+)
+from gpt_researcher.evaluation.records import EvaluationRecordStore
+from gpt_researcher.evaluation.report_evaluation import (
+    evaluate_saved_report,
+    resolve_active_ground_truth_path,
+)
+
+
+EVALUATION_GROUND_TRUTH_DIR = (
+    PROJECT_ROOT / "outputs" / "records" / "entity_ground_truths"
+)
+EVALUATION_REPORT_DIR = PROJECT_ROOT / "outputs" / "evaluations"
+evaluation_record_store = EvaluationRecordStore(
+    PROJECT_ROOT / "outputs" / "records" / "evaluation_records.json"
+)
 
 
 def explain_report_exception(exc: Exception) -> dict[str, Any]:
@@ -187,6 +206,71 @@ async def report_progress(task_id: str):
     if progress is None:
         raise HTTPException(status_code=404, detail="未找到该报告任务的进度记录")
     return progress
+
+
+@app.post("/api/evaluation-ground-truth")
+async def upload_evaluation_ground_truth(
+    task: str = Form(...),
+    file: UploadFile = File(...),
+):
+    """Validate and atomically replace the active entity ground truth for a task."""
+    original_name = file.filename or ""
+    try:
+        content = await file.read(MAX_EVALUATION_UPLOAD_BYTES + 1)
+    finally:
+        await file.close()
+    if len(content) > MAX_EVALUATION_UPLOAD_BYTES:
+        raise HTTPException(status_code=413, detail="标准答案文件不能超过 5 MiB。")
+    try:
+        return persist_ground_truth_upload(
+            content,
+            original_name,
+            task,
+            EVALUATION_GROUND_TRUTH_DIR,
+        )
+    except GroundTruthValidationError as exc:
+        raise HTTPException(
+            status_code=422,
+            detail={"code": exc.code, "message": exc.message},
+        ) from exc
+
+
+@app.post("/api/report-evaluation/{run_id}")
+async def reevaluate_report(run_id: str):
+    """Reevaluate the persisted final report without rerunning research or writing."""
+    record = evaluation_record_store.get_run(run_id)
+    if record is None:
+        raise HTTPException(status_code=404, detail="未找到该报告记录。")
+
+    report = record.get("evidence_report")
+    if not isinstance(report, str) or not report.strip():
+        raise HTTPException(
+            status_code=409,
+            detail="该记录缺少可重新测评的最终正文。",
+        )
+    task = record.get("task")
+    if not isinstance(task, str) or not task.strip():
+        raise HTTPException(
+            status_code=409,
+            detail="该记录缺少可重新测评的任务信息。",
+        )
+    style_cleanup = record.get("report_style_cleanup")
+    if not isinstance(style_cleanup, dict):
+        style_cleanup = None
+
+    result = await evaluate_saved_report(
+        task=task,
+        run_id=run_id,
+        report=report,
+        style_cleanup=style_cleanup,
+        ground_truth_path=resolve_active_ground_truth_path(
+            task,
+            EVALUATION_GROUND_TRUTH_DIR,
+        ),
+        output_dir=EVALUATION_REPORT_DIR,
+    )
+    evaluation_record_store.append_reevaluation(run_id, result)
+    return result
 
 
 @app.get("/api/local-library")
