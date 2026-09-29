@@ -58,14 +58,17 @@ def _list(value: object) -> list:
 
 
 def _redact_credentials(value: str) -> str:
+    decoded = value
     for _ in range(2):
-        decoded = unquote(value)
-        if decoded == value:
+        unquoted = unquote(decoded)
+        if unquoted == decoded:
             break
-        value = decoded
+        decoded = unquoted
+    redacted = decoded
     for pattern in _CREDENTIAL_PATTERNS:
-        value = pattern.sub("[凭据已隐藏]", value)
-    return _BARE_BEARER_PATTERN.sub(_redact_bare_bearer, value)
+        redacted = pattern.sub("[凭据已隐藏]", redacted)
+    redacted = _BARE_BEARER_PATTERN.sub(_redact_bare_bearer, redacted)
+    return value if redacted == decoded else redacted
 
 
 def _redact_bare_bearer(match: re.Match[str]) -> str:
@@ -309,13 +312,13 @@ def _write_markdown_atomic(destination: Path, markdown: str) -> None:
 def _reserve_path(folder: Path, stem: str) -> tuple[Path, Path]:
     for index in range(10000):
         base = folder / f"{stem}{'_' + str(index) if index else ''}"
-        candidate, lock = base.with_suffix(".md"), folder / f".{base.name}.lock"
+        candidate, lock = base.parent / f"{base.name}.md", folder / f".{base.name}.lock"
         try:
             descriptor = os.open(lock, os.O_CREAT | os.O_EXCL | os.O_WRONLY, 0o600)
         except FileExistsError:
             continue
         os.close(descriptor)
-        if any(base.with_suffix(ext).exists() for ext in (".md", ".docx", ".pdf")):
+        if any((base.parent / f"{base.name}{ext}").exists() for ext in (".md", ".docx", ".pdf")):
             lock.unlink(missing_ok=True)
             continue
         return candidate, lock
@@ -326,6 +329,11 @@ def _temporary_path(folder: Path, stem: str, suffix: str) -> Path:
     descriptor, temporary = tempfile.mkstemp(prefix=f".{stem}-", suffix=f"{suffix}.tmp", dir=folder)
     os.close(descriptor)
     return Path(temporary)
+
+
+def _artifact_path(markdown_path: Path, extension: str) -> Path:
+    base_name = markdown_path.name.removesuffix(".md")
+    return markdown_path.parent / f"{base_name}{extension}"
 
 
 def _publish_no_overwrite(temporary: Path, destination: Path) -> None:
@@ -362,7 +370,7 @@ async def export_evaluation_report(*, markdown: str, task: str, run_id: str,
             path, lock = _reserve_path(folder, stem)
             temporary, published = [], []
             try:
-                markdown_temp = _temporary_path(folder, path.stem, ".md")
+                markdown_temp = _temporary_path(folder, path.name.removesuffix(".md"), ".md")
                 temporary.append(markdown_temp)
                 _write_markdown_atomic(markdown_temp, markdown)
                 try:
@@ -376,10 +384,10 @@ async def export_evaluation_report(*, markdown: str, task: str, run_id: str,
                     ("word", ".docx", render_word, "Word测评报告导出失败。"),
                     ("pdf", ".pdf", render_pdf, "PDF测评报告导出失败。"),
                 ):
-                    destination = path.with_suffix(extension)
-                    render_temp = _temporary_path(folder, path.stem, extension)
-                    temporary.append(render_temp)
                     try:
+                        destination = _artifact_path(path, extension)
+                        render_temp = _temporary_path(folder, path.name.removesuffix(".md"), extension)
+                        temporary.append(render_temp)
                         await _render_to_temporary(renderer, markdown, render_temp)
                         _publish_no_overwrite(render_temp, destination)
                         temporary.remove(render_temp)

@@ -311,6 +311,59 @@ def test_second_export_preserves_first_report(tmp_path, monkeypatch):
     assert (tmp_path / Path(second["markdown"]).name).read_text(encoding="utf-8") == "second"
 
 
+def test_dotted_task_name_keeps_full_stem_and_exports_uniquely(tmp_path, monkeypatch):
+    def renderer(text, destination, base_path=None):
+        Path(destination).write_text(text, encoding="utf-8")
+
+    monkeypatch.setattr(evaluation_report, "render_word", renderer)
+    monkeypatch.setattr(evaluation_report, "render_pdf", renderer)
+    args = {"task": "foo.bar", "run_id": "run", "evaluated_at": "2026-09-29T00:00:00Z",
+            "output_dir": tmp_path}
+    first = asyncio.run(evaluation_report.export_evaluation_report(markdown="first", **args))
+    second = asyncio.run(evaluation_report.export_evaluation_report(markdown="second", **args))
+
+    assert Path(first["markdown"]).name == "foo.bar_run_20260929T000000000000Z.md"
+    assert Path(second["markdown"]).name == "foo.bar_run_20260929T000000000000Z_1.md"
+    assert (tmp_path / Path(first["markdown"]).name).read_text(encoding="utf-8") == "first"
+    assert (tmp_path / Path(second["markdown"]).name).read_text(encoding="utf-8") == "second"
+
+
+def test_non_sensitive_percent_encoded_url_is_preserved_verbatim():
+    entity, urls, support = _results()
+    urls["results"][0]["url"] = "https://example.test/a%2Fb"
+    support["relationships"][0]["url"] = urls["results"][0]["url"]
+    report = _report(build_evaluation_summary(entity, urls, support), entity=entity,
+                     urls=urls, support=support)
+
+    assert "https://example.test/a%2Fb" in report
+    assert "https://example.test/a/b" not in report
+
+
+def test_word_temp_creation_failure_is_isolated_and_pdf_still_exports(tmp_path, monkeypatch):
+    original_temporary_path = evaluation_report._temporary_path
+
+    def temporary_path(folder, stem, suffix):
+        if suffix == ".docx":
+            raise OSError("private word temp failure")
+        return original_temporary_path(folder, stem, suffix)
+
+    def renderer(text, destination, base_path=None):
+        Path(destination).write_text(text, encoding="utf-8")
+
+    monkeypatch.setattr(evaluation_report, "_temporary_path", temporary_path)
+    monkeypatch.setattr(evaluation_report, "render_word", renderer)
+    monkeypatch.setattr(evaluation_report, "render_pdf", renderer)
+    result = asyncio.run(evaluation_report.export_evaluation_report(
+        markdown="report", task="task", run_id="run", evaluated_at="2026-09-29T00:00:00Z",
+        output_dir=tmp_path))
+
+    assert result["markdown"] and result["pdf"] and not result["word"]
+    assert result["errors"] == [{"format": "word", "code": "export_failed",
+                                  "message": "Word测评报告导出失败。"}]
+    assert (tmp_path / Path(result["markdown"]).name).exists()
+    assert (tmp_path / Path(result["pdf"]).name).exists()
+
+
 def test_invalid_non_string_timestamp_falls_back_to_safe_filename(tmp_path, monkeypatch):
     monkeypatch.setattr(evaluation_report, "render_word", lambda *_a, **_k: None)
     monkeypatch.setattr(evaluation_report, "render_pdf", lambda *_a, **_k: None)
