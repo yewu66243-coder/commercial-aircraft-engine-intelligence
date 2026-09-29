@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import asyncio
+import io
 import socket
 import ssl
 import time
@@ -13,6 +14,7 @@ from gpt_researcher.evaluation.link_accessibility import (
     check_url_sync,
     evaluate_link_accessibility,
     extract_public_urls,
+    normalize_url_for_request,
 )
 
 
@@ -41,6 +43,32 @@ def test_extract_public_urls_cleans_trailing_markdown_and_chinese_punctuation() 
     )
 
     assert extract_public_urls(report) == ["https://example.com/a", "https://example.org/b"]
+
+
+def test_extract_public_urls_preserves_balanced_delimiters_and_uppercase_scheme() -> None:
+    report = (
+        "[nested](HTTPS://example.com/a_(b)) "
+        "https://[2001:db8::1]/x "
+        "https://example.com/search?arr[0]=engine "
+        "https://example.com/end， "
+        "https://example.com/end，"
+    )
+
+    assert extract_public_urls(report) == [
+        "HTTPS://example.com/a_(b)",
+        "https://[2001:db8::1]/x",
+        "https://example.com/search?arr[0]=engine",
+        "https://example.com/end",
+    ]
+
+
+def test_normalize_url_for_request_preserves_userinfo_ip_addresses_and_percent_encoding() -> None:
+    assert normalize_url_for_request(
+        "HTTPS://user:pass@例子.测试/a%2Fb?next=%2F&arr%5B0%5D=1"
+    ) == "https://user:pass@xn--fsqu00a.xn--0zwm56d/a%2Fb?next=%2F&arr%5B0%5D=1"
+    assert normalize_url_for_request(
+        "https://[2001:db8::1]:8443/a%2Fb?value=%25"
+    ) == "https://[2001:db8::1]:8443/a%2Fb?value=%25"
 
 
 @pytest.mark.parametrize("status", [200, 302])
@@ -91,6 +119,32 @@ def test_check_url_sync_accepts_3xx_reported_as_http_error(status: int) -> None:
     assert result["status_code"] == status
     assert result["method"] == "HEAD"
     assert result["failure_reason"] == ""
+
+
+@pytest.mark.parametrize("status", [304, 404, 500])
+def test_check_url_sync_closes_direct_http_error_resources(status: int) -> None:
+    response_body = io.BytesIO(b"response")
+    error = HTTPError("https://example.com", status, "Response", None, response_body)
+    with patch("gpt_researcher.evaluation.link_accessibility.urlopen", side_effect=error):
+        check_url_sync("https://example.com")
+
+    assert response_body.closed is True
+
+
+@pytest.mark.parametrize("status", [403, 405])
+def test_check_url_sync_closes_head_error_before_get_fallback(status: int) -> None:
+    head_body = io.BytesIO(b"head")
+    get_body = io.BytesIO(b"get")
+    head_error = HTTPError("https://example.com", status, "Rejected", None, head_body)
+    get_error = HTTPError("https://example.com", 500, "Server error", None, get_body)
+    with patch(
+        "gpt_researcher.evaluation.link_accessibility.urlopen",
+        side_effect=[head_error, get_error],
+    ):
+        check_url_sync("https://example.com")
+
+    assert head_body.closed is True
+    assert get_body.closed is True
 
 
 @pytest.mark.parametrize(

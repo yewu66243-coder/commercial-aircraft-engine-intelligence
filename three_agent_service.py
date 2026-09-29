@@ -657,6 +657,8 @@ class ThreeAgentService:
                 "dns_or_host": "域名/主机异常",
                 "invalid_url": "URL格式异常",
                 "http_status": "HTTP状态异常",
+                "connection": "连接异常",
+                "checker_exception": "检查器异常",
                 "network_or_unknown": "网络或未知异常",
             }
             failure_reason_text = "；".join(

@@ -3,7 +3,7 @@
 from __future__ import annotations
 
 import asyncio
-import re
+import ipaddress
 from typing import Callable
 from urllib.error import HTTPError, URLError
 from urllib.parse import quote, urlsplit, urlunsplit
@@ -13,13 +13,27 @@ from urllib.request import Request, urlopen
 UrlCheckResult = dict[str, object]
 UrlChecker = Callable[[str], UrlCheckResult]
 
-_URL_TERMINATORS = set(' \t\r\n<>"\'`()|[]{}，。；;、（）】》”’')
-_TRAILING_URL_PUNCTUATION = ".,;:!?。；，、)]}）】》"
+_URL_SCAN_TERMINATORS = set('<>"\'`，。；、')
+_TRAILING_URL_PUNCTUATION = ".,;:!?。；，、"
+_BRACKET_PAIRS = (("(", ")"), ("[", "]"), ("{", "}"), ("（", "）"), ("【", "】"), ("《", "》"))
+
+
+def _trim_url_suffix(url: str) -> str:
+    """Remove sentence punctuation and unmatched closing delimiters from a URL."""
+    cleaned = url.rstrip(_TRAILING_URL_PUNCTUATION)
+    while cleaned:
+        for opening, closing in _BRACKET_PAIRS:
+            if cleaned.endswith(closing) and cleaned.count(closing) > cleaned.count(opening):
+                cleaned = cleaned[:-1].rstrip(_TRAILING_URL_PUNCTUATION)
+                break
+        else:
+            return cleaned
+    return cleaned
 
 
 def clean_url_candidate(url: str) -> str:
-    cleaned = (url or "").strip().strip('<>"\'`').rstrip(_TRAILING_URL_PUNCTUATION)
-    if not cleaned.startswith(("http://", "https://")):
+    cleaned = _trim_url_suffix((url or "").strip().strip('<>"\'`'))
+    if not cleaned.lower().startswith(("http://", "https://")):
         return ""
     try:
         parsed = urlsplit(cleaned)
@@ -37,27 +51,53 @@ def extract_public_urls(report: str) -> list[str]:
     urls: list[str] = []
     seen: set[str] = set()
     text = report or ""
-    for match in re.finditer(r"https?://", text):
-        start = match.start()
+    lowered_text = text.lower()
+    start = 0
+    while start < len(text):
+        http_start = lowered_text.find("http://", start)
+        https_start = lowered_text.find("https://", start)
+        candidates = [position for position in (http_start, https_start) if position >= 0]
+        if not candidates:
+            break
+        start = min(candidates)
         end = start
-        while end < len(text) and text[end] not in _URL_TERMINATORS:
+        while end < len(text):
+            character = text[end]
+            if character.isspace() or character in _URL_SCAN_TERMINATORS:
+                break
             end += 1
         url = clean_url_candidate(text[start:end])
         if url and url not in seen:
             urls.append(url)
             seen.add(url)
+        start = end if end > start else start + 1
     return urls
 
 
 def normalize_url_for_request(url: str) -> str:
     """Normalize a public URL without weakening TLS verification."""
     parsed = urlsplit(url)
-    if parsed.scheme not in {"http", "https"} or not parsed.netloc or not parsed.hostname:
+    scheme = parsed.scheme.lower()
+    if scheme not in {"http", "https"} or not parsed.netloc or not parsed.hostname:
         raise ValueError("invalid public HTTP(S) URL")
-    netloc = parsed.netloc.encode("idna").decode("ascii")
+    hostname = parsed.hostname
+    try:
+        port = parsed.port
+    except ValueError as exc:
+        raise ValueError("invalid public HTTP(S) URL port") from exc
+    try:
+        address = ipaddress.ip_address(hostname)
+    except ValueError:
+        host = hostname.encode("idna").decode("ascii")
+    else:
+        host = f"[{address.compressed}]" if address.version == 6 else address.compressed
+    userinfo = ""
+    if "@" in parsed.netloc:
+        userinfo = f"{parsed.netloc.rsplit('@', 1)[0]}@"
+    netloc = f"{userinfo}{host}{f':{port}' if port is not None else ''}"
     path = quote(parsed.path or "/", safe="/%:@-._~!$&'()*+,;=")
     query = quote(parsed.query, safe="=&?/%:@-._~!$'()*+,;")
-    return urlunsplit((parsed.scheme, netloc, path, query, ""))
+    return urlunsplit((scheme, netloc, path, query, ""))
 
 
 def classify_url_error(error: str, status_code: int | None = None) -> str:
@@ -152,30 +192,33 @@ def check_url_sync(url: str, timeout: int = 6) -> UrlCheckResult:
             }
         except HTTPError as exc:
             status_code = int(exc.code)
-            if 300 <= status_code < 400:
-                return {
-                    "url": original_url,
-                    "checked_url": checked_url,
-                    "status_code": status_code,
-                    "accessible": True,
-                    "method": method,
-                    "ssl_verified": True,
-                    "error": "",
-                    "failure_reason": "",
-                    "warning": "",
-                }
-            if method == "HEAD" and status_code in {403, 405}:
-                method = "GET"
-                continue
-            return _failure_result(
-                original_url,
-                checked_url=checked_url,
-                method=method,
-                error=str(exc),
-                failure_reason="http_status",
-                ssl_verified=True,
-                status_code=status_code,
-            )
+            try:
+                if 300 <= status_code < 400:
+                    return {
+                        "url": original_url,
+                        "checked_url": checked_url,
+                        "status_code": status_code,
+                        "accessible": True,
+                        "method": method,
+                        "ssl_verified": True,
+                        "error": "",
+                        "failure_reason": "",
+                        "warning": "",
+                    }
+                if method == "HEAD" and status_code in {403, 405}:
+                    method = "GET"
+                    continue
+                return _failure_result(
+                    original_url,
+                    checked_url=checked_url,
+                    method=method,
+                    error=str(exc),
+                    failure_reason="http_status",
+                    ssl_verified=True,
+                    status_code=status_code,
+                )
+            finally:
+                exc.close()
         except URLError as exc:
             error = str(exc.reason)
             return _failure_result(

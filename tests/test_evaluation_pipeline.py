@@ -54,6 +54,33 @@ def test_run_statistics_uses_relationship_denominator_for_public_support() -> No
     assert "分子仅计完全支撑的关系" in section
 
 
+def test_run_statistics_translates_link_checker_failure_labels() -> None:
+    service = ThreeAgentService(ThreeAgentRequestData(task="异常标签"))
+    stats = {
+        "run_id": "test-run",
+        "task": "异常标签",
+        "report_source": "web",
+        "query_domain_count": 0,
+        "selected_source_count": 0,
+        "duration_seconds": 1.0,
+        "duration_minutes": 0.02,
+        "url_check": {
+            "total_urls": 2,
+            "checked_urls": 2,
+            "accessible_urls": 0,
+            "failed_urls": 2,
+            "accessibility_rate": 0.0,
+            "failure_reasons": {"connection": 1, "checker_exception": 1},
+        },
+    }
+
+    section = service.build_run_statistics_section(stats)
+
+    assert "连接异常：1" in section
+    assert "检查器异常：1" in section
+    assert "checker_exception" not in section
+
+
 class _Response:
     def __init__(self, status: int):
         self.status = status
