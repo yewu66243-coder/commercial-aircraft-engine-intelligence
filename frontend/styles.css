@@ -3781,7 +3781,7 @@ select:focus {
 .evaluation-heading span, .evaluation-message { color: var(--is-muted); font-size: 12px; }
 .evaluation-metrics {
     display: grid;
-    grid-template-columns: repeat(3, minmax(0, 1fr));
+    grid-template-columns: repeat(4, minmax(0, 1fr));
     gap: 8px;
     margin-top: 12px;
 }
@@ -3797,6 +3797,37 @@ select:focus {
 .evaluation-card[data-state="pass"] { background: #edf7f1; color: #286448; }
 .evaluation-card[data-state="fail"] { background: #fff0f0; color: #973c3c; }
 .evaluation-message { margin: 10px 0 0; line-height: 1.5; }
+.evaluation-actions {
+    display: flex;
+    flex-wrap: wrap;
+    align-items: center;
+    gap: 8px;
+    margin-top: 10px;
+}
+.evaluation-action-btn {
+    display: inline-flex;
+    align-items: center;
+    gap: 6px;
+    padding: 6px 10px;
+    border: 1px solid var(--is-line);
+    border-radius: 6px;
+    background: #fff;
+    color: var(--is-blue);
+    font: inherit;
+    font-size: 12px;
+    text-decoration: none;
+    cursor: pointer;
+}
+.evaluation-action-btn:hover:not(.disabled):not(:disabled) { background: #f2f6fa; }
+.evaluation-action-btn:disabled,
+.evaluation-action-btn.disabled {
+    color: #5b6875;
+    background: #f4f6f8;
+    cursor: not-allowed;
+}
+.evaluation-ground-truth,
+.evaluation-action-status { margin: 8px 0 0; color: var(--is-muted); font-size: 12px; line-height: 1.5; }
+.evaluation-action-status:empty { display: none; }
 .evaluation-details { margin-top: 10px; }
 .evaluation-details summary { cursor: pointer; color: var(--is-blue); font-size: 13px; }
 .evaluation-table-wrap { margin-top: 8px; overflow-x: auto; }
