@@ -852,6 +852,20 @@ def extract_entities_from_report(report: str, selected_sources: Iterable[Any] = 
     return entities
 
 
+class _UnspecifiedGroundTruth:
+    """Sentinel for "no file selected"; default task-based resolution stays available."""
+
+    __slots__ = ()
+
+    def __repr__(self) -> str:  # pragma: no cover - debugging aid
+        return "<unspecified-ground-truth>"
+
+
+UNSPECIFIED_GROUND_TRUTH = _UnspecifiedGroundTruth()
+
+_GROUND_TRUTH_SELECTION = Any  # str | Path | None | _UnspecifiedGroundTruth
+
+
 def _ground_truth_candidates(task: str) -> List[Path]:
     directory = get_ground_truth_dir()
     safe_task = _safe_name(task)
@@ -861,6 +875,24 @@ def _ground_truth_candidates(task: str) -> List[Path]:
         directory / f"{safe_task[:30]}.json",
         directory / "ground_truth.json",
     ]
+
+
+def _selected_ground_truth_candidates(
+    task: str, ground_truth_path: _GROUND_TRUTH_SELECTION
+) -> List[Path]:
+    """Resolve which files may supply the ground truth.
+
+    ``UNSPECIFIED_GROUND_TRUTH`` keeps the historic task-name lookup so existing
+    caller behaviour is unchanged.  ``None`` means the caller resolved the active
+    file and found none, so strict entity metrics stay unavailable (proxy mode).
+    Any other value is used verbatim, so an upload for a different directory or a
+    replaced file always wins over files in the default directory.
+    """
+    if ground_truth_path is None:
+        return []
+    if isinstance(ground_truth_path, _UnspecifiedGroundTruth):
+        return _ground_truth_candidates(task)
+    return [Path(ground_truth_path)]
 
 
 def _entity_name(item: Dict[str, Any]) -> str:
@@ -1004,8 +1036,10 @@ def _is_recognized_legacy_payload(payload: Any) -> bool:
     )
 
 
-def load_ground_truth(task: str) -> Dict[str, Any]:
-    for path in _ground_truth_candidates(task):
+def load_ground_truth(
+    task: str, ground_truth_path: _GROUND_TRUTH_SELECTION = UNSPECIFIED_GROUND_TRUTH
+) -> Dict[str, Any]:
+    for path in _selected_ground_truth_candidates(task, ground_truth_path):
         if not path.exists():
             continue
         legacy_payload: Any = None
@@ -1398,7 +1432,14 @@ def evaluate_report_entities(
     task: str,
     selected_sources: Iterable[Any] = (),
     threshold: float = ENTITY_THRESHOLD,
+    ground_truth_path: _GROUND_TRUTH_SELECTION = UNSPECIFIED_GROUND_TRUTH,
 ) -> Dict[str, Any]:
+    """Score extracted entities.
+
+    ``ground_truth_path`` selects the active ground-truth file.  Omit it to keep
+    the historic task-name lookup; pass ``None`` to force proxy mode; pass a path
+    to score strictly against exactly that file.
+    """
     extracted = extract_entities_from_report(report, selected_sources)
     auto_evidence_eval = _run_auto_evidence_check(extracted, report) if extracted else {
         "method": "source_text_alias_number_url_pdf_matching",
@@ -1413,8 +1454,11 @@ def evaluate_report_entities(
         "requirement_met": None,
         "note": "未抽取到实体，未执行自动证据核验。",
     }
-    ground_truth = load_ground_truth(task)
-    ground_truth_path = Path(ground_truth["path"]) if ground_truth.get("path") else None
+    if isinstance(ground_truth_path, _UnspecifiedGroundTruth):
+        ground_truth = load_ground_truth(task)
+    else:
+        ground_truth = load_ground_truth(task, ground_truth_path)
+    ground_truth_file = Path(ground_truth["path"]) if ground_truth.get("path") else None
     expected = ground_truth["entities"] if ground_truth.get("status") == "loaded" else []
     evidence_supported_count = sum(1 for item in extracted if item.get("evidence_supported"))
     unsupported_count = len(extracted) - evidence_supported_count
@@ -1428,7 +1472,7 @@ def evaluate_report_entities(
         "matches": [],
         "match_audit": [],
         "ground_truth_status": ground_truth.get("status", "missing"),
-        "ground_truth_path": str(ground_truth_path) if ground_truth_path else "",
+        "ground_truth_path": str(ground_truth_file) if ground_truth_file else "",
         "ground_truth_error_code": ground_truth.get("error_code", ""),
         "ground_truth_message": ground_truth.get("message", ""),
         "extracted_count": len(extracted),

@@ -608,3 +608,105 @@ class TestEntityReportEvaluationModes:
         assert result["metrics"]["overall"]["recall"] == 0.0
         assert result["metrics"]["overall"]["f1"] == 0.0
         assert result["accuracy"] == 0.0
+
+
+class TestExplicitGroundTruthPath:
+    """The active ground-truth file selected by the caller must win over defaults."""
+
+    @staticmethod
+    def _write_truth(path, *names):
+        path.write_text(
+            json.dumps(
+                {
+                    "task": "ground-truth-path",
+                    "entities": [{"name": name, "type": "型号"} for name in names],
+                },
+                ensure_ascii=False,
+            ),
+            encoding="utf-8",
+        )
+
+    def test_explicit_path_is_used_even_when_default_dir_holds_another_file(self, tmp_path, monkeypatch):
+        task = "ground-truth-path"
+        default_dir = tmp_path / "default"
+        default_dir.mkdir()
+        self._write_truth(default_dir / f"{task}.json", "默认实体")
+        self._write_truth(default_dir / "ground_truth.json", "通用实体")
+        monkeypatch.setattr(entity_evaluator, "get_ground_truth_dir", lambda: default_dir)
+
+        specified = tmp_path / "active.json"
+        self._write_truth(specified, "指定实体")
+
+        result = entity_evaluator.evaluate_report_entities(
+            _report(("型号", "指定实体", "engine", "-")), task, ground_truth_path=specified
+        )
+
+        assert result["mode"] == "strict"
+        assert result["ground_truth_status"] == "loaded"
+        assert result["ground_truth_path"] == str(specified)
+        assert [item["name"] for item in result["expected_entities"]] == ["指定实体"]
+        assert result["metrics"]["overall"]["f1"] == 1.0
+
+    def test_explicit_none_forces_proxy_mode_without_loading_defaults(self, tmp_path, monkeypatch):
+        task = "ground-truth-path"
+        default_dir = tmp_path / "default"
+        default_dir.mkdir()
+        self._write_truth(default_dir / f"{task}.json", "默认实体")
+        monkeypatch.setattr(entity_evaluator, "get_ground_truth_dir", lambda: default_dir)
+
+        result = entity_evaluator.evaluate_report_entities(
+            _report(("型号", "默认实体", "engine", "https://example.test/source")),
+            task,
+            ground_truth_path=None,
+        )
+
+        assert result["mode"] == "proxy"
+        assert result["ground_truth_status"] == "missing"
+        assert result["ground_truth_path"] == ""
+        assert result["metrics"] is None
+        assert result["accuracy"] is None
+
+    def test_explicit_path_without_file_reports_missing_instead_of_falling_back(self, tmp_path, monkeypatch):
+        task = "ground-truth-path"
+        default_dir = tmp_path / "default"
+        default_dir.mkdir()
+        self._write_truth(default_dir / f"{task}.json", "默认实体")
+        monkeypatch.setattr(entity_evaluator, "get_ground_truth_dir", lambda: default_dir)
+
+        result = entity_evaluator.evaluate_report_entities(
+            _report(("型号", "默认实体", "engine", "-")), task, ground_truth_path=tmp_path / "absent.json"
+        )
+
+        assert result["mode"] == "proxy"
+        assert result["ground_truth_status"] == "missing"
+        assert result["accuracy"] is None
+
+    def test_explicit_invalid_path_reports_safe_invalid_state(self, tmp_path, monkeypatch):
+        default_dir = tmp_path / "default"
+        default_dir.mkdir()
+        monkeypatch.setattr(entity_evaluator, "get_ground_truth_dir", lambda: default_dir)
+        broken = tmp_path / "broken.json"
+        broken.write_text("{not json", encoding="utf-8")
+
+        result = entity_evaluator.evaluate_report_entities(
+            _report(("型号", "默认实体", "engine", "-")), "ground-truth-path", ground_truth_path=broken
+        )
+
+        assert result["mode"] == "invalid"
+        assert result["status"] == "invalid_ground_truth"
+        assert result["ground_truth_error_code"] == "invalid_json"
+        assert result["ground_truth_path"] == str(broken)
+
+    def test_omitted_path_keeps_default_task_resolution(self, tmp_path, monkeypatch):
+        task = "ground-truth-path"
+        default_dir = tmp_path / "default"
+        default_dir.mkdir()
+        self._write_truth(default_dir / f"{task}.json", "默认实体")
+        monkeypatch.setattr(entity_evaluator, "get_ground_truth_dir", lambda: default_dir)
+
+        result = entity_evaluator.evaluate_report_entities(
+            _report(("型号", "默认实体", "engine", "-")), task
+        )
+
+        assert result["mode"] == "strict"
+        assert result["ground_truth_path"] == str(default_dir / f"{task}.json")

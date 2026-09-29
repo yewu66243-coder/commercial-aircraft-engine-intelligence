@@ -105,9 +105,13 @@ async def _evaluate_sources(report: str) -> dict[str, Any]:
         return _failed_source(error)
 
 
-async def _evaluate_entities(report: str, task: str) -> dict[str, Any]:
+async def _evaluate_entities(
+    report: str, task: str, ground_truth_path: str | Path | None
+) -> dict[str, Any]:
     try:
-        return await asyncio.to_thread(evaluate_report_entities, report, task)
+        return await asyncio.to_thread(
+            evaluate_report_entities, report, task, ground_truth_path=ground_truth_path
+        )
     except Exception as error:
         LOGGER.exception("Entity evaluation failed")
         return _failed_entity(error)
@@ -126,15 +130,14 @@ async def evaluate_saved_report(
     if not isinstance(report, str) or not report.strip():
         raise SavedReportUnavailableError("已保存的清理后报告正文不可用。")
 
-    # The evaluator resolves the canonical hashed file by task.  Keep the explicit
-    # path in this orchestration boundary so callers can select the active upload
-    # without coupling API code to evaluator internals.
-    del ground_truth_path
+    # ``ground_truth_path`` is the caller-resolved active file and is passed
+    # through unchanged: a path scores strictly against that file, ``None`` keeps
+    # entity metrics in proxy mode instead of silently using another file.
     evaluated_at = datetime.now().astimezone().isoformat(timespec="seconds")
     url_check, url_source_eval, entity_eval = await asyncio.gather(
         _evaluate_accessibility(report),
         _evaluate_sources(report),
-        _evaluate_entities(report, task),
+        _evaluate_entities(report, task, ground_truth_path),
     )
 
     initial_summary = build_evaluation_summary(

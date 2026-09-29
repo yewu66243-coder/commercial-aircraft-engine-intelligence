@@ -7,11 +7,31 @@ from unittest.mock import AsyncMock, Mock, call, patch
 
 import pytest
 
-from gpt_researcher.evaluation import report_evaluation
+import json
+
+from gpt_researcher.evaluation import entity_evaluator, report_evaluation
 from gpt_researcher.evaluation.records import EvaluationRecordStore
 
 
 REPORT = "# 已清理报告\n\n确定事实。[URL1]\n\n- [URL1] https://example.test/source"
+
+ENTITY_REPORT = (
+    "# 已清理报告\n\n"
+    "## 实体与参数清单\n"
+    "| 类别 | 实体/参数 | 数值/描述 | 证据 |\n"
+    "| --- | --- | --- | --- |\n"
+    "| 型号 | 指定实体 | engine | - |\n"
+)
+
+
+def _write_truth(path: Path, name: str, task: str = "GTF") -> None:
+    path.write_text(
+        json.dumps(
+            {"task": task, "entities": [{"name": name, "type": "型号"}]},
+            ensure_ascii=False,
+        ),
+        encoding="utf-8",
+    )
 
 
 def _raw_results():
@@ -71,7 +91,7 @@ def test_evaluate_saved_report_uses_exact_saved_text_and_adds_export_paths(tmp_p
 
     url_evaluator.assert_awaited_once_with(REPORT)
     source_evaluator.assert_called_once_with(REPORT)
-    entity_evaluator.assert_called_once_with(REPORT, "GTF")
+    entity_evaluator.assert_called_once_with(REPORT, "GTF", ground_truth_path=tmp_path / "truth.json")
     assert renderer.call_args.kwargs["summary"]["evaluation_report_paths"] == {
         "markdown": "", "word": "", "pdf": ""
     }
@@ -157,3 +177,55 @@ def test_resolve_active_ground_truth_path_uses_hashed_task_name(tmp_path):
     expected.write_text("{}", encoding="utf-8")
 
     assert report_evaluation.resolve_active_ground_truth_path("GTF / unsafe", tmp_path) == expected
+
+
+def _run_orchestration(report: str, ground_truth_path, output_dir: Path, monkeypatch, default_dir: Path):
+    _, urls, support = _raw_results()
+    monkeypatch.setattr(entity_evaluator, "get_ground_truth_dir", lambda: default_dir)
+    with (
+        patch.object(report_evaluation, "evaluate_link_accessibility", AsyncMock(return_value=urls)),
+        patch.object(report_evaluation, "evaluate_public_url_sources", Mock(return_value=support)),
+        patch.object(report_evaluation, "render_evaluation_report_markdown", Mock(return_value="# 测评")),
+        patch.object(report_evaluation, "export_evaluation_report", new=AsyncMock(return_value={
+            "markdown": "/outputs/evaluations/eval.md",
+            "word": "/outputs/evaluations/eval.docx",
+            "pdf": "/outputs/evaluations/eval.pdf",
+            "errors": [],
+        })),
+    ):
+        return asyncio.run(report_evaluation.evaluate_saved_report(
+            task="GTF", run_id="run-gt", report=report,
+            style_cleanup=None, ground_truth_path=ground_truth_path, output_dir=output_dir,
+        ))
+
+
+def test_evaluate_saved_report_scores_with_the_specified_ground_truth(tmp_path, monkeypatch):
+    default_dir = tmp_path / "default"
+    default_dir.mkdir()
+    _write_truth(default_dir / "GTF.json", "默认实体")
+    _write_truth(default_dir / "ground_truth.json", "通用实体")
+    specified = tmp_path / "active.json"
+    _write_truth(specified, "指定实体")
+
+    result = _run_orchestration(ENTITY_REPORT, specified, tmp_path, monkeypatch, default_dir)
+
+    entity = result["entity_eval"]
+    assert entity["mode"] == "strict"
+    assert entity["ground_truth_path"] == str(specified)
+    assert [item["name"] for item in entity["expected_entities"]] == ["指定实体"]
+    assert entity["metrics"]["overall"]["f1"] == 1.0
+    assert result["evaluation_summary"]["entity"]["overall"]["f1"] == 1.0
+
+
+def test_evaluate_saved_report_without_ground_truth_stays_in_proxy_mode(tmp_path, monkeypatch):
+    default_dir = tmp_path / "default"
+    default_dir.mkdir()
+    _write_truth(default_dir / "GTF.json", "默认实体")
+
+    result = _run_orchestration(ENTITY_REPORT, None, tmp_path, monkeypatch, default_dir)
+
+    entity = result["entity_eval"]
+    assert entity["mode"] == "proxy"
+    assert entity["ground_truth_status"] == "missing"
+    assert entity["metrics"] is None
+    assert result["evaluation_summary"]["entity"]["mode"] == "proxy"
