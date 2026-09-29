@@ -125,6 +125,28 @@ def _entity_detail_list(value: Any) -> list[Any]:
     allowed = ("entity", "name", "category", "value", "unit", "description", "evidence_supported")
     output: list[Any] = []
     for item in _safe_list(value):
+        if isinstance(item, dict) and (isinstance(item.get("predicted"), dict) or isinstance(item.get("expected"), dict)):
+            match: dict[str, Any] = {}
+            for key in ("category", "match_type"):
+                text = _safe_string(item.get(key))
+                if text:
+                    match[key] = text[:256]
+            for key in ("predicted", "expected"):
+                candidate = item.get(key)
+                if not isinstance(candidate, dict):
+                    continue
+                projected: dict[str, Any] = {}
+                for field in ("type", "category", "name", "value", "unit", "description"):
+                    text = _safe_string(candidate.get(field))
+                    if text:
+                        projected[field] = text[:256]
+                aliases = [_safe_string(alias)[:128] for alias in _safe_list(candidate.get("aliases"))]
+                aliases = [alias for alias in aliases if alias][:20]
+                if aliases:
+                    projected["aliases"] = aliases
+                match[key] = projected
+            output.append(match)
+            continue
         safe = _public_item(item, allowed, ("evidence_supported",))
         if safe is not None:
             output.append(safe)
@@ -247,7 +269,7 @@ def _failed_accessibility() -> tuple[dict[str, Any], list[dict[str, str]]]:
 
 def _accessibility_results(value: Any) -> list[Any]:
     fields = ("url", "checked_url", "status_code", "accessible", "method", "ssl_verified")
-    allowed_reasons = {"accessible", "http_status", "connection", "timeout", "ssl_certificate", "checker_exception", "invalid_url", "userinfo", "network_or_unknown"}
+    allowed_reasons = {"accessible", "http_status", "connection", "timeout", "ssl_certificate", "checker_exception", "invalid_url", "invalid_url_encoding", "dns_or_host", "userinfo", "network_or_unknown"}
     allowed_warnings = {"ssl_unverified", "redirected", "head_fallback"}
     result: list[Any] = []
     for item in _safe_list(value):

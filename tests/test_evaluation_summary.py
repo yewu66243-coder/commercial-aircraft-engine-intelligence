@@ -548,3 +548,36 @@ def test_evil_string_values_do_not_escape_whitelisting():
 
     assert summary["public_links"]["accessibility"]["status"] == "completed"
     assert "private string failure" not in repr(summary)
+
+
+def test_nested_entity_matches_keep_names_without_sensitive_fields_or_aliasing():
+    entity = _strict_entity()
+    match = {
+        "category": "engine", "match_type": "alias", "reason": "private matcher token",
+        "predicted": {"name": "Engine A", "type": "engine", "aliases": ["EA"], "debug_path": "C:/secret/a"},
+        "expected": {"name": "Engine A", "category": "engine", "source_path": "C:/secret/b"},
+    }
+    entity["matches"] = [match]
+    entity["correct_entities"] = [{"name": "Engine A"}]
+
+    summary = build_evaluation_summary(entity, _url_check(), _source_eval())
+    match["predicted"]["name"] = "mutated"
+
+    published = summary["entity"]["matched"][0]
+    assert published["category"] == "engine"
+    assert published["match_type"] == "alias"
+    assert published["predicted"]["name"] == "Engine A"
+    assert published["expected"]["name"] == "Engine A"
+    assert "secret" not in repr(summary)
+    assert "mutated" not in repr(summary)
+
+
+def test_real_accessibility_failure_reason_tokens_are_retained():
+    url = _url_check()
+    url["results"] = [{"accessible": False, "failure_reason": "invalid_url_encoding"}] * 100
+    summary = build_evaluation_summary(_strict_entity(), url, _source_eval())
+
+    assert summary["public_links"]["details"]["accessibility"][0]["failure_reason"] == "invalid_url_encoding"
+    url["results"] = [{"accessible": False, "failure_reason": "dns_or_host"}] * 100
+    summary = build_evaluation_summary(_strict_entity(), url, _source_eval())
+    assert summary["public_links"]["details"]["accessibility"][0]["failure_reason"] == "dns_or_host"
