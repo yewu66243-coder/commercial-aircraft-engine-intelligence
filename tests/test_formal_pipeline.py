@@ -12,10 +12,38 @@ from urllib.parse import unquote
 sys.path.insert(0, os.getcwd())
 
 
+def evaluation_result():
+    return {
+        'evaluated_at': '2026-09-29T12:00:00+08:00',
+        'url_check': {'accessibility_rate': 1, 'total_urls': 1, 'checked_urls': 1,
+                      'accessible_urls': 1, 'failed_urls': 0, 'skipped_urls': 0,
+                      'results': []},
+        'public_url_source_eval': {'relationship_count': 2, 'supported_count': 1,
+                                   'partially_supported_count': 1, 'unsupported_count': 0,
+                                   'unchecked_count': 0, 'support_accuracy': 0.5,
+                                   'requirement_met': False, 'relationships': []},
+        'entity_eval': {'extracted_count': 1, 'mode': 'proxy', 'metrics': None,
+                        'auto_evidence_eval': {'unchecked_count': 1}},
+        'evaluation_summary': {
+            'status': 'completed',
+            'entity': {'status': 'proxy', 'requirement_met': None},
+            'public_links': {
+                'accessibility': {'status': 'completed', 'requirement_met': True},
+                'claim_support': {'status': 'completed', 'requirement_met': False},
+            },
+            'style_cleanup': {'removed_count': 0},
+            'evaluation_report_paths': {'markdown': '', 'word': '', 'pdf': ''},
+            'errors': [],
+        },
+        'evaluation_report_paths': {'markdown': '', 'word': '', 'pdf': ''},
+        'evaluation_report_errors': [],
+    }
+
+
 class FormalPipelineTests(unittest.TestCase):
     def test_offline_pipeline_writes_real_word_pdf_and_markdown(self):
         from three_agent_service import ThreeAgentService, ThreeAgentRequestData
-        from test_formal_report import BASE
+        from tests.test_formal_report import BASE
         from docx import Document
         from pypdf import PdfReader
         service = ThreeAgentService(ThreeAgentRequestData(task='GTF离线验收', report_source='web'))
@@ -27,11 +55,9 @@ class FormalPipelineTests(unittest.TestCase):
             stack.enter_context(patch.object(service, 'research_agent', new=AsyncMock(return_value=[])))
             stack.enter_context(patch.object(service, 'collect_report_images'))
             stack.enter_context(patch.object(service, 'writer_agent', new=AsyncMock(return_value=BASE)))
-            stack.enter_context(patch.object(service, 'inspect_report_urls', new=AsyncMock(return_value={})))
             stack.enter_context(patch.object(service, 'append_evaluation_record', return_value='offline-record'))
-            stack.enter_context(patch('three_agent_service.evaluate_public_url_sources', return_value={}))
-            stack.enter_context(patch('three_agent_service.prune_redundant_unchecked_url_citations', side_effect=lambda text, stats: (text, {})))
-            stack.enter_context(patch('three_agent_service.evaluate_report_entities', return_value={}))
+            stack.enter_context(patch('three_agent_service.evaluate_saved_report',
+                                      new=AsyncMock(return_value=evaluation_result())))
             try:
                 os.chdir(temporary)
                 result = asyncio.run(service.run())
@@ -48,11 +74,9 @@ class FormalPipelineTests(unittest.TestCase):
 
     def test_pipeline_evaluates_original_ids_and_publishes_only_numbered_report(self):
         from three_agent_service import ThreeAgentService, ThreeAgentRequestData
-        from test_formal_report import BASE
+        from tests.test_formal_report import BASE
         service = ThreeAgentService(ThreeAgentRequestData(task='GTF研究', report_source='web'))
         service.generation_status = 'ready'
-        url_check = {'accessibility_rate': 1, 'total_urls': 1, 'checked_urls': 1,
-                     'accessible_urls': 1, 'failed_urls': 0, 'results': []}
         saved = []
         annotated = BASE.replace('35天[URL8]', '35天[URL8]（该点待后续核验）', 1)
         with ExitStack() as stack:
@@ -61,16 +85,14 @@ class FormalPipelineTests(unittest.TestCase):
             stack.enter_context(patch.object(service, 'research_agent', new=AsyncMock(return_value=[])))
             stack.enter_context(patch.object(service, 'collect_report_images'))
             stack.enter_context(patch.object(service, 'writer_agent', new=AsyncMock(return_value=annotated)))
-            stack.enter_context(patch.object(service, 'inspect_report_urls', new=AsyncMock(return_value=url_check)))
             stack.enter_context(patch.object(service, 'append_evaluation_record', side_effect=lambda record: saved.append(record) or 'record.json'))
-            source_check = stack.enter_context(patch('three_agent_service.evaluate_public_url_sources', return_value={'supported_count': 1}))
-            stack.enter_context(patch('three_agent_service.prune_redundant_unchecked_url_citations', side_effect=lambda text, stats: (text, {'changed': False})))
-            stack.enter_context(patch('three_agent_service.evaluate_report_entities', return_value={'extracted_count': 1, 'auto_evidence_eval': {'unchecked_count': 1}}))
+            evaluator = stack.enter_context(patch('three_agent_service.evaluate_saved_report',
+                                      new=AsyncMock(return_value=evaluation_result())))
             md = stack.enter_context(patch('three_agent_service.write_text_to_md', new=AsyncMock(return_value='outputs/report.md')))
             word = stack.enter_context(patch('three_agent_service.write_md_to_word', new=AsyncMock(return_value='outputs/report.docx')))
             stack.enter_context(patch('three_agent_service.write_md_to_pdf', new=AsyncMock(return_value='')))
             result = asyncio.run(service.run())
-        self.assertIn('[URL8]', source_check.call_args.args[0])
+        self.assertIn('[URL8]', evaluator.await_args.kwargs['report'])
         self.assertNotIn('[URL8]', result['report'])
         self.assertNotIn('运行统计', result['report'])
         self.assertEqual(md.call_args.args[0], word.call_args.args[0])
@@ -84,6 +106,10 @@ class FormalPipelineTests(unittest.TestCase):
         self.assertIn('该点待后续核验', saved[0]['evidence_report'])
         self.assertEqual(len(saved[0]['verification_notes']), 1)
         self.assertFalse(any('文件全部生成完毕' in item['message'] for item in result['trace']))
+        self.assertTrue(any(
+            '2 条断言—公开链接关系' in item['message'] and '完全支撑 1 条' in item['message']
+            for item in result['trace']
+        ))
 
     def test_writer_failure_is_explicit_draft_in_service(self):
         from three_agent_service import ThreeAgentService, ThreeAgentRequestData

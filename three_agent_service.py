@@ -3,20 +3,15 @@ from __future__ import annotations
 import asyncio
 import copy
 import os
-import json
-import shutil
 import re
 import uuid
 import time
-import ssl
 import logging
 from dataclasses import dataclass, replace
 from datetime import datetime
 from pathlib import Path
 from typing import Any, Dict, List, Optional
-from urllib.parse import quote, urlsplit, urlunsplit
-from urllib.error import HTTPError, URLError
-from urllib.request import Request, urlopen
+from urllib.parse import urlsplit
 
 from gpt_researcher import GPTResearcher
 # 👇 就是下面这一行，一定要确保有！
@@ -36,13 +31,22 @@ from backend.reporting.detail_profiles import (
 )
 from backend.reporting.image_evidence import insert_missing_figures
 from backend.reporting.source_grounding import build_source_catalog, pack_sources
-from backend.reporting.finalization import finalize_report
+from backend.reporting.finalization import clean_formal_report_style, finalize_report
 from gpt_researcher.document.local_index import SelectedLocalPaper, prepare_local_docs_for_query
 from gpt_researcher.document.local_image_extractor import extract_local_report_images
-from gpt_researcher.evaluation.entity_evaluator import evaluate_report_entities
-from gpt_researcher.evaluation.source_evaluator import (
-    evaluate_public_url_sources,
-    prune_redundant_unchecked_url_citations,
+from gpt_researcher.evaluation.evaluation_summary import build_evaluation_summary
+from gpt_researcher.evaluation.link_accessibility import (
+    check_url_sync,
+    clean_url_candidate,
+    classify_url_error,
+    evaluate_link_accessibility,
+    extract_public_urls,
+    normalize_url_for_request,
+)
+from gpt_researcher.evaluation.records import EvaluationRecordStore
+from gpt_researcher.evaluation.report_evaluation import (
+    evaluate_saved_report,
+    resolve_active_ground_truth_path,
 )
 from gpt_researcher.intelligence_templates import (
     build_demand_query,
@@ -60,6 +64,52 @@ except Exception:  # pragma: no cover
 
 class ModelProviderConfigurationError(ValueError):
     """Raised when a selected report model is unavailable or misconfigured."""
+
+
+def _failed_evaluation_summary(style_cleanup: Any = None) -> Dict[str, Any]:
+    """Return a stable public summary even when summary assembly itself fails."""
+    removed_count = 0
+    if isinstance(style_cleanup, dict):
+        candidate = style_cleanup.get("removed_count")
+        if isinstance(candidate, int) and not isinstance(candidate, bool) and candidate >= 0:
+            removed_count = candidate
+    accessibility = {
+        "status": "evaluation_failed", "threshold": 0.98,
+        "total_count": 0, "checked_count": 0, "accessible_count": 0,
+        "inaccessible_count": 0, "rate": None, "requirement_met": None,
+        "results": [],
+    }
+    claim_support = {
+        "status": "evaluation_failed", "threshold": 0.90,
+        "relationship_count": 0, "supported_count": 0,
+        "partially_supported_count": 0, "unsupported_count": 0,
+        "unchecked_count": 0, "accuracy": None, "requirement_met": None,
+        "relationships": [],
+    }
+    return {
+        "status": "failed",
+        "entity": {
+            "mode": "proxy", "status": "evaluation_failed",
+            "ground_truth_path": "", "threshold": 0.90, "overall": None,
+            "categories": {}, "matched": [], "false_positives": [],
+            "false_negatives": [], "proxy_evidence_support_rate": None,
+            "message": "实体抽取测评汇总未完成。",
+        },
+        "public_links": {
+            "accessibility": accessibility, "claim_support": claim_support,
+            "details": {"accessibility": [], "claim_support": []},
+            "status": "evaluation_failed", "threshold": 0.98,
+            "total_count": 0, "checked_count": 0, "accessible_count": 0,
+            "inaccessible_count": 0, "accessibility_rate": None,
+            "requirement_met": None,
+        },
+        "errors": [{
+            "scope": "evaluation_summary", "code": "evaluation_failed",
+            "message": "测评结果汇总未完成，报告导出已继续。",
+        }],
+        "style_cleanup": {"removed_count": removed_count},
+        "evaluation_report_paths": {"markdown": "", "word": "", "pdf": ""},
+    }
 
 
 @dataclass(frozen=True)
@@ -564,217 +614,34 @@ class ThreeAgentService:
 
     @staticmethod
     def _extract_urls(report: str) -> List[str]:
-        terminators = set(' \t\r\n<>"\'`()|[]{}，。；;、（）】》”’')
-        urls = []
-        seen = set()
-        text = report or ""
-        for match in re.finditer(r"https?://", text):
-            start = match.start()
-            end = start
-            while end < len(text) and text[end] not in terminators:
-                end += 1
-            url = ThreeAgentService._clean_url_candidate(text[start:end])
-            if url and url not in seen:
-                urls.append(url)
-                seen.add(url)
-        return urls
+        return extract_public_urls(report)
 
     @staticmethod
     def _clean_url_candidate(url: str) -> str:
-        cleaned = (url or "").strip()
-        cleaned = cleaned.strip('<>"\'`')
-        cleaned = cleaned.rstrip(".,;:!?。；，、)]}）】》")
-        if not cleaned.startswith(("http://", "https://")):
-            return ""
-        parsed = urlsplit(cleaned)
-        if not parsed.scheme or not parsed.netloc:
-            return ""
-        return cleaned
+        return clean_url_candidate(url)
 
     @staticmethod
     def _normalize_url_for_request(url: str) -> str:
-        parsed = urlsplit(url)
-        netloc = parsed.netloc.encode("idna").decode("ascii")
-        path = quote(parsed.path or "/", safe="/%:@-._~!$&'()*+,;=")
-        query = quote(parsed.query, safe="=&?/%:@-._~!$'()*+,;")
-        return urlunsplit((parsed.scheme, netloc, path, query, ""))
+        return normalize_url_for_request(url)
 
     @staticmethod
     def _classify_url_error(error: str, status_code: Optional[int] = None) -> str:
-        lower_error = (error or "").lower()
-        if status_code is not None:
-            return "http_status"
-        if "certificate_verify_failed" in lower_error or "ssl" in lower_error:
-            return "ssl_certificate"
-        if "timed out" in lower_error or "timeout" in lower_error:
-            return "timeout"
-        if "codec can't encode" in lower_error or "ordinal not in range" in lower_error:
-            return "invalid_url_encoding"
-        if "no host" in lower_error or "name or service not known" in lower_error:
-            return "dns_or_host"
-        if "invalid" in lower_error:
-            return "invalid_url"
-        return "network_or_unknown"
+        return classify_url_error(error, status_code)
 
     @staticmethod
     def _check_url_sync(url: str, timeout: int = 6) -> Dict[str, Any]:
-        headers = {"User-Agent": "Mozilla/5.0 Intelligence-System-URL-Check"}
-        original_url = url
-        try:
-            checked_url = ThreeAgentService._normalize_url_for_request(url)
-        except Exception as exc:
-            return {
-                "url": original_url,
-                "checked_url": url,
-                "status_code": None,
-                "accessible": False,
-                "method": "normalize",
-                "ssl_verified": None,
-                "error": str(exc),
-                "failure_reason": "invalid_url_encoding",
-                "warning": "",
-            }
+        return check_url_sync(url, timeout)
 
-        attempts = [
-            ("HEAD", None, True),
-            ("GET", None, True),
-        ]
-        last_error = ""
-        ssl_error_seen = False
-        for method, context, ssl_verified in attempts:
-            try:
-                request = Request(checked_url, headers=headers, method=method)
-                with urlopen(request, timeout=timeout, context=context) as response:
-                    status_code = int(getattr(response, "status", 0) or response.getcode())
-                accessible = 200 <= status_code < 400 or status_code in {401, 403, 405}
-                return {
-                    "url": original_url,
-                    "checked_url": checked_url,
-                    "status_code": status_code,
-                    "accessible": accessible,
-                    "method": method,
-                    "ssl_verified": ssl_verified,
-                    "error": "",
-                    "failure_reason": "" if accessible else "http_status",
-                    "warning": "" if ssl_verified else "SSL 证书校验失败后使用非验证模式完成可访问性检测",
-                }
-            except HTTPError as exc:
-                status_code = int(exc.code)
-                if method == "HEAD" and status_code in {403, 405}:
-                    continue
-                return {
-                    "url": original_url,
-                    "checked_url": checked_url,
-                    "status_code": status_code,
-                    "accessible": status_code in {401, 403, 405},
-                    "method": method,
-                    "ssl_verified": ssl_verified,
-                    "error": str(exc),
-                    "failure_reason": "" if status_code in {401, 403, 405} else "http_status",
-                    "warning": "" if ssl_verified else "SSL 证书校验失败后使用非验证模式完成 HTTP 状态检测",
-                }
-            except URLError as exc:
-                last_error = str(exc.reason)
-                ssl_error_seen = ssl_error_seen or isinstance(exc.reason, ssl.SSLError) or "CERTIFICATE_VERIFY_FAILED" in last_error
-            except Exception as exc:
-                last_error = str(exc)
-                ssl_error_seen = ssl_error_seen or isinstance(exc, ssl.SSLError) or "CERTIFICATE_VERIFY_FAILED" in last_error
-
-        if ssl_error_seen and checked_url.startswith("https://"):
-            unverified_context = ssl._create_unverified_context()
-            for method in ("HEAD", "GET"):
-                try:
-                    request = Request(checked_url, headers=headers, method=method)
-                    with urlopen(request, timeout=timeout, context=unverified_context) as response:
-                        status_code = int(getattr(response, "status", 0) or response.getcode())
-                    accessible = 200 <= status_code < 400 or status_code in {401, 403, 405}
-                    return {
-                        "url": original_url,
-                        "checked_url": checked_url,
-                        "status_code": status_code,
-                        "accessible": accessible,
-                        "method": f"{method}_SSL_UNVERIFIED",
-                        "ssl_verified": False,
-                        "error": "" if accessible else last_error,
-                        "failure_reason": "" if accessible else "ssl_certificate",
-                        "warning": "SSL 证书校验失败，但链接在非验证模式下可访问；建议人工确认站点证书链。",
-                    }
-                except HTTPError as exc:
-                    status_code = int(exc.code)
-                    if method == "HEAD" and status_code in {403, 405}:
-                        continue
-                    return {
-                        "url": original_url,
-                        "checked_url": checked_url,
-                        "status_code": status_code,
-                        "accessible": status_code in {401, 403, 405},
-                        "method": f"{method}_SSL_UNVERIFIED",
-                        "ssl_verified": False,
-                        "error": str(exc),
-                        "failure_reason": "" if status_code in {401, 403, 405} else "http_status",
-                        "warning": "SSL 证书校验失败，已使用非验证模式复查。",
-                    }
-                except Exception as exc:
-                    last_error = str(exc)
-
-        failure_reason = ThreeAgentService._classify_url_error(last_error)
-        return {
-            "url": original_url,
-            "checked_url": checked_url,
-            "status_code": None,
-            "accessible": False,
-            "method": "HEAD/GET",
-            "ssl_verified": True,
-            "error": last_error,
-            "failure_reason": failure_reason,
-            "warning": "",
-        }
-
-    async def inspect_report_urls(self, report: str, max_urls: int = 50) -> Dict[str, Any]:
-        urls = self._extract_urls(report)
-        checked_urls = urls[:max_urls]
-        skipped_count = max(0, len(urls) - len(checked_urls))
-        if not checked_urls:
-            return {
-                "total_urls": 0,
-                "checked_urls": 0,
-                "accessible_urls": 0,
-                "failed_urls": 0,
-                "accessibility_rate": None,
-                "skipped_urls": skipped_count,
-                "ssl_unverified_accessible_urls": 0,
-                "failure_reasons": {},
-                "results": [],
-            }
-
-        tasks = [asyncio.to_thread(self._check_url_sync, url) for url in checked_urls]
-        results = await asyncio.gather(*tasks)
-        accessible_count = sum(1 for item in results if item.get("accessible"))
-        failed_count = len(results) - accessible_count
-        ssl_unverified_count = sum(
-            1 for item in results if item.get("accessible") and item.get("ssl_verified") is False
+    async def inspect_report_urls(
+        self, report: str, max_urls: Optional[int] = None
+    ) -> Dict[str, Any]:
+        return await evaluate_link_accessibility(
+            report, max_urls=max_urls, checker=self._check_url_sync
         )
-        failure_reasons: Dict[str, int] = {}
-        for item in results:
-            reason = item.get("failure_reason") or ("accessible" if item.get("accessible") else "network_or_unknown")
-            failure_reasons[reason] = failure_reasons.get(reason, 0) + 1
-        rate = round(accessible_count / len(results), 4) if results else None
-        return {
-            "total_urls": len(urls),
-            "checked_urls": len(results),
-            "accessible_urls": accessible_count,
-            "failed_urls": failed_count,
-            "accessibility_rate": rate,
-            "skipped_urls": skipped_count,
-            "ssl_unverified_accessible_urls": ssl_unverified_count,
-            "failure_reasons": failure_reasons,
-            "results": results,
-        }
 
     def build_run_statistics_section(self, stats: Dict[str, Any]) -> str:
         url_stats = stats["url_check"]
         url_source_eval = stats.get("public_url_source_eval") or {}
-        url_cleanup = stats.get("public_url_cleanup") or {}
         entity_eval = stats.get("entity_eval") or {}
         auto_evidence_eval = entity_eval.get("auto_evidence_eval") or {}
         rate = url_stats.get("accessibility_rate")
@@ -833,6 +700,8 @@ class ThreeAgentService:
                 "dns_or_host": "域名/主机异常",
                 "invalid_url": "URL格式异常",
                 "http_status": "HTTP状态异常",
+                "connection": "连接异常",
+                "checker_exception": "检查器异常",
                 "network_or_unknown": "网络或未知异常",
             }
             failure_reason_text = "；".join(
@@ -877,26 +746,22 @@ class ThreeAgentService:
             f"| 可访问 URL 数量 | {url_stats['accessible_urls']} |\n",
             f"| 异常 URL 数量 | {url_stats['failed_urls']} |\n",
             f"| URL 可访问率 | {rate_text} |\n",
-            f"| 正文引用 URL 编号数量 | {url_source_eval.get('cited_url_ref_count', 0)} |\n",
-            f"| 公开URL溯源支撑通过数量 | {url_source_eval.get('supported_count', 0)} |\n",
-            f"| 公开URL溯源部分支撑数量 | {url_source_eval.get('partially_supported_count', 0)} |\n",
-            f"| 公开URL溯源未支撑数量 | {url_source_eval.get('unsupported_count', 0)} |\n",
-            f"| 公开URL溯源未核验数量 | {url_source_eval.get('unchecked_count', 0)} |\n",
-            f"| 已剔除冗余未核验URL引用数量 | {len(url_cleanup.get('removed_redundant_url_refs') or [])} |\n",
-            f"| 已替换为本地原文引用的URL数量 | {len(url_cleanup.get('replaced_url_refs_with_local_refs') or {})} |\n",
-            f"| 已移除冗余URL来源条目数量 | {len(url_cleanup.get('removed_evidence_source_refs') or [])} |\n",
-            f"| 唯一证据未核验URL风险数量 | {len(url_cleanup.get('sole_unchecked_url_risks') or [])} |\n",
-            f"| 公开信息溯源链接准确率 | {url_source_accuracy_text} |\n",
-            f"| 公开信息溯源链接准确率要求 | {url_source_requirement_text} |\n",
+            f"| 断言—公开链接关系数量 | {url_source_eval.get('relationship_count', 0)} |\n",
+            f"| 公开链接支撑关系数量 | {url_source_eval.get('supported_count', 0)} |\n",
+            f"| 公开链接部分支撑关系数量 | {url_source_eval.get('partially_supported_count', 0)} |\n",
+            f"| 公开链接未支撑关系数量 | {url_source_eval.get('unsupported_count', 0)} |\n",
+            f"| 公开链接未核验关系数量 | {url_source_eval.get('unchecked_count', 0)} |\n",
+            f"| 断言—公开链接关系支撑准确率 | {url_source_accuracy_text} |\n",
+            f"| 断言—公开链接关系支撑准确率要求 | {url_source_requirement_text} |\n",
             f"| SSL 降级后可访问 URL 数量 | {url_stats.get('ssl_unverified_accessible_urls', 0)} |\n",
             f"| 异常原因统计 | {self._escape_markdown_table_cell(failure_reason_text)} |\n",
             f"| 异常 URL 摘要 | {self._escape_markdown_table_cell(failed_preview)} |\n",
         ]
         rows.append(
-            "\n> 注：URL 可访问率只检测链接能否打开；公开信息溯源链接准确率会进一步读取正文引用的 URL 内容，并判断其是否支撑引用句。\n"
+            "\n> 注：URL 可访问率只检测链接能否打开；关系支撑准确率会进一步读取所引 URL 的正文，并逐条判断其是否支撑相邻断言。\n"
         )
         rows.append(
-            "> 注：公开信息溯源链接准确率的分母为正文中被 `[URLn]` 引用的公开链接编号；无法读取正文的 URL 按未核验计入分母。\n"
+            "> 注：关系支撑准确率的分母为正文中的断言—公开链接关系总数；分子仅计完全支撑的关系。部分支撑、未支撑及未核验关系均计入分母。\n"
         )
         rows.append(
             "> 注：若某条未核验 URL 与本地 `[原文n]` 同时支撑同一句结论，系统会自动删除该 URL 正文引用和证据来源条目；若 URL 是唯一证据，则保留并计入溯源风险。\n"
@@ -913,26 +778,7 @@ class ThreeAgentService:
         return "".join(rows)
 
     def append_evaluation_record(self, record: Dict[str, Any]) -> str:
-        records_dir = Path(__file__).resolve().parent / "outputs" / "records"
-        records_dir.mkdir(parents=True, exist_ok=True)
-        records_path = records_dir / "evaluation_records.json"
-
-        records: List[Dict[str, Any]] = []
-        if records_path.exists():
-            try:
-                with records_path.open("r", encoding="utf-8") as handle:
-                    loaded = json.load(handle)
-                if isinstance(loaded, list):
-                    records = loaded
-            except Exception as exc:
-                backup_path = records_path.with_suffix(f".broken_{int(time.time())}.json")
-                shutil.copy2(records_path, backup_path)
-                self._log("Evaluation Agent", f"历史测试记录读取失败，已备份为 {backup_path.name}。原因: {exc}")
-
-        records.append(record)
-        with records_path.open("w", encoding="utf-8") as handle:
-            json.dump(records, handle, ensure_ascii=False, indent=2)
-        return str(records_path)
+        return EvaluationRecordStore().append_run(record)
 
     async def pre_search_abstracts(self):
         scopes = self.selected_search_scopes()
@@ -1389,23 +1235,62 @@ class ThreeAgentService:
         final_report = await self.writer_agent(sections)
         final_report = self.ensure_report_title(final_report)
         final_report = self.ensure_report_images_inserted(final_report)
-        self._log("Evaluation Agent", "正在核验正文引用 URL 是否支撑相邻结论。")
-        public_url_source_eval = await asyncio.to_thread(evaluate_public_url_sources, final_report)
-        final_report, public_url_cleanup = prune_redundant_unchecked_url_citations(
-            final_report,
-            public_url_source_eval,
-        )
-        cleaned_report = final_report
         final_report = await self.editorial_agent(final_report)
-        if public_url_cleanup.get("changed") or final_report != cleaned_report:
-            self._log(
-                "Evaluation Agent",
-                "已完成引用整理与成稿校订，正在重新计算最终正文的公开 URL 溯源指标。",
+        cleaned_report, report_style_cleanup = clean_formal_report_style(final_report)
+        self._log("Evaluation Agent", "正在测评规范清理后的最终报告。")
+        try:
+            evaluation = await evaluate_saved_report(
+                task=self.request.task,
+                run_id=run_id,
+                report=cleaned_report,
+                style_cleanup=report_style_cleanup,
+                ground_truth_path=resolve_active_ground_truth_path(self.request.task),
+                selected_sources=self.selected_local_papers,
             )
-            public_url_source_eval = await asyncio.to_thread(evaluate_public_url_sources, final_report)
-        self._log("Evaluation Agent", "正在统计运行耗时并检测最终报告中的公开 URL 可访问性。")
-        url_check = await self.inspect_report_urls(final_report)
-        entity_eval = evaluate_report_entities(final_report, self.request.task, self.selected_local_papers)
+        except Exception as exc:
+            logging.getLogger(__name__).exception("Evaluation orchestration failed")
+            entity_eval = {
+                "status": "evaluation_failed", "mode": "proxy", "metrics": None,
+                "ground_truth_path": "", "ground_truth_error_code": "",
+                "ground_truth_message": "", "extracted_count": 0,
+                "evidence_supported_count": 0, "auto_evidence_eval": {},
+                "note": "实体抽取测评未完成。", "evaluation_error": type(exc).__name__,
+            }
+            url_check = {
+                "total_urls": 0, "checked_urls": 0, "accessible_urls": 0,
+                "failed_urls": 0, "accessibility_rate": None, "skipped_urls": 0,
+                "ssl_unverified_accessible_urls": 0, "failure_reasons": {},
+                "results": [], "evaluation_error": type(exc).__name__,
+            }
+            public_url_source_eval = {
+                "relationship_count": 0, "supported_count": 0,
+                "partially_supported_count": 0, "unsupported_count": 0,
+                "unchecked_count": 0, "support_accuracy": None,
+                "relationships": [], "evaluation_error": type(exc).__name__,
+            }
+            try:
+                evaluation_summary = build_evaluation_summary(
+                    entity_eval, url_check, public_url_source_eval,
+                    style_cleanup=report_style_cleanup,
+                )
+            except Exception:
+                logging.getLogger(__name__).exception("Evaluation summary fallback failed")
+                evaluation_summary = _failed_evaluation_summary(report_style_cleanup)
+            evaluation_report_paths = {"markdown": "", "word": "", "pdf": ""}
+            evaluation = {
+                "evaluated_at": self._now_iso(), "entity_eval": entity_eval,
+                "url_check": url_check, "public_url_source_eval": public_url_source_eval,
+                "evaluation_summary": evaluation_summary,
+                "evaluation_report_paths": evaluation_report_paths,
+                "evaluation_report_errors": [
+                    {"format": "all", "code": "evaluation_failed", "message": "测评未完成。"}
+                ],
+            }
+        entity_eval = evaluation["entity_eval"]
+        url_check = evaluation["url_check"]
+        public_url_source_eval = evaluation["public_url_source_eval"]
+        evaluation_summary = evaluation["evaluation_summary"]
+        evaluation_report_paths = evaluation["evaluation_report_paths"]
         self._log(
             "Evaluation Agent",
             f"已抽取 {entity_eval.get('extracted_count', 0)} 个实体/参数，"
@@ -1414,17 +1299,17 @@ class ThreeAgentService:
         )
         self._log(
             "Evaluation Agent",
-            f"公开 URL 溯源支撑核验通过 {public_url_source_eval.get('supported_count', 0)} 个，"
-            f"部分支撑 {public_url_source_eval.get('partially_supported_count', 0)} 个，"
-            f"未支撑 {public_url_source_eval.get('unsupported_count', 0)} 个，"
-            f"未核验 {public_url_source_eval.get('unchecked_count', 0)} 个；"
-            f"已移除冗余未核验 URL {len(public_url_cleanup.get('removed_redundant_url_refs') or [])} 个。",
+            f"共 {public_url_source_eval.get('relationship_count', 0)} 条断言—公开链接关系："
+            f"完全支撑 {public_url_source_eval.get('supported_count', 0)} 条，"
+            f"部分支撑 {public_url_source_eval.get('partially_supported_count', 0)} 条，"
+            f"未支撑 {public_url_source_eval.get('unsupported_count', 0)} 条，"
+            f"未核验 {public_url_source_eval.get('unchecked_count', 0)} 条。",
         )
         stats_ready_elapsed = time.perf_counter() - started_perf
-        inserted_report_image_count = self.count_inserted_report_images(final_report)
+        inserted_report_image_count = self.count_inserted_report_images(cleaned_report)
         effective_query_domains = self.effective_query_domains()
         run_stats = {
-            "record_version": "1.3.0",
+            "record_version": "3.0.0",
             "run_id": run_id,
             "task": self.request.task,
             "model_provider": runtime.public_metadata(),
@@ -1468,18 +1353,22 @@ class ThreeAgentService:
             "report_image_candidate_count": len(self.report_images),
             "url_check": url_check,
             "public_url_source_eval": public_url_source_eval,
-            "public_url_cleanup": public_url_cleanup,
             "started_at": started_at,
             "stats_ready_at": self._now_iso(),
             "duration_seconds": round(stats_ready_elapsed, 2),
             "duration_minutes": round(stats_ready_elapsed / 60, 2),
             "entity_eval": entity_eval,
+            "evaluation_summary": evaluation_summary,
+            "report_style_cleanup": report_style_cleanup,
+            "evaluation_report_paths": evaluation_report_paths,
+            "evaluation_report_errors": evaluation.get("evaluation_report_errors", []),
+            "evaluated_at": evaluation.get("evaluated_at"),
         }
         # Preserve the evaluated evidence IDs and original draft for audit. Public numbering
         # is applied only after the existing source/entity evaluators have finished.
-        audit_report = final_report
+        audit_report = cleaned_report
         prepared = prepare_formal_report(
-            final_report, self.request.task, self.selected_local_papers,
+            cleaned_report, self.request.task, self.selected_local_papers,
             metadata={
                 "generation_status": self.generation_status,
                 "generation_warning": self.generation_warning,
@@ -1517,7 +1406,7 @@ class ThreeAgentService:
         if report_quality["warnings"] and report_quality["status"] == "ready":
             report_quality["status"] = "needs_review"
         run_stats.update({
-            "record_version": "2.0.0", "report_format": "academic-report-v1",
+            "record_version": "3.0.0", "report_format": "academic-report-v1",
             "report_type": self.request.report_type,
             "report_detail": self.detail_profile.public_metadata() if self.detail_profile else None,
             "report_quality": report_quality, "citation_map": prepared.citation_map,
@@ -1586,9 +1475,11 @@ class ThreeAgentService:
                 },
                 "validation_summary": {
                     "time_requirement_met": completed_elapsed <= 30 * 60,
-                    "url_accessibility_requirement_met": (
-                        url_check.get("accessibility_rate") is not None
-                        and url_check.get("accessibility_rate", 0) >= 0.98
+                    "url_accessibility_requirement_met": evaluation_summary[
+                        "public_links"
+                    ].get("accessibility", {}).get(
+                        "requirement_met",
+                        evaluation_summary["public_links"].get("requirement_met"),
                     ),
                     "url_requirement_met": (
                         public_url_source_eval.get("requirement_met")

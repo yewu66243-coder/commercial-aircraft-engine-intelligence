@@ -289,7 +289,9 @@ class ModelProviderSelectionTests(unittest.TestCase):
             item for item in catalog_response.json()["providers"] if item["id"] == "qwen"
         )["configured"])
         self.assertEqual(report_response.status_code, 400)
-        self.assertIn("DASHSCOPE_API_KEY", report_response.json()["detail"])
+        detail = report_response.json()["detail"]
+        self.assertEqual(detail["code"], "MODEL_CONFIG_ERROR")
+        self.assertIn("DASHSCOPE_API_KEY", detail["technical_detail"])
 
     def test_explicit_request_base_url_wins_over_global_openai_base(self):
         from gpt_researcher.utils import llm

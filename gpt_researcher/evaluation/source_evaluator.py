@@ -8,8 +8,10 @@ from gpt_researcher.evaluation.entity_evaluator import (
     URL_RE,
     _extract_evidence_map,
     _important_terms,
+    _is_table_separator,
     _numbers_in_text,
     _read_url_text,
+    _split_markdown_row,
     _term_hit_count,
 )
 
@@ -17,6 +19,10 @@ from gpt_researcher.evaluation.entity_evaluator import (
 PUBLIC_URL_SOURCE_THRESHOLD = 0.98
 URL_REF_RE = re.compile(r"\[URL\s*\d+\]", re.IGNORECASE)
 LOCAL_REF_RE = re.compile(r"\[(?:原文|文献)\s*\d+\]", re.IGNORECASE)
+EVIDENCE_DIRECTORY_TITLE_RE = re.compile(
+    r"(?:(?:\d+(?:\.\d+)*[.、．]?|[一二三四五六七八九十]+[、.．])\s*)?"
+    r"(?:证据来源列表|证据来源|来源列表)\s*[：:]?"
+)
 
 
 def _analysis_report_body(report: str) -> str:
@@ -53,37 +59,91 @@ def _strip_markdown_for_claim(text: str) -> str:
     return cleaned.strip(" -*#；;。")
 
 
-def _extract_url_reference_contexts(report: str) -> Dict[str, List[str]]:
+def _extract_url_claim_relationships(report: str) -> List[Dict[str, str]]:
     body = _analysis_report_body(report)
-    contexts: Dict[str, List[str]] = {}
-    in_evidence_list = False
+    relationships: List[Dict[str, str]] = []
+    previous_claim = ""
+    in_evidence_directory = False
 
-    for line in body.splitlines():
+    lines = body.splitlines()
+    for index, line in enumerate(lines):
         stripped = line.strip()
         if not stripped:
+            previous_claim = ""
             continue
-        if "证据来源" in stripped or "来源列表" in stripped:
-            in_evidence_list = True
+        heading = re.match(r"^#{1,6}\s+(.+?)\s*#*\s*$", stripped)
+        if heading:
+            in_evidence_directory = bool(EVIDENCE_DIRECTORY_TITLE_RE.fullmatch(heading.group(1).strip()))
+            previous_claim = ""
             continue
-        if in_evidence_list:
-            if stripped.startswith("#") and "证据来源" not in stripped and "来源列表" not in stripped:
-                in_evidence_list = False
-            elif _line_is_evidence_source(stripped):
+        if in_evidence_directory:
+            previous_claim = ""
+            continue
+        if re.fullmatch(r"(?:证据来源|来源列表)\s*[：:]?", stripped):
+            previous_claim = ""
+            continue
+        if _line_is_evidence_source(stripped):
+            previous_claim = ""
+            continue
+
+        line_relationships: List[tuple[str, str]] = []
+        cells = _split_markdown_row(stripped)
+        if cells:
+            next_cells = _split_markdown_row(lines[index + 1]) if index + 1 < len(lines) else []
+            if _is_table_separator(cells) or (next_cells and _is_table_separator(next_cells)):
+                previous_claim = ""
                 continue
+            pending_parts: List[str] = []
+            last_claim = ""
+            for cell in cells:
+                last_end = 0
+                for match in URL_REF_RE.finditer(cell):
+                    part = _strip_markdown_for_claim(cell[last_end : match.start()])
+                    if part:
+                        pending_parts.append(part)
+                    claim = " ".join(pending_parts) or last_claim
+                    if claim:
+                        line_relationships.append((match.group(0), claim))
+                        last_claim = claim
+                    pending_parts = []
+                    last_end = match.end()
+                tail = _strip_markdown_for_claim(cell[last_end:])
+                if tail:
+                    pending_parts.append(tail)
+            previous_claim = ""
+        else:
+            refs = list(URL_REF_RE.finditer(line))
+            if refs and not _strip_markdown_for_claim(line):
+                line_relationships.extend((match.group(0), previous_claim) for match in refs if previous_claim)
+            else:
+                for match in refs:
+                    preceding_parts = re.split(
+                        r"[。！？!?；;|，]|" + URL_REF_RE.pattern,
+                        line[: match.start()],
+                        flags=re.IGNORECASE,
+                    )
+                    claim = next(
+                        (
+                            cleaned
+                            for part in reversed(preceding_parts)
+                            if (cleaned := _strip_markdown_for_claim(part))
+                        ),
+                        "",
+                    )
+                    if claim:
+                        line_relationships.append((match.group(0), claim))
+            previous_claim = "" if refs else _strip_markdown_for_claim(line)
 
-        refs = [match.group(0) for match in URL_REF_RE.finditer(stripped)]
-        if not refs:
-            continue
+        for ref, claim in line_relationships:
+            relationships.append(
+                {
+                    "relationship_id": f"relationship-{len(relationships) + 1:06d}",
+                    "ref": _normalize_ref(ref),
+                    "claim": claim,
+                }
+            )
 
-        claim = _strip_markdown_for_claim(stripped)
-        if not claim:
-            continue
-        for ref in refs:
-            contexts.setdefault(ref, [])
-            if claim not in contexts[ref]:
-                contexts[ref].append(claim)
-
-    return contexts
+    return relationships
 
 
 def _body_and_tail(report: str) -> tuple[str, str]:
@@ -290,7 +350,14 @@ def prune_redundant_unchecked_url_citations(
 
 
 def _url_for_ref(ref: str, evidence_map: Dict[str, str]) -> str:
-    mapped = evidence_map.get(ref, "") or evidence_map.get(ref.upper(), "")
+    mapped = next(
+        (
+            value
+            for key, value in evidence_map.items()
+            if URL_REF_RE.fullmatch(key.strip()) and _normalize_ref(key) == _normalize_ref(ref)
+        ),
+        "",
+    )
     match = URL_RE.search(mapped)
     return match.group(0) if match else ""
 
@@ -374,79 +441,86 @@ def _check_claims_against_source(claims: List[str], source_text: str) -> Dict[st
 
 def evaluate_public_url_sources(report: str, threshold: float = PUBLIC_URL_SOURCE_THRESHOLD) -> Dict[str, Any]:
     evidence_map = _extract_evidence_map(report or "")
-    contexts_by_ref = _extract_url_reference_contexts(report or "")
-    ordered_refs = sorted(
-        contexts_by_ref,
-        key=lambda value: int(re.search(r"\d+", value).group(0)) if re.search(r"\d+", value) else 0,
-    )
-    results_by_ref: Dict[str, Dict[str, Any]] = {}
-    fetch_jobs: Dict[Any, tuple[str, str, List[str]]] = {}
-
-    with ThreadPoolExecutor(max_workers=max(1, min(8, len(ordered_refs) or 1))) as executor:
-        for ref in ordered_refs:
-            url = _url_for_ref(ref, evidence_map)
-            contexts = contexts_by_ref[ref]
-            if not url:
-                results_by_ref[ref] = {
-                    "ref": ref,
-                    "url": "",
-                    "status": "unchecked",
-                    "confidence": 0.0,
-                    "citation_count": len(contexts),
-                    "context_preview": contexts[:3],
-                    "reason": "正文引用了该 URL 编号，但证据来源列表中未找到对应真实 URL。",
-                    "matched_terms": [],
-                    "matched_numbers": [],
-                    "source_readable": False,
-                }
-                continue
-            future = executor.submit(_read_url_text, url)
-            fetch_jobs[future] = (ref, url, contexts)
-
+    relationships = _extract_url_claim_relationships(report or "")
+    url_by_ref = {
+        item["ref"]: _url_for_ref(item["ref"], evidence_map)
+        for item in relationships
+    }
+    urls = list(dict.fromkeys(url for url in url_by_ref.values() if url))
+    source_text_by_url: Dict[str, str] = {}
+    with ThreadPoolExecutor(max_workers=max(1, min(8, len(urls) or 1))) as executor:
+        fetch_jobs = {executor.submit(_read_url_text, url): url for url in urls}
         for future in as_completed(fetch_jobs):
-            ref, url, contexts = fetch_jobs[future]
             try:
-                source_text = future.result()
+                source_text_by_url[fetch_jobs[future]] = future.result() or ""
             except Exception:
-                source_text = ""
-            check = _check_claims_against_source(contexts, source_text)
-            results_by_ref[ref] = {
-                "ref": ref,
+                source_text_by_url[fetch_jobs[future]] = ""
+
+    checked_relationships: List[Dict[str, Any]] = []
+    for item in relationships:
+        ref = item["ref"]
+        url = url_by_ref[ref]
+        source_text = source_text_by_url.get(url, "")
+        check = _check_claims_against_source([item["claim"]], source_text)
+        if not url:
+            check = {
+                **check,
+                "reason": "正文引用了该 URL 编号，但证据来源列表中未找到对应真实 URL。",
+            }
+        checked_relationships.append(
+            {
+                **item,
                 "url": url,
-                "status": check["status"],
-                "confidence": check["confidence"],
-                "citation_count": len(contexts),
-                "context_preview": contexts[:3],
-                "reason": check["reason"],
-                "matched_terms": check["matched_terms"],
-                "matched_numbers": check["matched_numbers"],
+                **check,
                 "source_readable": bool(source_text),
             }
+        )
 
-    results = [results_by_ref[ref] for ref in ordered_refs if ref in results_by_ref]
+    status_rank = {"supported": 0, "partially_supported": 1, "unsupported": 2, "unchecked": 3}
+    by_ref: Dict[str, List[Dict[str, Any]]] = {}
+    for item in checked_relationships:
+        by_ref.setdefault(item["ref"], []).append(item)
+    results = []
+    for ref in sorted(by_ref, key=_citation_sort_key):
+        related = by_ref[ref]
+        worst = max(related, key=lambda item: status_rank[item["status"]])
+        results.append(
+            {
+                "ref": ref,
+                "url": url_by_ref[ref],
+                "status": worst["status"],
+                "confidence": worst["confidence"],
+                "citation_count": len(related),
+                "context_preview": [item["claim"] for item in related[:3]],
+                "reason": worst["reason"],
+                "matched_terms": worst["matched_terms"],
+                "matched_numbers": worst["matched_numbers"],
+                "source_readable": worst["source_readable"],
+            }
+        )
 
-    supported = sum(1 for item in results if item["status"] == "supported")
-    partial = sum(1 for item in results if item["status"] == "partially_supported")
-    unsupported = sum(1 for item in results if item["status"] == "unsupported")
-    unchecked = sum(1 for item in results if item["status"] == "unchecked")
-    cited_count = len(results)
-    weighted_score = supported + 0.5 * partial
-    support_accuracy = round(weighted_score / cited_count, 4) if cited_count else None
+    supported = sum(1 for item in checked_relationships if item["status"] == "supported")
+    partial = sum(1 for item in checked_relationships if item["status"] == "partially_supported")
+    unsupported = sum(1 for item in checked_relationships if item["status"] == "unsupported")
+    unchecked = sum(1 for item in checked_relationships if item["status"] == "unchecked")
+    relationship_count = len(checked_relationships)
+    support_accuracy = round(supported / relationship_count, 4) if relationship_count else None
     checked_count = supported + partial + unsupported
-    checked_support_accuracy = round(weighted_score / checked_count, 4) if checked_count else None
 
     return {
-        "method": "url_citation_context_source_text_matching",
+        "method": "claim_url_relationship_source_text_matching",
         "threshold": threshold,
-        "cited_url_ref_count": cited_count,
+        "unique_url_count": len(urls),
+        "cited_url_ref_count": len(results),
+        "relationship_count": relationship_count,
         "supported_count": supported,
         "partially_supported_count": partial,
         "unsupported_count": unsupported,
         "unchecked_count": unchecked,
         "checked_count": checked_count,
         "support_accuracy": support_accuracy,
-        "checked_support_accuracy": checked_support_accuracy,
         "requirement_met": support_accuracy is not None and support_accuracy >= threshold,
+        "relationships": checked_relationships,
         "results": results,
-        "note": "该指标按正文中被 [URLn] 引用的公开链接计算，核验链接正文是否支撑引用句；无法读取的 URL 按未核验计入分母。",
+        "note": "该指标按正文中的断言与 [URLn] 引用关系计算；仅完全支撑计入分子，部分支撑和未核验均计入分母。",
     }

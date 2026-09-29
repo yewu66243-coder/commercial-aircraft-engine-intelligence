@@ -9,6 +9,7 @@ import pytest
 import tempfile
 import os
 import shutil
+from io import BytesIO
 from unittest.mock import Mock, MagicMock
 from fastapi import HTTPException
 from fastapi.responses import JSONResponse
@@ -151,7 +152,7 @@ class TestHandleFileUpload:
         """Create a mock file object for testing."""
         mock_file = Mock()
         mock_file.filename = "test.txt"
-        mock_file.file = Mock()
+        mock_file.file = BytesIO(b"binary\x00payload\xff")
         return mock_file
     
     @pytest.fixture
@@ -185,6 +186,7 @@ class TestHandleFileUpload:
             assert result["filename"] == "test.txt"
             assert temp_doc_path in result["path"]
             assert os.path.exists(result["path"])
+            assert open(result["path"], "rb").read() == b"binary\x00payload\xff"
         finally:
             # Restore original loader
             backend.server.server_utils.DocumentLoader = original_loader
@@ -241,8 +243,48 @@ class TestHandleFileUpload:
             # Should create a unique filename
             assert result["filename"] == "test_1.txt"
             assert os.path.exists(result["path"])
+            assert open(existing_path, encoding="utf-8").read() == "existing content"
+            assert open(result["path"], "rb").read() == b"binary\x00payload\xff"
         finally:
             backend.server.server_utils.DocumentLoader = original_loader
+
+    @pytest.mark.asyncio
+    async def test_conflict_suffix_stays_within_filename_limit(self, temp_doc_path):
+        original_name = "a" * 251 + ".txt"
+        existing_path = os.path.join(temp_doc_path, original_name)
+        os.makedirs(temp_doc_path, exist_ok=True)
+        with open(existing_path, "wb") as handle:
+            handle.write(b"existing")
+        upload = Mock(filename=original_name, file=BytesIO(b"new"))
+
+        import backend.server.server_utils
+        original_loader = backend.server.server_utils.DocumentLoader
+
+        class MockDocumentLoader:
+            def __init__(self, path):
+                pass
+            async def load(self):
+                pass
+
+        backend.server.server_utils.DocumentLoader = MockDocumentLoader
+        try:
+            result = await handle_file_upload(upload, temp_doc_path)
+        finally:
+            backend.server.server_utils.DocumentLoader = original_loader
+
+        assert len(result["filename"].encode("utf-8")) <= 255
+        assert open(existing_path, "rb").read() == b"existing"
+        assert open(result["path"], "rb").read() == b"new"
+
+    @pytest.mark.asyncio
+    async def test_non_byte_upload_stream_is_rejected_and_removed(self, temp_doc_path):
+        upload = Mock(filename="invalid.bin", file=Mock())
+
+        with pytest.raises(HTTPException) as exc_info:
+            await handle_file_upload(upload, temp_doc_path)
+
+        assert exc_info.value.status_code == 400
+        assert not os.path.exists(os.path.join(temp_doc_path, "invalid.bin"))
 
 
 class TestHandleFileDeletion:
@@ -298,6 +340,51 @@ class TestHandleFileDeletion:
         assert result.status_code == 400
         assert "not a file" in str(result.body.decode())
 
+    @pytest.mark.asyncio
+    async def test_deletion_targets_exact_basename_without_rewriting(self, temp_doc_path):
+        hidden = os.path.join(temp_doc_path, ".report.txt")
+        visible = os.path.join(temp_doc_path, "report.txt")
+        with open(hidden, "w", encoding="utf-8") as handle:
+            handle.write("hidden")
+        with open(visible, "w", encoding="utf-8") as handle:
+            handle.write("visible")
+
+        result = await handle_file_deletion(".report.txt", temp_doc_path)
+
+        assert result.status_code == 200
+        assert not os.path.exists(hidden)
+        assert os.path.exists(visible)
+
+    @pytest.mark.asyncio
+    @pytest.mark.parametrize("requested_name", ["report.txt ", "report.txt."])
+    async def test_deletion_rejects_windows_normalized_trailing_characters(
+        self, temp_doc_path, requested_name
+    ):
+        visible = os.path.join(temp_doc_path, "report.txt")
+        with open(visible, "w", encoding="utf-8") as handle:
+            handle.write("keep")
+
+        result = await handle_file_deletion(requested_name, temp_doc_path)
+
+        assert result.status_code == 400
+        assert os.path.exists(visible)
+
+    @pytest.mark.asyncio
+    async def test_symlink_deletion_is_rejected(self, temp_doc_path):
+        target = os.path.join(temp_doc_path, "target.txt")
+        link = os.path.join(temp_doc_path, "link.txt")
+        with open(target, "w", encoding="utf-8") as handle:
+            handle.write("keep")
+        try:
+            os.symlink(target, link)
+        except OSError:
+            pytest.skip("Symlinks not supported in this environment")
+
+        result = await handle_file_deletion("link.txt", temp_doc_path)
+
+        assert result.status_code == 400
+        assert os.path.exists(target)
+
 
 class TestSecurityIntegration:
     """Integration tests for the complete security fix."""
@@ -349,4 +436,4 @@ class TestSecurityIntegration:
 
 if __name__ == "__main__":
     # Run tests if executed directly
-    pytest.main([__file__, "-v"]) 
+    pytest.main([__file__, "-v"])

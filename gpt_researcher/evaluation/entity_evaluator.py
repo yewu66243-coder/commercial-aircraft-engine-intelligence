@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import io
 import json
+import math
 import re
 import ssl
 import zipfile
@@ -13,6 +14,14 @@ from typing import Any, Dict, Iterable, List, Optional
 from urllib.error import HTTPError, URLError
 from urllib.parse import unquote
 from urllib.request import Request, urlopen
+
+from gpt_researcher.evaluation.ground_truth_io import (
+    GroundTruthValidationError,
+    canonicalize_ground_truth_payload,
+    ground_truth_path_for_task,
+    read_ground_truth_json,
+    validate_ground_truth_upload_path,
+)
 
 
 ENTITY_THRESHOLD = 0.9
@@ -112,6 +121,30 @@ EQUIVALENT_TERM_GROUPS = [
     ["enginewise", "按小时付费包修", "包修模式"],
     ["additive manufacturing", "增材制造", "3d打印"],
 ]
+
+ENTITY_CATEGORY_ALIASES = {
+    "organization": {"机构", "企业", "公司", "制造商", "监管机构", "研究机构", "organization"},
+    "model": {"型号", "产品", "发动机型号", "部件型号", "平台", "model"},
+    "material": {"材料", "合金", "涂层", "复合材料", "工艺材料", "material"},
+    "parameter": {"参数", "性能参数", "技术指标", "数值", "规格", "parameter"},
+    "time": {"时间", "日期", "年份", "阶段", "里程碑", "time"},
+}
+ENTITY_CATEGORY_LABELS = {
+    "organization": "机构",
+    "model": "型号",
+    "material": "材料",
+    "parameter": "参数",
+    "time": "时间",
+    "other": "其他",
+}
+
+
+def normalize_entity_category(value: Any) -> str:
+    normalized = str(value or "").strip().lower()
+    for category, aliases in ENTITY_CATEGORY_ALIASES.items():
+        if normalized in {str(alias).lower() for alias in aliases}:
+            return category
+    return "other"
 
 
 def get_project_root() -> Path:
@@ -709,6 +742,10 @@ def _run_auto_evidence_check(entities: List[Dict[str, Any]], report: str) -> Dic
 def _selected_file_names(selected_sources: Iterable[Any]) -> List[str]:
     names = []
     for item in selected_sources or []:
+        if isinstance(item, str):
+            if item.strip():
+                names.append(item)
+            continue
         name = getattr(item, "file_name", None)
         if name is None and isinstance(item, dict):
             name = item.get("file_name")
@@ -819,66 +856,578 @@ def extract_entities_from_report(report: str, selected_sources: Iterable[Any] = 
     return entities
 
 
+class _UnspecifiedGroundTruth:
+    """Sentinel for "no file selected"; default task-based resolution stays available."""
+
+    __slots__ = ()
+
+    def __repr__(self) -> str:  # pragma: no cover - debugging aid
+        return "<unspecified-ground-truth>"
+
+
+UNSPECIFIED_GROUND_TRUTH = _UnspecifiedGroundTruth()
+
+_GROUND_TRUTH_SELECTION = Any  # str | Path | None | _UnspecifiedGroundTruth
+
+
 def _ground_truth_candidates(task: str) -> List[Path]:
     directory = get_ground_truth_dir()
     safe_task = _safe_name(task)
     return [
+        ground_truth_path_for_task(task, directory),
         directory / f"{safe_task}.json",
         directory / f"{safe_task[:30]}.json",
         directory / "ground_truth.json",
     ]
 
 
-def _load_ground_truth(task: str) -> tuple[Optional[Path], List[Dict[str, Any]]]:
-    for path in _ground_truth_candidates(task):
-        if not path.exists():
-            continue
-        with path.open("r", encoding="utf-8") as handle:
-            data = json.load(handle)
-        if isinstance(data, list):
-            return path, [item for item in data if isinstance(item, dict)]
-        if isinstance(data, dict):
-            entities = data.get("entities") or data.get("expected_entities") or []
-            if isinstance(entities, list):
-                return path, [item for item in entities if isinstance(item, dict)]
-    return None, []
+def _selected_ground_truth_candidates(
+    task: str, ground_truth_path: _GROUND_TRUTH_SELECTION
+) -> List[Path]:
+    """Resolve which files may supply the ground truth.
+
+    ``UNSPECIFIED_GROUND_TRUTH`` keeps the historic task-name lookup so existing
+    caller behaviour is unchanged.  ``None`` means the caller resolved the active
+    file and found none, so strict entity metrics stay unavailable (proxy mode).
+    Any other value is used verbatim, so an upload for a different directory or a
+    replaced file always wins over files in the default directory.
+    """
+    if ground_truth_path is None:
+        return []
+    if isinstance(ground_truth_path, _UnspecifiedGroundTruth):
+        return _ground_truth_candidates(task)
+    return [Path(ground_truth_path)]
 
 
 def _entity_name(item: Dict[str, Any]) -> str:
     return str(item.get("name") or item.get("entity") or item.get("实体") or item.get("实体/参数") or "").strip()
 
 
-def _match_entities(extracted: List[Dict[str, Any]], expected: List[Dict[str, Any]]) -> Dict[str, Any]:
-    extracted_norm = [(_normalize_entity(_entity_name(item)), item) for item in extracted]
-    expected_norm = [(_normalize_entity(_entity_name(item)), item) for item in expected]
-    matched_extracted = set()
-    matched_expected = set()
+def _entity_category(item: Dict[str, Any]) -> str:
+    value = item.get("category")
+    if value is None or (isinstance(value, str) and not value.strip()):
+        value = item.get("type")
+    if value is None or (isinstance(value, str) and not value.strip()):
+        value = item.get("类别")
+    return normalize_entity_category(value)
 
-    for expected_index, (expected_name, _expected_item) in enumerate(expected_norm):
-        if not expected_name:
+
+def _equivalent_name_variants(terms: Iterable[Any]) -> set[str]:
+    """Expand explicit terms through curated equivalences, never arbitrary names."""
+    normalized_terms = {
+        _normalize_match_text(term)
+        for term in terms
+        if isinstance(term, str) and _normalize_match_text(term)
+    }
+    expanded = set(normalized_terms)
+    for group in EQUIVALENT_TERM_GROUPS:
+        normalized_group = {_normalize_match_text(item) for item in group}
+        if normalized_terms.intersection(normalized_group):
+            expanded.update(normalized_group)
+    return expanded
+
+
+def _entity_name_terms(item: Dict[str, Any]) -> set[str]:
+    terms: List[Any] = [_entity_name(item)]
+    for key in ("aliases", "synonyms"):
+        values = item.get(key, [])
+        if isinstance(values, str):
+            terms.append(values)
+        elif isinstance(values, (list, tuple, set)):
+            terms.extend(values)
+    return _equivalent_name_variants(terms)
+
+
+def _name_match_type(predicted: Dict[str, Any], expected: Dict[str, Any]) -> Optional[str]:
+    predicted_main = _normalize_match_text(_entity_name(predicted))
+    expected_main = _normalize_match_text(_entity_name(expected))
+    if not predicted_main or not expected_main:
+        return None
+    if predicted_main == expected_main:
+        return "exact_name"
+    if _entity_name_terms(predicted).intersection(_entity_name_terms(expected)):
+        return "alias"
+    return None
+
+
+def _validated_entity_name(item: Dict[str, Any]) -> Optional[str]:
+    for key in ("name", "entity", "实体", "实体/参数"):
+        if key in item:
+            value = item[key]
+            if not isinstance(value, str) or not value.strip():
+                return None
+            return value.strip()
+    return None
+
+
+def _invalid_ground_truth(path: Path, error_code: str, message: str) -> Dict[str, Any]:
+    return {
+        "status": "invalid_ground_truth",
+        "path": str(path),
+        "entities": [],
+        "error_code": error_code,
+        "message": message,
+    }
+
+
+def _legacy_payload_for_unified_validation(payload: Any, task: str) -> Any:
+    """Translate historic evaluator files before handing them to the shared validator."""
+    if isinstance(payload, list):
+        converted: Dict[str, Any] = {"task": task, "entities": payload}
+    elif isinstance(payload, dict) and "expected_entities" in payload:
+        converted = {
+            "task": payload.get("task") or task,
+            "entities": payload["expected_entities"],
+        }
+    elif isinstance(payload, dict) and "entities" in payload:
+        converted = dict(payload)
+    else:
+        return payload
+
+    entities = converted.get("entities")
+    if not isinstance(entities, list):
+        return converted
+    normalized_legacy_entities: List[Any] = []
+    for entity in entities:
+        if not isinstance(entity, dict):
+            normalized_legacy_entities.append(entity)
             continue
-        for extracted_index, (extracted_name, _extracted_item) in enumerate(extracted_norm):
-            if extracted_index in matched_extracted or not extracted_name:
-                continue
-            if expected_name == extracted_name or expected_name in extracted_name or extracted_name in expected_name:
-                matched_expected.add(expected_index)
-                matched_extracted.add(extracted_index)
-                break
+        item = dict(entity)
+        if "name" not in item:
+            for key in ("entity", "实体", "实体/参数"):
+                if key in item:
+                    item["name"] = item[key]
+                    break
+        category = item.get("category")
+        if category is None or (isinstance(category, str) and not category.strip()):
+            category = item.get("类别")
+        if isinstance(category, str) and category.strip():
+            item["type"] = category
+        elif not isinstance(item.get("type"), str) or not item["type"].strip():
+            item["type"] = "other"
+        aliases = item.get("aliases", [])
+        synonyms = item.get("synonyms", [])
+        if isinstance(synonyms, str):
+            synonyms = [synonyms]
+        if isinstance(aliases, list) and isinstance(synonyms, (list, tuple)):
+            item["aliases"] = aliases + list(synonyms)
+        normalized_legacy_entities.append(item)
+    converted["entities"] = normalized_legacy_entities
+    declared_task = converted.get("task")
+    if declared_task is None or declared_task == "":
+        converted["task"] = task
+    elif isinstance(declared_task, str) and _normalize_entity(declared_task) == _normalize_entity(task):
+        converted["task"] = task
+    return converted
 
-    correct = [extracted[index] for index in sorted(matched_extracted)]
+
+def _is_recognized_legacy_payload(payload: Any) -> bool:
+    if isinstance(payload, list):
+        return True
+    if not isinstance(payload, dict):
+        return False
+    if "expected_entities" in payload:
+        return True
+    entities = payload.get("entities")
+    return isinstance(entities, list) and any(
+        isinstance(entity, dict)
+        and (
+            not isinstance(entity.get("type"), str)
+            or not entity["type"].strip()
+            or any(key in entity for key in ("entity", "实体", "实体/参数", "category", "类别", "synonyms"))
+        )
+        for entity in entities
+    )
+
+
+def load_ground_truth(
+    task: str, ground_truth_path: _GROUND_TRUTH_SELECTION = UNSPECIFIED_GROUND_TRUTH
+) -> Dict[str, Any]:
+    for path in _selected_ground_truth_candidates(task, ground_truth_path):
+        if not path.exists():
+            continue
+        legacy_payload: Any = None
+        try:
+            # Reject unsupported, empty, or oversized files before parsing.  The
+            # evaluator retains legacy adaptation below, but shares the upload
+            # boundary so old task files cannot bypass safety limits.
+            validate_ground_truth_upload_path(path)
+            legacy_payload = read_ground_truth_json(path)
+        except GroundTruthValidationError as error:
+            return _invalid_ground_truth(path, error.code, error.message)
+        is_generic_fallback = path.name.lower() == "ground_truth.json"
+        legacy_file_names = {
+            f"{_safe_name(task)}.json",
+            f"{_safe_name(task)[:30]}.json",
+        }
+        # Historic evaluator files were selected by task filename, regardless
+        # of whether their entity rows already happen to use canonical keys.
+        # Do not apply this compatibility path to hashed uploads or the shared
+        # fallback file, which retain strict upload task semantics.
+        is_legacy_task_file = path.name in legacy_file_names
+        is_legacy_payload = _is_recognized_legacy_payload(legacy_payload) or (
+            is_legacy_task_file
+            and isinstance(legacy_payload, dict)
+            and isinstance(legacy_payload.get("entities"), list)
+        )
+        if is_generic_fallback:
+            if not isinstance(legacy_payload, dict):
+                return _invalid_ground_truth(
+                    path,
+                    "task_mismatch",
+                    "通用标准答案必须声明与当前任务一致的 task。",
+                )
+            generic_task = legacy_payload.get("task")
+            if (
+                not isinstance(generic_task, str)
+                or not generic_task.strip()
+                or _normalize_entity(generic_task) != _normalize_entity(task)
+            ):
+                return _invalid_ground_truth(
+                    path,
+                    "task_mismatch",
+                    "通用标准答案声明的任务与当前任务不一致。",
+                )
+        try:
+            # Reuse the already-decoded JSON.  Parsing again used to make the
+            # evaluator inspect oversized input before the shared size guard.
+            canonical = canonicalize_ground_truth_payload(legacy_payload, task)
+        except GroundTruthValidationError as primary_error:
+            if primary_error.code not in {"invalid_schema", "invalid_entity", "invalid_aliases"} and not (
+                primary_error.code == "task_mismatch" and is_legacy_payload
+            ):
+                return _invalid_ground_truth(path, primary_error.code, primary_error.message)
+            try:
+                if not is_legacy_payload:
+                    raise primary_error
+                legacy_payload = _legacy_payload_for_unified_validation(legacy_payload, task)
+                if not isinstance(legacy_payload, dict) or "entities" not in legacy_payload:
+                    raise primary_error
+                canonical = canonicalize_ground_truth_payload(legacy_payload, task)
+            except (OSError, UnicodeError, json.JSONDecodeError):
+                return _invalid_ground_truth(path, "invalid_json", "标准答案文件不是有效 JSON。")
+            except GroundTruthValidationError as error:
+                return _invalid_ground_truth(path, error.code, error.message)
+        else:
+            if is_legacy_payload:
+                try:
+                    canonical = canonicalize_ground_truth_payload(
+                        _legacy_payload_for_unified_validation(legacy_payload, task), task
+                    )
+                except GroundTruthValidationError as error:
+                    return _invalid_ground_truth(path, error.code, error.message)
+
+        evaluator_entities = [
+            dict(entity, category=entity["type"])
+            for entity in canonical["entities"]
+        ]
+        return {
+            "status": "loaded",
+            "path": str(path),
+            "entities": evaluator_entities,
+            "error_code": "",
+            "message": "",
+        }
+    return {"status": "missing", "path": "", "entities": [], "error_code": "", "message": ""}
+
+
+_MISSING_PARAMETER_VALUES = {"", "-", "--", "—", "–", "无", "n/a", "na", "none", "null"}
+_PARAMETER_VALUE_RE = re.compile(
+    r"^\s*(?P<number>[-+]?(?:\d+(?:,\d{3})*(?:\.\d*)?|\.\d+)(?:[eE][-+]?\d+)?)"
+    r"\s*(?P<unit>°?[A-Za-z]+|[%％])?\s*$"
+)
+_UNIT_DEFINITIONS = {
+    "n": ("force", 1.0),
+    "kn": ("force", 1000.0),
+    "lbf": ("force", 4.4482216152605),
+    "g": ("mass", 0.001),
+    "kg": ("mass", 1.0),
+    "t": ("mass", 1000.0),
+    "lb": ("mass", 0.45359237),
+    "mm": ("length", 0.001),
+    "cm": ("length", 0.01),
+    "m": ("length", 1.0),
+    "in": ("length", 0.0254),
+    "pa": ("pressure", 1.0),
+    "kpa": ("pressure", 1000.0),
+    "mpa": ("pressure", 1_000_000.0),
+    "bar": ("pressure", 100_000.0),
+    "psi": ("pressure", 6894.757293168),
+    "k": ("temperature", 1.0),
+    "c": ("temperature_celsius", 1.0),
+    "°c": ("temperature_celsius", 1.0),
+    "f": ("temperature_fahrenheit", 1.0),
+    "°f": ("temperature_fahrenheit", 1.0),
+    "s": ("time", 1.0),
+    "min": ("time", 60.0),
+    "h": ("time", 3600.0),
+    "rpm": ("rotation", 1.0),
+    "%": ("ratio", 0.01),
+}
+
+
+def _has_parameter_value(item: Dict[str, Any]) -> bool:
+    value = item.get("value")
+    if value is None:
+        return False
+    if isinstance(value, str) and value.strip().lower() in _MISSING_PARAMETER_VALUES:
+        return False
+    return True
+
+
+def _normalize_unit(value: Any) -> str:
+    unit = str(value or "").strip().replace("％", "%").replace("℃", "°C").replace("℉", "°F")
+    return re.sub(r"\s+", "", unit).lower()
+
+
+def _parse_parameter_value(item: Dict[str, Any]) -> Dict[str, Any]:
+    raw_value = item.get("value")
+    if isinstance(raw_value, bool):
+        return {"ok": False, "reason": "unparseable_value"}
+
+    if isinstance(raw_value, (int, float)):
+        numeric_value = float(raw_value)
+        parsed_unit = ""
+    elif isinstance(raw_value, str):
+        match = _PARAMETER_VALUE_RE.fullmatch(raw_value)
+        if not match:
+            return {"ok": False, "reason": "unparseable_value"}
+        try:
+            numeric_value = float(match.group("number").replace(",", ""))
+        except ValueError:
+            return {"ok": False, "reason": "unparseable_value"}
+        parsed_unit = match.group("unit") or ""
+    else:
+        return {"ok": False, "reason": "unparseable_value"}
+
+    if not math.isfinite(numeric_value):
+        return {"ok": False, "reason": "unparseable_value"}
+
+    explicit_unit = item.get("unit")
+    has_explicit_unit = explicit_unit is not None and str(explicit_unit).strip() != ""
+    if has_explicit_unit and parsed_unit:
+        if _normalize_unit(explicit_unit) != _normalize_unit(parsed_unit):
+            return {"ok": False, "reason": "unit_mismatch"}
+    unit = _normalize_unit(explicit_unit if has_explicit_unit else parsed_unit)
+    if not unit:
+        return {"ok": True, "value": numeric_value, "dimension": "dimensionless", "unit": ""}
+    definition = _UNIT_DEFINITIONS.get(unit)
+    if definition is None:
+        return {"ok": False, "reason": "unknown_unit", "unit": unit}
+
+    dimension, factor = definition
+    if dimension == "temperature_celsius":
+        base_value = numeric_value + 273.15
+        dimension = "temperature"
+    elif dimension == "temperature_fahrenheit":
+        base_value = (numeric_value - 32.0) * 5.0 / 9.0 + 273.15
+        dimension = "temperature"
+    else:
+        base_value = numeric_value * factor
+    return {"ok": True, "value": base_value, "dimension": dimension, "unit": unit}
+
+
+def _parameter_candidate(
+    predicted: Dict[str, Any],
+    expected: Dict[str, Any],
+    name_match: str,
+    default_tolerance: float,
+) -> Dict[str, Any]:
+    tolerance_value = expected["tolerance"] if "tolerance" in expected else default_tolerance
+    if isinstance(tolerance_value, bool):
+        return {"eligible": False, "reason": "invalid_tolerance"}
+    try:
+        tolerance = float(tolerance_value)
+    except (TypeError, ValueError):
+        return {"eligible": False, "reason": "invalid_tolerance"}
+    if not math.isfinite(tolerance) or tolerance < 0:
+        return {"eligible": False, "reason": "invalid_tolerance"}
+
+    predicted_has_value = _has_parameter_value(predicted)
+    expected_has_value = _has_parameter_value(expected)
+    if not predicted_has_value and not expected_has_value:
+        return {
+            "eligible": True,
+            "priority": 3,
+            "match_type": "name_only_parameter",
+            "reason": "name_only_parameter_match_both_values_absent",
+        }
+    if predicted_has_value != expected_has_value:
+        return {"eligible": False, "reason": "missing_value_on_one_side"}
+
+    predicted_value = _parse_parameter_value(predicted)
+    expected_value = _parse_parameter_value(expected)
+    if not predicted_value.get("ok"):
+        return {"eligible": False, "reason": predicted_value["reason"], "side": "predicted"}
+    if not expected_value.get("ok"):
+        return {"eligible": False, "reason": expected_value["reason"], "side": "expected"}
+    if predicted_value["dimension"] != expected_value["dimension"]:
+        return {
+            "eligible": False,
+            "reason": "unit_mismatch",
+            "predicted_dimension": predicted_value["dimension"],
+            "expected_dimension": expected_value["dimension"],
+        }
+
+    predicted_base = predicted_value["value"]
+    expected_base = expected_value["value"]
+    difference = abs(predicted_base - expected_base)
+    details = {
+        "predicted_base_value": predicted_base,
+        "expected_base_value": expected_base,
+        "dimension": predicted_value["dimension"],
+        "tolerance": tolerance,
+    }
+    if math.isclose(predicted_base, expected_base, rel_tol=1e-12, abs_tol=1e-12):
+        return {
+            "eligible": True,
+            "priority": 0 if name_match == "exact_name" else 1,
+            "match_type": f"{name_match}_exact_value",
+            "reason": "exact_value_match",
+            **details,
+        }
+    allowed_difference = tolerance * max(abs(expected_base), 1e-12)
+    if difference <= allowed_difference:
+        return {
+            "eligible": True,
+            "priority": 2,
+            "match_type": "within_tolerance",
+            "reason": "value_within_tolerance",
+            "difference": difference,
+            "allowed_difference": allowed_difference,
+            "name_match": name_match,
+            **details,
+        }
+    return {
+        "eligible": False,
+        "reason": "value_out_of_tolerance",
+        "difference": difference,
+        "allowed_difference": allowed_difference,
+        **details,
+    }
+
+
+def _metric_counts(tp: int, fp: int, fn: int) -> Dict[str, Any]:
+    precision_denominator = tp + fp
+    recall_denominator = tp + fn
+    precision = tp / precision_denominator if precision_denominator else None
+    recall = tp / recall_denominator if recall_denominator else None
+    if tp == 0 and (fp or fn):
+        f1 = 0.0
+    elif precision is None or recall is None or precision + recall == 0:
+        f1 = None
+    else:
+        f1 = 2 * precision * recall / (precision + recall)
+    return {
+        "true_positive": tp,
+        "false_positive": fp,
+        "false_negative": fn,
+        "precision": round(precision, 4) if precision is not None else None,
+        "recall": round(recall, 4) if recall is not None else None,
+        "f1": round(f1, 4) if f1 is not None else None,
+    }
+
+
+def evaluate_entities_against_ground_truth(
+    extracted: List[Dict[str, Any]],
+    expected: List[Dict[str, Any]],
+    default_tolerance: float = 0.01,
+) -> Dict[str, Any]:
+    """Evaluate typed entities with deterministic one-to-one assignment."""
+    extracted = [dict(item, category=_entity_category(item)) for item in (extracted or [])]
+    expected = [dict(item, category=_entity_category(item)) for item in (expected or [])]
+    candidates: List[Dict[str, Any]] = []
+    rejected: List[Dict[str, Any]] = []
+
+    for predicted_index, predicted in enumerate(extracted):
+        predicted_category = _entity_category(predicted)
+        for truth_index, truth in enumerate(expected):
+            category = _entity_category(truth)
+            if predicted_category != category:
+                continue
+            name_match = _name_match_type(predicted, truth)
+            if name_match is None:
+                continue
+
+            audit = {
+                "predicted_index": predicted_index,
+                "truth_index": truth_index,
+                "category": category,
+                "predicted": predicted,
+                "expected": truth,
+                "name_match": name_match,
+            }
+            if category == "parameter":
+                decision = _parameter_candidate(predicted, truth, name_match, default_tolerance)
+            else:
+                decision = {
+                    "eligible": True,
+                    "priority": 0 if name_match == "exact_name" else 1,
+                    "match_type": name_match,
+                    "reason": f"{name_match}_same_category",
+                }
+            audit.update(decision)
+            if decision["eligible"]:
+                candidates.append(audit)
+            else:
+                audit["matched"] = False
+                rejected.append(audit)
+
+    candidates.sort(key=lambda item: (item["priority"], item["predicted_index"], item["truth_index"]))
+    matched_extracted: set[int] = set()
+    matched_expected: set[int] = set()
+    accepted: List[Dict[str, Any]] = []
+    for candidate in candidates:
+        predicted_index = candidate["predicted_index"]
+        truth_index = candidate["truth_index"]
+        if predicted_index in matched_extracted or truth_index in matched_expected:
+            candidate["matched"] = False
+            candidate["reason"] = "candidate_not_selected_one_to_one"
+            rejected.append(candidate)
+            continue
+        candidate["matched"] = True
+        matched_extracted.add(predicted_index)
+        matched_expected.add(truth_index)
+        accepted.append(candidate)
+
+    correct = [item for index, item in enumerate(extracted) if index in matched_extracted]
     wrong = [item for index, item in enumerate(extracted) if index not in matched_extracted]
     missed = [item for index, item in enumerate(expected) if index not in matched_expected]
-    denominator = len(correct) + len(wrong) + len(missed)
-    accuracy = round(len(correct) / denominator, 4) if denominator else None
-    precision_denominator = len(correct) + len(wrong)
-    accuracy_without_missed = round(len(correct) / precision_denominator, 4) if precision_denominator else None
+    categories: Dict[str, Dict[str, Any]] = {}
+    for category, label in ENTITY_CATEGORY_LABELS.items():
+        tp = sum(1 for item in accepted if item["category"] == category)
+        fp = sum(
+            1
+            for index, item in enumerate(extracted)
+            if index not in matched_extracted and _entity_category(item) == category
+        )
+        fn = sum(
+            1
+            for index, item in enumerate(expected)
+            if index not in matched_expected and _entity_category(item) == category
+        )
+        categories[category] = {"label": label, **_metric_counts(tp, fp, fn)}
 
+    overall = _metric_counts(len(correct), len(wrong), len(missed))
     return {
+        "overall": overall,
+        "categories": categories,
+        "matches": accepted,
+        "match_audit": accepted + rejected,
         "correct_entities": correct,
         "wrong_entities": wrong,
         "missed_entities": missed,
-        "accuracy": accuracy,
-        "accuracy_without_missed": accuracy_without_missed,
+    }
+
+
+def _match_entities(extracted: List[Dict[str, Any]], expected: List[Dict[str, Any]]) -> Dict[str, Any]:
+    metrics = evaluate_entities_against_ground_truth(extracted, expected)
+    return {
+        "correct_entities": metrics["correct_entities"],
+        "wrong_entities": metrics["wrong_entities"],
+        "missed_entities": metrics["missed_entities"],
+        "accuracy": metrics["overall"]["f1"],
+        "accuracy_without_missed": metrics["overall"]["precision"],
     }
 
 
@@ -887,7 +1436,14 @@ def evaluate_report_entities(
     task: str,
     selected_sources: Iterable[Any] = (),
     threshold: float = ENTITY_THRESHOLD,
+    ground_truth_path: _GROUND_TRUTH_SELECTION = UNSPECIFIED_GROUND_TRUTH,
 ) -> Dict[str, Any]:
+    """Score extracted entities.
+
+    ``ground_truth_path`` selects the active ground-truth file.  Omit it to keep
+    the historic task-name lookup; pass ``None`` to force proxy mode; pass a path
+    to score strictly against exactly that file.
+    """
     extracted = extract_entities_from_report(report, selected_sources)
     auto_evidence_eval = _run_auto_evidence_check(extracted, report) if extracted else {
         "method": "source_text_alias_number_url_pdf_matching",
@@ -902,15 +1458,27 @@ def evaluate_report_entities(
         "requirement_met": None,
         "note": "未抽取到实体，未执行自动证据核验。",
     }
-    ground_truth_path, expected = _load_ground_truth(task)
+    if isinstance(ground_truth_path, _UnspecifiedGroundTruth):
+        ground_truth = load_ground_truth(task)
+    else:
+        ground_truth = load_ground_truth(task, ground_truth_path)
+    ground_truth_file = Path(ground_truth["path"]) if ground_truth.get("path") else None
+    expected = ground_truth["entities"] if ground_truth.get("status") == "loaded" else []
     evidence_supported_count = sum(1 for item in extracted if item.get("evidence_supported"))
     unsupported_count = len(extracted) - evidence_supported_count
 
     base: Dict[str, Any] = {
         "status": "auto_evidence_checked" if extracted else "pending_manual_review",
+        "mode": "proxy",
         "method": "report_entity_table_extraction",
         "threshold": threshold,
-        "ground_truth_path": str(ground_truth_path) if ground_truth_path else "",
+        "metrics": None,
+        "matches": [],
+        "match_audit": [],
+        "ground_truth_status": ground_truth.get("status", "missing"),
+        "ground_truth_path": str(ground_truth_file) if ground_truth_file else "",
+        "ground_truth_error_code": ground_truth.get("error_code", ""),
+        "ground_truth_message": ground_truth.get("message", ""),
         "extracted_count": len(extracted),
         "evidence_supported_count": evidence_supported_count,
         "unsupported_count": unsupported_count,
@@ -928,32 +1496,45 @@ def evaluate_report_entities(
         "note": "未提供标准答案，已完成自动证据核验；金标准实体准确率仍需标准答案或人工复核。",
     }
 
-    if not extracted:
-        base["status"] = "no_entity_table_found"
-        base["note"] = "未从报告的“实体与参数清单”表格中抽取到实体；请检查 Writer Agent 是否按 V1.2 格式输出。"
+    if ground_truth.get("status") == "invalid_ground_truth":
+        base.update(
+            {
+                "status": "invalid_ground_truth",
+                "mode": "invalid",
+                "accuracy": None,
+                "requirement_met": None,
+                "note": ground_truth.get("message") or "标准答案无效，未执行严格实体评估。",
+            }
+        )
         return base
 
-    if not expected:
+    if ground_truth.get("status") != "loaded":
+        if not extracted:
+            base["status"] = "no_entity_table_found"
+            base["note"] = "未从报告的“实体与参数清单”表格中抽取到实体；请检查 Writer Agent 是否按 V1.2 格式输出。"
         return base
 
-    matched = _match_entities(extracted, expected)
-    accuracy = matched["accuracy"]
+    metrics = evaluate_entities_against_ground_truth(extracted, expected)
+    overall = metrics["overall"]
+    accuracy = overall["f1"]
+    precision = overall["precision"]
     base.update(
         {
             "status": "auto_evaluated",
+            "mode": "strict",
+            "metrics": metrics,
+            "matches": metrics["matches"],
+            "match_audit": metrics["match_audit"],
             "expected_entities": expected,
-            "correct_entities": matched["correct_entities"],
-            "wrong_entities": matched["wrong_entities"],
-            "missed_entities": matched["missed_entities"],
+            "correct_entities": metrics["correct_entities"],
+            "wrong_entities": metrics["wrong_entities"],
+            "missed_entities": metrics["missed_entities"],
             "accuracy": accuracy,
-            "accuracy_without_missed": matched["accuracy_without_missed"],
+            "accuracy_without_missed": precision,
             "accuracy_without_missed_method": "ground_truth_precision",
-            "accuracy_without_missed_requirement_met": (
-                matched["accuracy_without_missed"] is not None
-                and matched["accuracy_without_missed"] >= threshold
-            ),
+            "accuracy_without_missed_requirement_met": precision is not None and precision >= threshold,
             "requirement_met": accuracy is not None and accuracy >= threshold,
-            "note": "已根据标准答案文件自动计算实体抽取准确率。",
+            "note": "已根据标准答案文件自动计算分类实体的精确率、召回率和 F1。",
         }
     )
     return base
