@@ -1,0 +1,159 @@
+from __future__ import annotations
+
+import asyncio
+from datetime import datetime
+from pathlib import Path
+from unittest.mock import AsyncMock, Mock, call, patch
+
+import pytest
+
+from gpt_researcher.evaluation import report_evaluation
+from gpt_researcher.evaluation.records import EvaluationRecordStore
+
+
+REPORT = "# 已清理报告\n\n确定事实。[URL1]\n\n- [URL1] https://example.test/source"
+
+
+def _raw_results():
+    entity = {
+        "status": "auto_evaluated",
+        "mode": "strict",
+        "metrics": {
+            "overall": {"true_positive": 1, "false_positive": 0, "false_negative": 0,
+                        "precision": 1.0, "recall": 1.0, "f1": 1.0},
+            "categories": {}, "matches": [], "correct_entities": [],
+            "wrong_entities": [], "missed_entities": [],
+        },
+        "ground_truth_path": "truth.json",
+    }
+    urls = {
+        "total_urls": 1, "checked_urls": 1, "accessible_urls": 1,
+        "failed_urls": 0, "skipped_urls": 0, "accessibility_rate": 1.0,
+        "results": [{"url": "https://example.test/source", "accessible": True,
+                     "status_code": 200, "failure_reason": "", "method": "HEAD"}],
+    }
+    support = {
+        "relationship_count": 1, "supported_count": 1,
+        "partially_supported_count": 0, "unsupported_count": 0,
+        "unchecked_count": 0, "support_accuracy": 1.0,
+        "relationships": [{"relationship_id": "R1", "url": "https://example.test/source",
+                           "claim": "确定事实。", "status": "supported", "confidence": 1.0,
+                           "source_readable": True}],
+    }
+    return entity, urls, support
+
+
+def test_evaluate_saved_report_uses_exact_saved_text_and_adds_export_paths(tmp_path):
+    entity, urls, support = _raw_results()
+    url_evaluator = AsyncMock(return_value=urls)
+    source_evaluator = Mock(return_value=support)
+    entity_evaluator = Mock(return_value=entity)
+    renderer = Mock(return_value="# 独立测评报告")
+    exporter = AsyncMock(return_value={
+        "markdown": "/outputs/evaluations/eval.md",
+        "word": "/outputs/evaluations/eval.docx",
+        "pdf": "/outputs/evaluations/eval.pdf",
+        "errors": [],
+    })
+
+    with (
+        patch.object(report_evaluation, "evaluate_link_accessibility", url_evaluator),
+        patch.object(report_evaluation, "evaluate_public_url_sources", source_evaluator),
+        patch.object(report_evaluation, "evaluate_report_entities", entity_evaluator),
+        patch.object(report_evaluation, "render_evaluation_report_markdown", renderer),
+        patch.object(report_evaluation, "export_evaluation_report", exporter),
+    ):
+        result = asyncio.run(report_evaluation.evaluate_saved_report(
+            task="GTF", run_id="run-1", report=REPORT,
+            style_cleanup={"removed_count": 2}, ground_truth_path=tmp_path / "truth.json",
+            output_dir=tmp_path,
+        ))
+
+    url_evaluator.assert_awaited_once_with(REPORT)
+    source_evaluator.assert_called_once_with(REPORT)
+    entity_evaluator.assert_called_once_with(REPORT, "GTF")
+    assert renderer.call_args.kwargs["summary"]["evaluation_report_paths"] == {
+        "markdown": "", "word": "", "pdf": ""
+    }
+    assert exporter.call_args.kwargs["markdown"] == "# 独立测评报告"
+    assert exporter.call_args.kwargs["output_dir"] == tmp_path
+    assert result["entity_eval"] == entity
+    assert result["url_check"] == urls
+    assert result["public_url_source_eval"] == support
+    assert result["evaluation_summary"]["style_cleanup"] == {"removed_count": 2}
+    assert result["evaluation_summary"]["evaluation_report_paths"]["word"].endswith("eval.docx")
+    assert datetime.fromisoformat(result["evaluated_at"])
+
+
+def test_three_evaluators_fail_independently_and_still_produce_a_summary(tmp_path):
+    _, urls, _ = _raw_results()
+
+    with (
+        patch.object(report_evaluation, "evaluate_link_accessibility", AsyncMock(return_value=urls)),
+        patch.object(report_evaluation, "evaluate_public_url_sources", side_effect=RuntimeError("private source")),
+        patch.object(report_evaluation, "evaluate_report_entities", side_effect=ValueError("private entity")),
+        patch.object(report_evaluation, "render_evaluation_report_markdown", return_value="# partial"),
+        patch.object(report_evaluation, "export_evaluation_report", new=AsyncMock(return_value={
+            "markdown": "/outputs/evaluations/partial.md", "word": "", "pdf": "", "errors": []
+        })),
+    ):
+        result = asyncio.run(report_evaluation.evaluate_saved_report(
+            task="GTF", run_id="run-partial", report=REPORT,
+            style_cleanup=None, ground_truth_path=None, output_dir=tmp_path,
+        ))
+
+    assert result["url_check"] == urls
+    assert result["entity_eval"]["status"] == "evaluation_failed"
+    assert result["public_url_source_eval"]["evaluation_error"] == "RuntimeError"
+    assert result["evaluation_summary"]["status"] == "partial"
+    assert "private" not in repr(result)
+
+
+def test_reevaluate_saved_run_appends_history_without_generating_a_report(tmp_path):
+    store = EvaluationRecordStore(tmp_path / "records.json")
+    store.append_run({
+        "run_id": "run-1", "task": "GTF", "evidence_report": REPORT,
+        "report_style_cleanup": {"removed_count": 4},
+        "evaluation_summary": {"status": "completed"},
+    })
+    fresh = {
+        "evaluated_at": "2026-09-29T12:00:00+08:00",
+        "entity_eval": {}, "url_check": {}, "public_url_source_eval": {},
+        "evaluation_summary": {"status": "partial"},
+        "evaluation_report_paths": {"markdown": "/outputs/evaluations/new.md", "word": "", "pdf": ""},
+    }
+
+    with patch.object(report_evaluation, "evaluate_saved_report", new=AsyncMock(return_value=fresh)) as evaluator:
+        result = asyncio.run(report_evaluation.reevaluate_saved_run(
+            store=store, run_id="run-1", ground_truth_path=tmp_path / "new-truth.json",
+            output_dir=tmp_path,
+        ))
+
+    evaluator.assert_awaited_once_with(
+        task="GTF", run_id="run-1", report=REPORT,
+        style_cleanup={"removed_count": 4},
+        ground_truth_path=tmp_path / "new-truth.json", output_dir=tmp_path,
+    )
+    assert result == fresh
+    saved = store.get_run("run-1")
+    assert saved["evaluation_summary"] == {"status": "completed"}
+    assert saved["reevaluations"] == [fresh]
+
+
+@pytest.mark.parametrize("evidence_report", [None, "", "   "])
+def test_reevaluate_saved_run_rejects_missing_saved_report(tmp_path, evidence_report):
+    store = EvaluationRecordStore(tmp_path / "records.json")
+    store.append_run({"run_id": "run-1", "task": "GTF", "evidence_report": evidence_report})
+
+    with pytest.raises(report_evaluation.SavedReportUnavailableError):
+        asyncio.run(report_evaluation.reevaluate_saved_run(
+            store=store, run_id="run-1", ground_truth_path=None, output_dir=tmp_path,
+        ))
+
+
+def test_resolve_active_ground_truth_path_uses_hashed_task_name(tmp_path):
+    expected = report_evaluation.ground_truth_path_for_task("GTF / unsafe", tmp_path)
+    assert report_evaluation.resolve_active_ground_truth_path("GTF / unsafe", tmp_path) is None
+    expected.write_text("{}", encoding="utf-8")
+
+    assert report_evaluation.resolve_active_ground_truth_path("GTF / unsafe", tmp_path) == expected

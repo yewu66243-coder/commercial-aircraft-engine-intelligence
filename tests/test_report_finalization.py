@@ -599,30 +599,44 @@ class FinalizationTests(unittest.TestCase):
         self.assertEqual(len(blocks),1)
         self.assertIn('99%',blocks[0]['numbers'])
 
-    def test_final_editor_runs_after_citation_cleanup_before_the_shared_export(self):
+    def test_final_editor_runs_before_style_cleanup_and_evaluation(self):
         from three_agent_service import ThreeAgentService,ThreeAgentRequestData
         service=ThreeAgentService(ThreeAgentRequestData(task='GTF'))
         order=[]
-        def cleanup(text,stats):
-            order.append('cleanup');return text.replace('提高99%','提高88%'),{'changed':True}
         async def edit(text):
-            order.append('edit');self.assertIn('提高88%',text)
-            return text.replace('提高88%','提高35%')
+            order.append('edit');self.assertIn('提高99%',text)
+            return text.replace('提高99%','提高35%')
+        def cleanup(text):
+            order.append('cleanup');self.assertIn('提高35%',text)
+            return text,{'removed_count':0}
+        async def evaluate(**kwargs):
+            order.append('evaluate');self.assertIn('提高35%',kwargs['report'])
+            return {
+                'evaluated_at':'2026-09-29T12:00:00+08:00',
+                'url_check':{},'public_url_source_eval':{},
+                'entity_eval':{'auto_evidence_eval':{}},
+                'evaluation_summary':{
+                    'status':'completed','entity':{},
+                    'public_links':{'accessibility':{},'claim_support':{}},
+                    'style_cleanup':{'removed_count':0},
+                    'evaluation_report_paths':{'markdown':'','word':'','pdf':''},'errors':[]},
+                'evaluation_report_paths':{'markdown':'','word':'','pdf':''},
+                'evaluation_report_errors':[],
+            }
         with ExitStack() as stack:
-            for method,value in [('pre_search_abstracts',None),('research_agent',[]),('writer_agent',report('99%')),('inspect_report_urls',{})]:
+            for method,value in [('pre_search_abstracts',None),('research_agent',[]),('writer_agent',report('99%'))]:
                 stack.enter_context(patch.object(service,method,new=AsyncMock(return_value=value)))
             stack.enter_context(patch.object(service,'planner_agent',return_value=[]))
             stack.enter_context(patch.object(service,'collect_report_images'))
             stack.enter_context(patch.object(service,'editorial_agent',side_effect=edit))
             stack.enter_context(patch.object(service,'append_evaluation_record',return_value='offline'))
-            stack.enter_context(patch('three_agent_service.evaluate_public_url_sources',return_value={}))
-            stack.enter_context(patch('three_agent_service.prune_redundant_unchecked_url_citations',side_effect=cleanup))
-            stack.enter_context(patch('three_agent_service.evaluate_report_entities',return_value={}))
+            stack.enter_context(patch('three_agent_service.clean_formal_report_style',side_effect=cleanup))
+            stack.enter_context(patch('three_agent_service.evaluate_saved_report',new=AsyncMock(side_effect=evaluate)))
             exports=[]
             for method in ['write_text_to_md','write_md_to_pdf','write_md_to_word']:
                 exports.append(stack.enter_context(patch('three_agent_service.'+method,new=AsyncMock(return_value='outputs/test'))))
             result=asyncio.run(service.run())
-        self.assertEqual(order,['cleanup','edit'])
+        self.assertEqual(order,['edit','cleanup','evaluate'])
         self.assertTrue(all('提高35%' in e.call_args.args[0] for e in exports))
         self.assertTrue(all(result['report']==e.call_args.args[0] for e in exports))
 
