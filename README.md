@@ -82,6 +82,7 @@ Steps:
 - 🔍 JavaScript-enabled web scraping.
 - 📂 Maintains memory and context throughout research.
 - 📄 Export reports to PDF, Word, and other formats.
+- 📐 Automatic post-run evaluation of entities, link accessibility, and claim support (see [Report Evaluation](#-report-evaluation)).
 
 ## 📖 Documentation
 
@@ -284,6 +285,39 @@ By using multi-agent frameworks, the research process can be significantly impro
 An average run generates a 5-6 page research report in multiple formats such as PDF, Docx and Markdown.
 
 Check it out [here](https://github.com/assafelovic/gpt-researcher/tree/master/multi_agents) or head over to our documentation for [LangGraph](https://docs.gptr.dev/docs/gpt-researcher/multi_agents/langgraph) and [AG2](https://docs.gptr.dev/docs/gpt-researcher/multi_agents/ag2) for more information.
+
+## 📐 Report Evaluation
+
+Every run also evaluates the finalized report body after the deterministic disclaimer cleanup, and the workbench shows the result in an "Evaluation results" panel next to the report.
+
+**Metrics and thresholds**
+
+| Metric | Definition | Threshold |
+| --- | --- | --- |
+| Entity precision | Entities/parameters extracted from the report that match the ground truth | — |
+| Entity recall / F1 | Coverage of the ground truth plus the combined F1 | F1 ≥ 90% |
+| Link accessibility | Accessible unique URLs / checked unique URLs, counted by **unique URL** | ≥ 98% |
+| Claim support accuracy | Claim–link relationships fully supported by their source; partially supported relationships are **not** counted as correct | ≥ 90% |
+
+All three metric families read the same cleaned final body, so the panel, the standalone evaluation report, and the stored history agree.
+
+**Ground truth upload (optional)**
+
+Strict entity precision / recall / F1 are only shown when a valid ground truth exists. Without one, the entity cards read "awaiting ground truth" and only a **proxy evidence-support rate** is reported — that proxy metric is not a substitute for entity accuracy.
+
+- Upload `.json` or `.xlsx`, up to 5 MiB; both formats go through the same validator.
+- JSON: an object with an `entities` array; each entry needs `type` (or `category`) and `name`, plus optional `aliases`; parameter entries may carry `value` / `unit`.
+- XLSX: the header row must contain the columns `类别` (category) and `名称` (name); `别名` (aliases), `数值` (value), `单位` (unit), and `容差` (tolerance) are optional.
+
+**Upload and re-evaluation flow**
+
+1. Click "Upload / replace ground truth" and pick a valid JSON or XLSX file.
+2. The panel then shows the stored file name and entity count; the file is hashed per task, so replacing it takes effect immediately for that task.
+3. Clicking "Re-evaluate" rescores the **already persisted final report**; it never re-runs retrieval or writing.
+4. Each re-evaluation appends to the run history instead of overwriting it.
+5. The standalone evaluation report (Word / PDF / Markdown) can be downloaded from the same panel.
+
+If no ground truth is configured, or a single evaluation step fails, the original research report export is unaffected and the panel explains the degraded state.
 
 ## 🔍 Observability
 

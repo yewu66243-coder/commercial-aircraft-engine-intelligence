@@ -314,7 +314,7 @@ support_accuracy = supported_relationships / all_public_url_relationships
 ### 接口行为
 
 - `POST /api/evaluation-ground-truth`：接收 `task` 与 JSON/Excel 文件，校验成功后保存并返回实体数量、类别计数和文件摘要；
-- `POST /api/report-evaluation/{task_id}`：复用指定任务的最终正文和来源记录重新测评，返回新的 `evaluation_summary` 和下载路径；
+- `POST /api/report-evaluation/{run_id}`：复用指定运行记录（`run_statistics.run_id`）已保存的最终正文和来源记录重新测评，返回新的 `evaluation_summary` 和下载路径；记录不存在返回 404，缺少正文或任务信息返回 409；
 - 测评报告由现有 `/outputs/...` 静态文件机制下载，不新增不受控文件读取接口；
 - 原 `/api/three-agent-report` 响应继续在 `run_statistics.evaluation_summary` 返回测评结果，并增加 `evaluation_report_paths`。
 

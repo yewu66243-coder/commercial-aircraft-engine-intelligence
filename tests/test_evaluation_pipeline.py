@@ -386,16 +386,77 @@ def test_pipeline_evaluates_and_exports_the_cleaned_post_editorial_report():
 
         result = asyncio.run(service.run())
 
+    disclaimer = "本报告不作确定性结论"
     cleaner.assert_called_once_with(edited)
     assert evaluator.await_args.kwargs["report"] == cleaned
     formatter.assert_called_once()
     assert formatter.call_args.args[0] == cleaned
     assert all(exporter.await_args.args[0] == cleaned for exporter in exporters)
+    # 违规免责句不得出现在最终正文、写入 MD 的文本或送给 Word/PDF 渲染器的文本里
+    assert disclaimer not in cleaned
+    assert disclaimer not in result["report"]
+    assert all(disclaimer not in exporter.await_args.args[0] for exporter in exporters)
+    assert result["run_statistics"]["report_style_cleanup"] == {"removed_count": 1}
+    summary = result["run_statistics"]["evaluation_summary"]
+    assert {"accessibility", "claim_support"} <= set(summary["public_links"])
+    assert summary["evaluation_report_paths"]["word"].endswith(".docx")
+    assert summary["evaluation_report_paths"]["pdf"].endswith(".pdf")
+    assert summary["evaluation_report_paths"]["markdown"].endswith(".md")
     assert saved[0]["record_version"] == "3.0.0"
     assert saved[0]["evidence_report"] == cleaned
     assert saved[0]["report_style_cleanup"] == {"removed_count": 1}
     assert saved[0]["evaluation_report_paths"]["word"].endswith("eval.docx")
     assert result["run_statistics"]["validation_summary"]["url_requirement_met"] is True
+
+
+def test_evaluation_export_failure_keeps_original_report_downloads():
+    service = ThreeAgentService(ThreeAgentRequestData(task="测评导出失败"))
+    service.generation_status = "ready"
+    report = "# 测评导出失败\n\n事实成立。"
+    prepared = SimpleNamespace(markdown=report, quality={"status": "ready", "warnings": []},
+                               citation_map={}, verification_notes=[])
+    evaluation = _orchestrated_evaluation()
+    # 只有 Word 测评报告导出失败，Markdown 仍成功
+    evaluation["evaluation_report_paths"] = {
+        "markdown": "/outputs/evaluations/eval.md", "word": "", "pdf": "",
+    }
+    evaluation["evaluation_report_errors"] = [
+        {"scope": "evaluation_report", "code": "export_failed", "message": "测评报告导出失败，请稍后重试。"},
+    ]
+    evaluation["evaluation_summary"]["evaluation_report_paths"] = evaluation["evaluation_report_paths"]
+
+    with ExitStack() as stack:
+        stack.enter_context(patch.object(service, "pre_search_abstracts", new=AsyncMock()))
+        stack.enter_context(patch.object(service, "planner_agent", return_value=[]))
+        stack.enter_context(patch.object(service, "research_agent", new=AsyncMock(return_value=[])))
+        stack.enter_context(patch.object(service, "collect_report_images"))
+        stack.enter_context(patch.object(service, "writer_agent", new=AsyncMock(return_value=report)))
+        stack.enter_context(patch.object(service, "editorial_agent", new=AsyncMock(return_value=report)))
+        stack.enter_context(patch("three_agent_service.clean_formal_report_style",
+                                  return_value=(report, {"removed_count": 0})))
+        stack.enter_context(patch("three_agent_service.evaluate_saved_report",
+                                  new=AsyncMock(return_value=evaluation)))
+        stack.enter_context(patch.object(service, "append_evaluation_record", return_value="records.json"))
+        stack.enter_context(patch("three_agent_service.build_source_catalog",
+                                  return_value={"sources": [], "errors": []}))
+        stack.enter_context(patch("three_agent_service.prepare_formal_report", return_value=prepared))
+        stack.enter_context(patch("three_agent_service.review_content", return_value={"warnings": []}))
+        exporters = [stack.enter_context(patch(name, new=AsyncMock(return_value=path)))
+                     for name, path in (
+                         ("three_agent_service.write_text_to_md", "outputs/report.md"),
+                         ("three_agent_service.write_md_to_pdf", "outputs/report.pdf"),
+                         ("three_agent_service.write_md_to_word", "outputs/report.docx"),
+                     )]
+
+        result = asyncio.run(service.run())
+
+    assert all(exporter.await_count == 1 for exporter in exporters)
+    assert result["export_status"] == {"markdown": True, "pdf": True, "word": True}
+    assert result["md_path"].endswith(".md")
+    assert result["pdf_path"].endswith(".pdf")
+    assert result["word_path"].endswith(".docx")
+    assert result["run_statistics"]["evaluation_report_paths"]["word"] == ""
+    assert result["run_statistics"]["evaluation_summary"]["evaluation_report_paths"]["markdown"].endswith(".md")
 
 
 def test_catastrophic_evaluation_orchestration_failure_does_not_block_original_exports():
