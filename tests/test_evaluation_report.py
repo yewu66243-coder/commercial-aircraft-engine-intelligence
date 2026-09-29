@@ -143,6 +143,9 @@ def test_bare_bearer_redaction_requires_a_credential_like_value():
         "A bearing and bearer structure needs inspection.",
         "Bearer TOP_SECRET_TOKEN",
         "Bearer eyJhbGciOiJIUzI1NiJ9.eyJzdWIiOiIxMjM0NTY3ODkwIn0.signature",
+        "Bearer abc123",
+        "Bearer password",
+        "Bearer ABC",
     ))
     summary = build_evaluation_summary(entity, urls, support)
 
@@ -152,6 +155,9 @@ def test_bare_bearer_redaction_requires_a_credential_like_value():
     assert "bearing and bearer structure" in report
     assert "TOP_SECRET_TOKEN" not in report
     assert "eyJhbGciOiJIUzI1NiJ9" not in report
+    assert "Bearer abc123" not in report
+    assert "Bearer password" not in report
+    assert "Bearer ABC" not in report
 
 
 def test_table_cells_escape_pipes_backslashes_newlines_and_truncate():

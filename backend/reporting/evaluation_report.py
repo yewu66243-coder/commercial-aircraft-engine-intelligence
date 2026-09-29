@@ -58,15 +58,7 @@ def _list(value: object) -> list:
 def _redact_credentials(value: str) -> str:
     for pattern in _CREDENTIAL_PATTERNS:
         value = pattern.sub("[凭据已隐藏]", value)
-    return _BARE_BEARER_PATTERN.sub(_redact_bare_bearer, value)
-
-
-def _redact_bare_bearer(match: re.Match[str]) -> str:
-    token = match.group(1)
-    if len(token) >= 8 and (any(char.isdigit() or char.isupper() for char in token)
-                            or any(char in "._-" for char in token)):
-        return "[凭据已隐藏]"
-    return match.group(0)
+    return _BARE_BEARER_PATTERN.sub("[凭据已隐藏]", value)
 
 
 def _text(value: object, limit: int = 500) -> str:
