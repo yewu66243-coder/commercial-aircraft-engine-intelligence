@@ -3,7 +3,6 @@
 from __future__ import annotations
 
 import math
-from copy import deepcopy
 from typing import Any
 from urllib.parse import unquote
 
@@ -36,9 +35,7 @@ def _input_dict(value: Any) -> dict[str, Any] | None:
 
 
 def _safe_string(value: Any) -> str:
-    if isinstance(value, str):
-        return value
-    if isinstance(value, bool) or not isinstance(value, (int, float)):
+    if isinstance(value, bool) or not isinstance(value, (str, int, float)):
         return ""
     try:
         return str(value)
@@ -153,23 +150,16 @@ def _metric_values(value: Any) -> tuple[dict[str, int], dict[str, float | None],
     if not isinstance(value, dict) or any(key not in value for key in (*_COUNT_FIELDS, *_RATE_FIELDS)):
         return {}, {}, False
     counts: dict[str, int] = {}
-    rates: dict[str, float | None] = {}
     for key in _COUNT_FIELDS:
         count, valid = _count(value.get(key))
         if not valid or count is None:
             return {}, {}, False
         counts[key] = count
-    for key in _RATE_FIELDS:
-        rate, valid = _rate(value.get(key), missing_is_valid=True)
-        if not valid:
-            return {}, {}, False
-        rates[key] = rate
-    if (rates["precision"] is None and counts["true_positive"] + counts["false_positive"] != 0):
-        return {}, {}, False
-    if (rates["recall"] is None and counts["true_positive"] + counts["false_negative"] != 0):
-        return {}, {}, False
-    if rates["f1"] is None and 2 * counts["true_positive"] + counts["false_positive"] + counts["false_negative"] != 0:
-        return {}, {}, False
+    tp, fp, fn = counts["true_positive"], counts["false_positive"], counts["false_negative"]
+    precision = round(tp / (tp + fp), 4) if tp + fp else None
+    recall = round(tp / (tp + fn), 4) if tp + fn else None
+    f1 = round(2 * tp / (2 * tp + fp + fn), 4) if 2 * tp + fp + fn else None
+    rates = {"precision": precision, "recall": recall, "f1": f1}
     return counts, rates, True
 
 
@@ -256,11 +246,21 @@ def _failed_accessibility() -> tuple[dict[str, Any], list[dict[str, str]]]:
 
 
 def _accessibility_results(value: Any) -> list[Any]:
-    fields = ("url", "checked_url", "status_code", "accessible", "method", "ssl_verified", "failure_reason", "warning")
+    fields = ("url", "checked_url", "status_code", "accessible", "method", "ssl_verified")
+    allowed_reasons = {"accessible", "http_status", "connection", "timeout", "ssl_certificate", "checker_exception", "invalid_url", "userinfo", "network_or_unknown"}
+    allowed_warnings = {"ssl_unverified", "redirected", "head_fallback"}
     result: list[Any] = []
     for item in _safe_list(value):
         safe = _public_item(item, fields, ("accessible", "ssl_verified"))
         if isinstance(safe, dict):
+            raw_reason = item.get("failure_reason") if isinstance(item, dict) else None
+            if raw_reason is not None:
+                reason = _safe_string(raw_reason)
+                safe["failure_reason"] = reason if reason in allowed_reasons else "network_or_unknown"
+            raw_warning = item.get("warning") if isinstance(item, dict) else None
+            warning = _safe_string(raw_warning)
+            if warning in allowed_warnings:
+                safe["warning"] = warning
             result.append(safe)
     return result
 
@@ -273,6 +273,11 @@ def _accessibility_summary(value: Any) -> tuple[dict[str, Any], list[dict[str, s
     if not total_valid or total is None:
         return _failed_accessibility()
     if total == 0:
+        zero_values = (source.get("checked_urls"), source.get("accessible_urls"), source.get("failed_urls"))
+        for item in zero_values:
+            count, valid = _count(item, missing_is_valid=True)
+            if not valid or count != 0:
+                return _failed_accessibility()
         return ({"status": "no_public_urls", "threshold": PUBLIC_LINK_ACCESSIBILITY_THRESHOLD,
                  "total_count": 0, "checked_count": 0, "accessible_count": 0, "inaccessible_count": 0,
                  "rate": None, "requirement_met": None, "results": []}, [])
@@ -287,10 +292,10 @@ def _accessibility_summary(value: Any) -> tuple[dict[str, Any], list[dict[str, s
     skipped = total - checked if skipped_raw is None else _count(skipped_raw)[0]
     if skipped is None or checked > total or skipped + checked != total or counts["accessible_count"] + counts["inaccessible_count"] != checked:
         return _failed_accessibility()
-    rate, valid_rate = _rate(source.get("accessibility_rate"))
-    if not valid_rate:
-        return _failed_accessibility()
     results = _accessibility_results(source.get("results"))
+    if not isinstance(source.get("results"), list) or len(results) != checked:
+        return _failed_accessibility()
+    rate = round(counts["accessible_count"] / checked, 4) if checked else None
     return ({"status": "completed", "threshold": PUBLIC_LINK_ACCESSIBILITY_THRESHOLD, **counts,
              "rate": rate, "requirement_met": None if rate is None else rate >= PUBLIC_LINK_ACCESSIBILITY_THRESHOLD,
              "results": results}, [])
@@ -315,6 +320,15 @@ def _claim_relationships(value: Any) -> list[dict[str, Any]]:
     for item in _safe_list(value):
         safe = _public_item(item, fields, ("source_readable",))
         if isinstance(safe, dict):
+            status = _safe_string(item.get("status")) if isinstance(item, dict) else ""
+            reasons = {
+                "supported": "来源充分支撑该断言。",
+                "partially_supported": "来源仅部分支撑该断言。",
+                "unsupported": "未找到充分来源支撑。",
+                "unchecked": "该断言尚未完成核验。",
+            }
+            if status in reasons:
+                safe["reason"] = reasons[status]
             output.append(safe)
     return output
 
@@ -329,6 +343,11 @@ def _claim_support_summary(value: Any) -> tuple[dict[str, Any], list[dict[str, s
     if not count_valid or relationship_count is None:
         return _failed_claim_support()
     if relationship_count == 0:
+        zero_values = (source.get("supported_count"), source.get("partially_supported_count"), source.get("unsupported_count"), source.get("unchecked_count"))
+        for item in zero_values:
+            count, valid = _count(item, missing_is_valid=True)
+            if not valid or count != 0:
+                return _failed_claim_support()
         return ({"status": "no_public_relationships", "threshold": PUBLIC_LINK_SUPPORT_THRESHOLD,
                  "relationship_count": 0, "supported_count": 0, "partially_supported_count": 0,
                  "unsupported_count": 0, "unchecked_count": 0, "accuracy": None,
@@ -341,12 +360,12 @@ def _claim_support_summary(value: Any) -> tuple[dict[str, Any], list[dict[str, s
         counts[key] = count
     if sum(counts[key] for key in _SUPPORT_FIELDS[1:]) != counts["relationship_count"]:
         return _failed_claim_support()
-    accuracy, valid = _rate(source.get("support_accuracy"))
-    if not valid:
-        return _failed_claim_support()
     relationships = _claim_relationships(source.get("relationships"))
+    if not isinstance(source.get("relationships"), list) or len(relationships) != counts["relationship_count"]:
+        return _failed_claim_support()
+    accuracy = round(counts["supported_count"] / counts["relationship_count"], 4)
     return ({"status": "completed", "threshold": PUBLIC_LINK_SUPPORT_THRESHOLD, **counts,
-             "accuracy": accuracy, "requirement_met": None if accuracy is None else accuracy >= PUBLIC_LINK_SUPPORT_THRESHOLD,
+             "accuracy": accuracy, "requirement_met": accuracy >= PUBLIC_LINK_SUPPORT_THRESHOLD,
              "relationships": relationships}, [])
 
 
@@ -404,7 +423,8 @@ def _report_paths_summary(value: Any) -> tuple[dict[str, str], list[dict[str, st
 
 
 def _public_links(accessibility: dict[str, Any], claim_support: dict[str, Any]) -> dict[str, Any]:
-    details = {"accessibility": deepcopy(accessibility["results"]), "claim_support": deepcopy(claim_support["relationships"])}
+    details = {"accessibility": [dict(item) for item in accessibility["results"] if isinstance(item, dict)],
+               "claim_support": [dict(item) for item in claim_support["relationships"] if isinstance(item, dict)]}
     return {
         "accessibility": accessibility, "claim_support": claim_support, "details": details,
         # Deprecated flat aliases retained until the existing evaluation panel migrates.

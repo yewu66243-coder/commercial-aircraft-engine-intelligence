@@ -52,7 +52,7 @@ def _url_check(rate: float | None = 0.98) -> dict:
         "accessible_urls": 98,
         "failed_urls": 2,
         "accessibility_rate": rate,
-        "results": [{"url": "https://example.test", "accessible": True}],
+        "results": [{"url": "https://example.test", "accessible": True} for _ in range(100)],
     }
 
 
@@ -64,7 +64,7 @@ def _source_eval(accuracy: float | None = 0.9) -> dict:
         "unsupported_count": 0,
         "unchecked_count": 0,
         "support_accuracy": accuracy,
-        "relationships": [{"claim": "A", "url": "https://example.test"}],
+        "relationships": [{"claim": "A", "url": "https://example.test"} for _ in range(10)],
     }
 
 
@@ -90,7 +90,7 @@ def test_strict_summary_exposes_metrics_details_and_dual_link_evaluations():
         "false_negative": 0,
         "precision": 0.9,
         "recall": 1.0,
-        "f1": 0.9,
+        "f1": 0.9474,
         "requirement_met": True,
     }
     assert summary["entity"]["categories"]["organization"]["label"] == "机构"
@@ -283,7 +283,7 @@ def test_overflowing_numeric_input_degrades_without_raising():
     entity = _strict_entity(10**10000)
     summary = build_evaluation_summary(entity, _url_check(), _source_eval())
 
-    assert summary["entity"]["status"] == "evaluation_failed"
+    assert summary["entity"]["status"] == "completed"
 
 
 def test_omitted_claim_support_does_not_make_two_failed_legacy_parts_partial():
@@ -398,12 +398,12 @@ def test_completed_summary_whitelists_and_detaches_sensitive_details():
     urls["results"] = [{
         "url": "https://example.test", "checked_url": "https://example.test", "accessible": True,
         "raw_error": "secret", "local_path": "C:/secret/url", "warning": "none",
-    }]
+    }] * 100
     source = _source_eval()
     source["relationships"] = [{
         "relationship_id": "r1", "ref": "URL1", "url": "https://example.test", "claim": "claim",
         "status": "supported", "debug": "secret", "local_path": "C:/secret/relationship",
-    }]
+    }] * 10
 
     summary = build_evaluation_summary(entity, urls, source)
     entity["matches"][0]["entity"] = "mutated"
@@ -418,10 +418,11 @@ def test_completed_summary_whitelists_and_detaches_sensitive_details():
     }
     assert summary["entity"]["matched"] == [{"entity": "A"}]
     assert summary["public_links"]["details"]["accessibility"][0] == {
-        "url": "https://example.test", "checked_url": "https://example.test", "accessible": True, "warning": "none"
+        "url": "https://example.test", "checked_url": "https://example.test", "accessible": True
     }
     assert summary["public_links"]["details"]["claim_support"][0] == {
-        "relationship_id": "r1", "ref": "URL1", "url": "https://example.test", "claim": "claim", "status": "supported"
+        "relationship_id": "r1", "ref": "URL1", "url": "https://example.test", "claim": "claim",
+        "status": "supported", "reason": "来源充分支撑该断言。"
     }
     assert "secret" not in repr(summary)
     assert "mutated" not in repr(summary)
@@ -470,5 +471,80 @@ def test_malicious_numeric_subclass_never_escapes_summary_builder():
     entity = _strict_entity(ExplodingFloat(0.9))
     summary = build_evaluation_summary(entity, _url_check(), _source_eval())
 
-    assert summary["entity"]["status"] == "evaluation_failed"
+    assert summary["entity"]["status"] == "completed"
     assert "private number failure" not in repr(summary)
+
+
+def test_zero_totals_reject_nonzero_component_counts():
+    url = {"total_urls": 0, "checked_urls": 1, "accessible_urls": 1, "failed_urls": 0}
+    support = {"relationship_count": 0, "supported_count": 1, "partially_supported_count": 0,
+               "unsupported_count": 0, "unchecked_count": 0}
+
+    summary = build_evaluation_summary(_strict_entity(), url, support)
+
+    assert summary["public_links"]["accessibility"]["status"] == "evaluation_failed"
+    assert summary["public_links"]["claim_support"]["status"] == "evaluation_failed"
+
+    malformed = build_evaluation_summary(
+        _strict_entity(),
+        {"total_urls": 0, "checked_urls": "not-a-count"},
+        {"relationship_count": 0, "supported_count": "not-a-count"},
+    )
+    assert malformed["public_links"]["accessibility"]["status"] == "evaluation_failed"
+    assert malformed["public_links"]["claim_support"]["status"] == "evaluation_failed"
+
+
+def test_rates_are_derived_from_counts_not_untrusted_raw_ratios():
+    entity = _strict_entity()
+    entity["metrics"]["overall"].update({"true_positive": 0, "false_positive": 1, "false_negative": 1,
+                                            "precision": 1.0, "recall": 1.0, "f1": 1.0})
+    entity["metrics"]["categories"] = {
+        "organization": {"label": "机构", "true_positive": 0, "false_positive": 1, "false_negative": 1,
+                           "precision": 1.0, "recall": 1.0, "f1": 1.0}
+    }
+    url = {"total_urls": 2, "checked_urls": 2, "accessible_urls": 0, "failed_urls": 2,
+           "skipped_urls": 0, "accessibility_rate": 1.0,
+           "results": [{"accessible": False}, {"accessible": False}]}
+    support = {"relationship_count": 2, "supported_count": 0, "partially_supported_count": 1,
+               "unsupported_count": 1, "unchecked_count": 0, "support_accuracy": 1.0,
+               "relationships": [{}, {}]}
+
+    summary = build_evaluation_summary(entity, url, support)
+
+    assert summary["entity"]["overall"]["precision"] == 0.0
+    assert summary["entity"]["overall"]["recall"] == 0.0
+    assert summary["entity"]["overall"]["f1"] == 0.0
+    assert summary["public_links"]["accessibility"]["rate"] == 0.0
+    assert summary["public_links"]["claim_support"]["accuracy"] == 0.0
+
+
+def test_diagnostic_text_is_normalized_and_detail_lists_are_audited():
+    url = _url_check()
+    url["results"] = [{"accessible": False, "failure_reason": "C:/secret/token", "warning": "private"}] * 100
+    source = _source_eval()
+    source["relationships"] = [{"status": "unsupported", "reason": "C:/secret/token"}] * 10
+
+    summary = build_evaluation_summary(_strict_entity(), url, source)
+
+    assert summary["public_links"]["details"]["accessibility"][0]["failure_reason"] == "network_or_unknown"
+    assert "warning" not in summary["public_links"]["details"]["accessibility"][0]
+    assert summary["public_links"]["details"]["claim_support"][0]["reason"] == "未找到充分来源支撑。"
+    assert "secret" not in repr(summary)
+
+    mismatched = _url_check()
+    mismatched["results"] = []
+    bad = build_evaluation_summary(_strict_entity(), mismatched, _source_eval())
+    assert bad["public_links"]["accessibility"]["status"] == "evaluation_failed"
+
+
+def test_evil_string_values_do_not_escape_whitelisting():
+    class EvilString(str):
+        def __str__(self):
+            raise RuntimeError("private string failure")
+
+    url = _url_check()
+    url["results"] = [{"accessible": True, "method": EvilString("GET")}] * 100
+    summary = build_evaluation_summary(_strict_entity(), url, _source_eval())
+
+    assert summary["public_links"]["accessibility"]["status"] == "completed"
+    assert "private string failure" not in repr(summary)
