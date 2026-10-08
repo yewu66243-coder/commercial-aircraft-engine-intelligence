@@ -145,11 +145,32 @@ const GPTResearcher = (() => {
     const provider = selectedModelProvider();
     const status = document.getElementById('modelProviderStatus');
     if (!selectedModel || !status) return;
-    const credentialName = selectedModel.provider_id === 'qwen' ? 'DASHSCOPE_API_KEY' : 'OPENAI_API_KEY';
+    const credentialName = selectedModel.custom
+      ? '自定义模型 API 管理中的 API Key'
+      : selectedModel.provider_id === 'qwen' ? 'DASHSCOPE_API_KEY' : 'OPENAI_API_KEY';
     status.textContent = selectedModel.configured === false
       ? `${selectedModel.name} 尚未配置，请先设置 ${credentialName}。`
       : `${detail.label} · ${selectedModel.provider_name || provider?.name || selectedModel.provider_id} · ${selectedModel.model}${selectedModel.configured === true ? ' · 已就绪' : ''}`;
     status.dataset.state = selectedModel.configured === false ? 'unavailable' : 'ready';
+  };
+
+  const renderCustomModelProviders = () => {
+    const list = document.getElementById('customModelList');
+    if (!list) return;
+    const providers = (modelProviderCatalog.providers || []).filter(item => item.custom);
+    if (!providers.length) {
+      list.innerHTML = '<div class="empty-state">暂无自定义模型。保存后会出现在详细报告的大模型列表中。</div>';
+      return;
+    }
+    list.innerHTML = providers.map((provider) => `
+      <div class="custom-model-row">
+        <div>
+          <strong>${escapeHtml(provider.name || provider.id)}</strong>
+          <small>${escapeHtml((provider.models || []).join('，') || provider.model || '-')} · ${escapeHtml(provider.endpoint_host || '-')} · ${provider.configured ? '已配置' : '未配置'}${provider.api_key_preview ? ` · ${escapeHtml(provider.api_key_preview)}` : ''}</small>
+        </div>
+        <button type="button" class="delete-custom-model-btn" data-provider-id="${escapeHtml(provider.id)}" title="删除">×</button>
+      </div>
+    `).join('');
   };
 
   const loadModelProviders = async () => {
@@ -167,6 +188,114 @@ const GPTResearcher = (() => {
       console.warn('Unable to load model provider catalog:', error);
     } finally {
       syncReportDetailModel();
+      renderCustomModelProviders();
+    }
+  };
+
+  const splitCustomModelList = (value) => String(value || '')
+    .split(/[,，;；\n]+/)
+    .map(item => item.trim())
+    .filter(Boolean);
+
+  const customModelPayload = () => ({
+    name: document.getElementById('customModelName')?.value.trim() || '',
+    base_url: document.getElementById('customModelBaseUrl')?.value.trim() || '',
+    api_key: document.getElementById('customModelApiKey')?.value.trim() || '',
+    models: splitCustomModelList(document.getElementById('customModelModels')?.value || ''),
+  });
+
+  const readErrorMessage = async (response) => {
+    try {
+      const data = await response.json();
+      const detail = data.detail || data.message || data.error;
+      if (typeof detail === 'string') return detail;
+      if (detail?.message) return detail.message;
+      return JSON.stringify(detail || data);
+    } catch (_) {
+      return `HTTP ${response.status}`;
+    }
+  };
+
+  const setCustomModelStatus = (message, state = '') => {
+    const status = document.getElementById('customModelStatus');
+    if (!status) return;
+    status.textContent = message;
+    status.dataset.state = state;
+  };
+
+  const testCustomModelProvider = async () => {
+    const payload = customModelPayload();
+    setCustomModelStatus('正在测试模型连接...', 'pending');
+    try {
+      const response = await fetch('/api/model-providers/custom/test', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify(payload),
+      });
+      if (!response.ok) throw new Error(await readErrorMessage(response));
+      const data = await response.json();
+      setCustomModelStatus(`连接测试通过：${data.provider?.name || payload.name} / ${data.provider?.model || payload.models[0]}。${data.message || ''}`, 'ready');
+      showToast('自定义模型连接正常');
+    } catch (error) {
+      console.error('测试自定义模型失败:', error);
+      setCustomModelStatus(`连接测试失败：${error.message}`, 'unavailable');
+      showToast(`连接测试失败：${error.message}`, 5000);
+    }
+  };
+
+  const saveCustomModelProvider = async () => {
+    const payload = customModelPayload();
+    setCustomModelStatus('正在保存模型配置...', 'pending');
+    try {
+      const response = await fetch('/api/model-providers/custom', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify(payload),
+      });
+      if (!response.ok) throw new Error(await readErrorMessage(response));
+      const data = await response.json();
+      if (data.catalog) modelProviderCatalog = data.catalog;
+      document.getElementById('customModelApiKey').value = '';
+      syncReportDetailModel();
+      renderCustomModelProviders();
+      setCustomModelStatus('模型配置已保存；详细报告可在上方大模型列表中选择。', 'ready');
+      showToast('自定义模型已保存');
+    } catch (error) {
+      console.error('保存自定义模型失败:', error);
+      setCustomModelStatus(`保存失败：${error.message}`, 'unavailable');
+      showToast(`保存失败：${error.message}`, 5000);
+    }
+  };
+
+  const deleteCustomModelProvider = async (providerId) => {
+    if (!providerId || !confirm('确定删除这个自定义模型配置吗？')) return;
+    try {
+      const response = await fetch(`/api/model-providers/custom/${encodeURIComponent(providerId)}`, {
+        method: 'DELETE',
+      });
+      if (!response.ok) throw new Error(await readErrorMessage(response));
+      const data = await response.json();
+      if (data.catalog) modelProviderCatalog = data.catalog;
+      syncReportDetailModel();
+      renderCustomModelProviders();
+      setCustomModelStatus('模型配置已删除。', 'ready');
+      showToast('自定义模型已删除');
+    } catch (error) {
+      console.error('删除自定义模型失败:', error);
+      setCustomModelStatus(`删除失败：${error.message}`, 'unavailable');
+      showToast(`删除失败：${error.message}`, 5000);
+    }
+  };
+
+  const initCustomModelManager = () => {
+    document.getElementById('testCustomModelBtn')?.addEventListener('click', testCustomModelProvider);
+    document.getElementById('saveCustomModelBtn')?.addEventListener('click', saveCustomModelProvider);
+    const list = document.getElementById('customModelList');
+    if (list) {
+      list.addEventListener('click', (event) => {
+        const button = event.target.closest('.delete-custom-model-btn');
+        if (button) deleteCustomModelProvider(button.dataset.providerId);
+      });
     }
   };
 
@@ -376,6 +505,7 @@ const GPTResearcher = (() => {
 
     // Load request-scoped report model choices and availability.
     loadModelProviders();
+    initCustomModelManager();
     document.getElementById('llmProviderSelect')?.addEventListener('change', syncReportDetailModel);
     document.getElementById('reportDetailSelect')?.addEventListener('change', syncReportDetailModel);
 
@@ -1278,6 +1408,45 @@ const GPTResearcher = (() => {
       .map((input) => input.value)
       .filter(Boolean);
     return scopes.length ? [...new Set(scopes)] : ['web'];
+  };
+
+  const numberValue = (id, fallback) => {
+    const value = parseFloat(document.getElementById(id)?.value);
+    return Number.isFinite(value) ? value : fallback;
+  };
+
+  const collectReportFormatProfile = () => {
+    const chapters = (document.getElementById('formatChapters')?.value || '')
+      .split(/\r?\n/)
+      .map((title) => title.trim())
+      .filter(Boolean)
+      .slice(0, 12)
+      .map((title) => ({ title }));
+    const heading1 = numberValue('formatHeading1Size', 15);
+    return {
+      font: {
+        body: document.getElementById('formatBodyFont')?.value || 'SimSun',
+        heading: document.getElementById('formatHeadingFont')?.value || 'SimHei',
+        reference: document.getElementById('formatBodyFont')?.value || 'SimSun',
+      },
+      size: {
+        body: numberValue('formatBodySize', 12),
+        heading1,
+        heading2: Math.max(10, heading1 - 2),
+        heading3: Math.max(9, heading1 - 3),
+        caption: 10.5,
+        reference: numberValue('formatBodySize', 12),
+      },
+      layout: {
+        page: 'A4',
+        margin_mm: numberValue('formatMargin', 25),
+        line_spacing: numberValue('formatLineSpacing', 1.5),
+        include_toc: Boolean(document.getElementById('formatIncludeToc')?.checked),
+        cover: Boolean(document.getElementById('formatCover')?.checked),
+        numbering: true,
+      },
+      chapters,
+    };
   };
 
   const scopeLabelMap = {
@@ -2392,8 +2561,11 @@ const startResearch = async () => {
     const selectedDetail = selectedReportDetail();
     const selectedModel = selectedGenerationModel();
     if (selectedModel?.configured === false) {
-      const credentialName = selectedModel.provider_id === 'qwen' ? 'DASHSCOPE_API_KEY' : 'OPENAI_API_KEY';
-      showToast(`${selectedModel.name} 尚未配置，请在 .env 中设置 ${credentialName} 后重启工作台。`, 5000);
+      const credentialName = selectedModel.custom
+        ? '自定义模型 API 管理中的 API Key'
+        : selectedModel.provider_id === 'qwen' ? 'DASHSCOPE_API_KEY' : 'OPENAI_API_KEY';
+      const locationHint = selectedModel.custom ? '请在自定义模型 API 管理中补全配置。' : `请在 .env 中设置 ${credentialName} 后重启工作台。`;
+      showToast(`${selectedModel.name} 尚未配置，${locationHint}`, 5000);
       return;
     }
     // 1. 清理上一轮的输出痕迹
@@ -2444,6 +2616,7 @@ const startResearch = async () => {
 
     // 3. 收集你在网页上的输入，打包成我们接口需要的格式
     const searchScopes = getSelectedSearchScopes();
+    const reportFormatProfile = collectReportFormatProfile();
     const requestData = {
         task: document.getElementById('task').value,
         llm_provider: selectedModel?.provider_id || 'deepseek',
@@ -2458,6 +2631,7 @@ const startResearch = async () => {
         task_template_id: document.getElementById('taskTemplateSelect')?.value || null,
         source_template_ids: getSelectedSourceTemplateIds(),
         source_categories: getSelectedSourceCategories(),
+        report_format_profile: reportFormatProfile,
         client_task_id: (window.crypto?.randomUUID?.() || `report-${Date.now()}-${Math.random().toString(16).slice(2)}`)
     };
 

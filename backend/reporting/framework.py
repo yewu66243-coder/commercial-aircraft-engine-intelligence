@@ -4,6 +4,8 @@ from __future__ import annotations
 import re
 from typing import Dict, Iterable, List
 
+from .format_profile import custom_chapters_to_framework
+
 
 def _chapter(title: str, question: str, evidence: str, logic: str) -> Dict[str, str]:
     return {"title": title, "question": question, "evidence": evidence, "logic": logic}
@@ -81,8 +83,19 @@ def _score(text: str, keywords: Iterable[str]) -> int:
 
 
 def build_report_framework_plan(*, task: str, report_type: str = "",
-                                demand_text: str = "", source_template_text: str = "") -> Dict[str, object]:
+                                demand_text: str = "", source_template_text: str = "",
+                                custom_chapters: List[Dict[str, str]] | None = None) -> Dict[str, object]:
     """Choose a public report framework from task semantics and known routing context."""
+    if custom_chapters:
+        return {
+            "id": "custom_user_framework",
+            "name": "用户自定义报告框架",
+            "match_score": None,
+            "public_method_section": False,
+            "internal_method_note": "用户已指定公开正文章节；资料来源、检索范围和证据缺口仍进入后台研究记录。",
+            "chapters": custom_chapters_to_framework(custom_chapters),
+            "custom": True,
+        }
     text = "\n".join([task or "", report_type or "", demand_text or "", source_template_text or ""])
     scored: List[tuple[int, str]] = [
         (_score(text, profile["keywords"]), framework_id)

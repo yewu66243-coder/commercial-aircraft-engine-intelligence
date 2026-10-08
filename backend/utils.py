@@ -45,11 +45,11 @@ async def write_text_to_md(text: str, filename: str = "") -> str:
     return urllib.parse.quote(file_path)
 
 
-async def write_md_to_pdf(text: str, filename: str = "") -> str:
+async def write_md_to_pdf(text: str, filename: str = "", format_profile: dict | None = None) -> str:
     """Return the URL-encoded PDF path, or an empty string on export failure."""
     file_path = f"outputs/{filename[:60]}.pdf"
     try:
-        await asyncio.to_thread(render_pdf, text, file_path, Path.cwd())
+        await asyncio.to_thread(render_pdf, text, file_path, Path.cwd(), format_profile)
         print(f"Report written to {file_path}")
         return urllib.parse.quote(file_path)
     except Exception as exc:
@@ -57,11 +57,11 @@ async def write_md_to_pdf(text: str, filename: str = "") -> str:
         return ""
 
 
-async def write_md_to_word(text: str, filename: str = "") -> str:
+async def write_md_to_word(text: str, filename: str = "", format_profile: dict | None = None) -> str:
     """Return the URL-encoded DOCX path, or an empty string on export failure."""
     file_path = f"outputs/{filename[:60]}.docx"
     try:
-        await asyncio.to_thread(render_word, text, file_path, Path.cwd())
+        await asyncio.to_thread(render_word, text, file_path, Path.cwd(), format_profile)
         print(f"Report written to {file_path}")
         return urllib.parse.quote(file_path)
     except Exception as exc:

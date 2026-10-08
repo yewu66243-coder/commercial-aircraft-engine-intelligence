@@ -25,12 +25,18 @@ from backend.reporting.prompts import (
     build_argument_polish_prompt,
 )
 from backend.reporting.framework import build_report_framework_plan, format_framework_for_prompt
+from backend.reporting.format_profile import normalize_report_format_profile
 from backend.reporting.content_depth import pack_evidence, review_content, usable_revision, bind_local_source_filenames
 from backend.reporting.detail_profiles import (
     ReportDetailProfile,
     profile_with_environment_model,
     report_detail_catalog,
     resolve_report_detail_profile,
+)
+from backend.model_provider_registry import (
+    custom_generation_models,
+    find_custom_model_provider,
+    public_custom_model_providers,
 )
 from backend.reporting.image_evidence import insert_missing_figures
 from backend.reporting.source_grounding import build_source_catalog, pack_sources
@@ -191,8 +197,20 @@ def resolve_model_runtime(provider_id: Optional[str], environment=None) -> Model
             smart_model=smart,
             strategic_model=_plain_model_name(environment.get("QWEN_STRATEGIC_MODEL"), smart),
         )
+    custom_provider = find_custom_model_provider(selected)
+    if custom_provider:
+        model = custom_provider.get("default_model") or (custom_provider.get("models") or [""])[0]
+        return ModelRuntime(
+            provider_id=custom_provider["id"],
+            provider_name=custom_provider["name"],
+            api_key=custom_provider.get("api_key"),
+            base_url=custom_provider["base_url"],
+            fast_model=model,
+            smart_model=model,
+            strategic_model=model,
+        )
     raise ModelProviderConfigurationError(
-        f"不支持的生成大模型：{provider_id}。请选择 deepseek 或 qwen。")
+        f"不支持的生成大模型：{provider_id}。请选择 deepseek、qwen 或已保存的自定义模型。")
 
 
 def _valid_model_choice(model_name: Optional[str]) -> Optional[str]:
@@ -272,8 +290,17 @@ def resolve_report_detail_model_runtime(
         requested = _valid_model_choice(model_name) or runtime.smart_model
         return profile, _runtime_with_single_model(runtime, requested)
 
+    custom_provider = find_custom_model_provider(selected_provider)
+    if custom_provider:
+        runtime = resolve_model_runtime(custom_provider["id"], environment)
+        requested = _valid_model_choice(model_name) or runtime.smart_model
+        if requested not in custom_provider.get("models", []):
+            raise ModelProviderConfigurationError(
+                f"自定义模型服务“{custom_provider['name']}”中未配置模型 {requested}。")
+        return profile, _runtime_with_single_model(runtime, requested)
+
     raise ModelProviderConfigurationError(
-        "详细报告的大模型请选择 DeepSeek V4 Pro 或千问模型。")
+        "详细报告的大模型请选择 DeepSeek V4 Pro、千问模型或已保存的自定义模型。")
 
 
 def get_model_provider_catalog(environment=None) -> Dict[str, Any]:
@@ -281,6 +308,7 @@ def get_model_provider_catalog(environment=None) -> Dict[str, Any]:
     environment = os.environ if environment is None else environment
     deepseek_runtime = resolve_model_runtime("deepseek", environment)
     qwen_runtime = resolve_model_runtime("qwen", environment)
+    custom_providers = public_custom_model_providers()
     brief_profile = profile_with_environment_model(
         resolve_report_detail_profile("brief"), environment)
     detailed_profile = profile_with_environment_model(
@@ -290,6 +318,7 @@ def get_model_provider_catalog(environment=None) -> Dict[str, Any]:
         "providers": [
             deepseek_runtime.public_metadata(),
             qwen_runtime.public_metadata(),
+            *custom_providers,
         ],
         "report_details": report_detail_catalog(environment),
         "generation_models": [
@@ -323,6 +352,7 @@ def get_model_provider_catalog(environment=None) -> Dict[str, Any]:
                 }
                 for model in qwen_model_choices(environment)
             ],
+            *custom_generation_models(),
         ],
     }
 
@@ -520,6 +550,7 @@ class ThreeAgentRequestData:
     source_template_ids: Optional[List[str]] = None
     source_categories: Optional[List[str]] = None
     report_type: str = "research_report"
+    report_format_profile: Optional[Dict[str, Any]] = None
     client_task_id: Optional[str] = None
 
 
@@ -534,6 +565,7 @@ class ThreeAgentService:
 
     def __init__(self, request: ThreeAgentRequestData):
         self.request = request
+        self.report_format_profile = normalize_report_format_profile(request.report_format_profile)
         self.detail_profile: Optional[ReportDetailProfile] = None
         if request.report_detail:
             self.detail_profile, self.model_runtime = resolve_report_detail_model_runtime(
@@ -1178,6 +1210,7 @@ class ThreeAgentService:
                     report_type=self.request.report_type,
                     demand_text=matched_topic_text,
                     source_template_text=source_template_text,
+                    custom_chapters=self.report_format_profile.get("chapters") or None,
                 )
                 framework_text = format_framework_for_prompt(self.report_framework_plan)
                 chapter_count = len(self.report_framework_plan.get("chapters") or [])
@@ -1527,6 +1560,7 @@ class ThreeAgentService:
             metadata={
                 "generation_status": self.generation_status,
                 "source_catalog": self.source_catalog,
+                "report_format_profile": self.report_format_profile,
                 "generation_warning": self.generation_warning,
                 "report_type": self.request.report_type,
                 "search_scope": self.search_scope_label(),
@@ -1560,6 +1594,7 @@ class ThreeAgentService:
             "report_source": self.search_scope_label(),
             "effective_report_source": self.effective_report_source(),
             "search_scopes": sorted(self.selected_search_scopes()),
+            "report_format_profile": self.report_format_profile,
             "query_domain_count": len(effective_query_domains),
             "query_domains": effective_query_domains,
             "manual_query_domains": self.request.query_domains or [],
@@ -1710,8 +1745,8 @@ class ThreeAgentService:
         
         # 调用 utils.py 中的函数，生成三种格式的文件，存入 outputs 文件夹
         md_path = await write_text_to_md(final_report, filename)
-        pdf_path = await write_md_to_pdf(final_report, filename)
-        word_path = await write_md_to_word(final_report, filename)
+        pdf_path = await write_md_to_pdf(final_report, filename, self.report_format_profile)
+        word_path = await write_md_to_word(final_report, filename, self.report_format_profile)
         export_status = {"markdown": bool(md_path), "pdf": bool(pdf_path), "word": bool(word_path)}
         export_errors = [f"{name}导出失败" for name, succeeded in export_status.items() if not succeeded]
         completed_elapsed = time.perf_counter() - started_perf

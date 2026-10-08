@@ -3,6 +3,7 @@ import asyncio
 import os
 from pathlib import Path
 import sys
+from tempfile import TemporaryDirectory
 from types import SimpleNamespace
 import unittest
 from unittest.mock import AsyncMock, patch
@@ -22,8 +23,9 @@ class ModelProviderSelectionTests(unittest.TestCase):
         })
 
         self.assertEqual(catalog["default"], "deepseek")
-        self.assertEqual([item["id"] for item in catalog["providers"]], ["deepseek", "qwen"])
-        self.assertTrue(all(item["configured"] for item in catalog["providers"]))
+        builtin_ids = [item["id"] for item in catalog["providers"] if not item.get("custom")]
+        self.assertEqual(builtin_ids, ["deepseek", "qwen"])
+        self.assertTrue(all(item["configured"] for item in catalog["providers"] if not item.get("custom")))
         self.assertNotIn("deep-secret", repr(catalog))
         self.assertNotIn("qwen-secret", repr(catalog))
 
@@ -110,6 +112,45 @@ class ModelProviderSelectionTests(unittest.TestCase):
         self.assertEqual(service.model_runtime.smart_model, "qwen-max")
         self.assertEqual(service.model_runtime.fast_model, "qwen-max")
         self.assertEqual(service.detail_profile.id, "detailed")
+
+    def test_custom_openai_compatible_model_is_local_and_selectable(self):
+        from backend.model_provider_registry import save_custom_model_provider
+        from three_agent_service import ThreeAgentRequestData, ThreeAgentService, get_model_provider_catalog
+
+        with TemporaryDirectory() as temp_dir, patch(
+            "backend.model_provider_registry.CONFIG_PATH",
+            Path(temp_dir) / "model_providers.local.json",
+        ):
+            save_custom_model_provider({
+                "name": "客户私有模型",
+                "base_url": "https://model.example/v1",
+                "api_key": "custom-secret",
+                "models": ["private-large", "private-fast"],
+            })
+            catalog = get_model_provider_catalog({})
+
+            custom_provider = next(item for item in catalog["providers"] if item.get("custom"))
+            self.assertTrue(custom_provider["custom"])
+            self.assertTrue(custom_provider["id"].startswith("custom_"))
+            self.assertTrue(custom_provider["configured"])
+            self.assertEqual(custom_provider["endpoint_host"], "model.example")
+            self.assertNotIn("custom-secret", repr(catalog))
+            self.assertIn(
+                f"{custom_provider['id']}:private-large",
+                [item["id"] for item in catalog["generation_models"]],
+            )
+
+            service = ThreeAgentService(ThreeAgentRequestData(
+                task="GTF",
+                report_detail="detailed",
+                llm_provider=custom_provider["id"],
+                llm_model="private-fast",
+            ))
+
+        self.assertEqual(service.model_runtime.provider_id, custom_provider["id"])
+        self.assertEqual(service.model_runtime.provider_name, "客户私有模型")
+        self.assertEqual(service.model_runtime.smart_model, "private-fast")
+        self.assertEqual(service.model_runtime.base_url, "https://model.example/v1")
 
     def test_missing_qwen_key_and_unknown_provider_are_rejected(self):
         from three_agent_service import (

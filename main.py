@@ -50,6 +50,11 @@ from three_agent_service import (
     get_report_progress,
     update_report_progress,
 )
+from backend.model_provider_registry import (
+    build_provider_payload_for_test,
+    delete_custom_model_provider,
+    save_custom_model_provider,
+)
 from gpt_researcher.document.local_library import (
     delete_local_library_file,
     list_local_library,
@@ -81,6 +86,11 @@ from gpt_researcher.evaluation.report_evaluation import (
     evaluate_saved_report,
     resolve_active_ground_truth_path,
 )
+
+try:
+    from openai import AsyncOpenAI
+except Exception:  # pragma: no cover
+    AsyncOpenAI = None
 
 
 EVALUATION_GROUND_TRUTH_DIR = (
@@ -211,6 +221,70 @@ async def generate_three_agent_report(request_data: ThreeAgentRequestData):
 @app.get("/api/model-providers")
 async def model_providers():
     return get_model_provider_catalog()
+
+
+@app.post("/api/model-providers/custom")
+async def save_custom_model_provider_endpoint(payload: dict[str, Any]):
+    try:
+        result = save_custom_model_provider(payload)
+        return {"success": True, **result, "catalog": get_model_provider_catalog()}
+    except ValueError as exc:
+        raise HTTPException(status_code=400, detail=str(exc)) from exc
+    except Exception as exc:
+        logger.exception("保存自定义模型配置失败")
+        raise HTTPException(status_code=500, detail=f"保存失败：{exc}") from exc
+
+
+@app.delete("/api/model-providers/custom/{provider_id}")
+async def delete_custom_model_provider_endpoint(provider_id: str):
+    try:
+        result = delete_custom_model_provider(provider_id)
+        return {"success": True, **result, "catalog": get_model_provider_catalog()}
+    except ValueError as exc:
+        raise HTTPException(status_code=404, detail=str(exc)) from exc
+    except Exception as exc:
+        logger.exception("删除自定义模型配置失败")
+        raise HTTPException(status_code=500, detail=f"删除失败：{exc}") from exc
+
+
+@app.post("/api/model-providers/custom/test")
+async def test_custom_model_provider_endpoint(payload: dict[str, Any]):
+    if AsyncOpenAI is None:
+        raise HTTPException(status_code=500, detail="当前环境缺少 openai 客户端，无法测试模型连接。")
+    try:
+        provider = build_provider_payload_for_test(payload)
+        model = provider.get("default_model") or provider["models"][0]
+        client = AsyncOpenAI(api_key=provider["api_key"], base_url=provider["base_url"])
+        response = await client.chat.completions.create(
+            model=model,
+            messages=[
+                {"role": "system", "content": "你是模型连通性测试助手，只需简短回应。"},
+                {"role": "user", "content": "请回复“连接正常”。"},
+            ],
+            temperature=0,
+            max_tokens=24,
+            timeout=30,
+        )
+        content = ""
+        try:
+            content = (response.choices[0].message.content or "").strip()
+        except Exception:
+            content = ""
+        return {
+            "success": True,
+            "provider": {
+                "id": provider["id"],
+                "name": provider["name"],
+                "model": model,
+                "base_url": provider["base_url"],
+            },
+            "message": content or "模型接口已返回响应。",
+        }
+    except ValueError as exc:
+        raise HTTPException(status_code=400, detail=str(exc)) from exc
+    except Exception as exc:
+        logger.exception("测试自定义模型连接失败")
+        raise HTTPException(status_code=502, detail=f"模型连接测试失败：{exc}") from exc
 
 
 @app.get("/api/report-progress/{task_id}")

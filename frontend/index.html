@@ -7,7 +7,7 @@
     <link rel="icon" type="image/png" href="/static/software-icon.png" />
     <link rel="alternate icon" href="./static/favicon.ico" />
     <link rel="stylesheet" href="https://cdnjs.cloudflare.com/ajax/libs/font-awesome/6.5.1/css/all.min.css" />
-    <link rel="stylesheet" href="/site/styles.css?v=merged-evaluation-dashboard-20261008" />
+    <link rel="stylesheet" href="/site/styles.css?v=fixed-four-panel-layout-20261008" />
 </head>
 <body>
     <div class="app-shell">
@@ -99,8 +99,91 @@
                                 <option value="deepseek:deepseek-flash" selected>DeepSeek Flash</option>
                             </select>
                             <p class="hint-text model-provider-status" id="modelProviderStatus">正在读取模型配置…</p>
+                            <details class="custom-model-manager" id="customModelManager">
+                                <summary>自定义模型 API 管理</summary>
+                                <div class="custom-model-grid">
+                                    <div>
+                                        <label for="customModelName">服务名称</label>
+                                        <input type="text" id="customModelName" placeholder="例如：客户私有模型" />
+                                    </div>
+                                    <div>
+                                        <label for="customModelBaseUrl">API Base URL</label>
+                                        <input type="url" id="customModelBaseUrl" placeholder="https://example.com/v1" />
+                                    </div>
+                                </div>
+                                <label for="customModelApiKey">API Key</label>
+                                <input type="password" id="customModelApiKey" placeholder="保存后不会在前端回显完整密钥" autocomplete="off" />
+                                <label for="customModelModels">模型 ID</label>
+                                <textarea id="customModelModels" rows="3" placeholder="多个模型用逗号或换行分隔，例如：&#10;qwen-max-latest&#10;my-private-model"></textarea>
+                                <div class="custom-model-actions">
+                                    <button type="button" id="testCustomModelBtn">测试连接</button>
+                                    <button type="button" id="saveCustomModelBtn">保存模型</button>
+                                </div>
+                                <div class="custom-model-list" id="customModelList"></div>
+                                <p class="hint-text" id="customModelStatus">仅支持 OpenAI-compatible Chat Completions 接口；API Key 保存在本机 local_docs 配置中。</p>
+                            </details>
                         </div>
                     </div>
+                    <details class="format-settings" id="reportFormatSettings">
+                        <summary>报告格式设置</summary>
+                        <div class="format-settings-grid">
+                            <div>
+                                <label for="formatBodyFont">正文字体</label>
+                                <select id="formatBodyFont">
+                                    <option value="SimSun" selected>宋体</option>
+                                    <option value="Microsoft YaHei">微软雅黑</option>
+                                    <option value="FangSong">仿宋</option>
+                                    <option value="KaiTi">楷体</option>
+                                </select>
+                            </div>
+                            <div>
+                                <label for="formatHeadingFont">标题字体</label>
+                                <select id="formatHeadingFont">
+                                    <option value="SimHei" selected>黑体</option>
+                                    <option value="Microsoft YaHei">微软雅黑</option>
+                                    <option value="SimSun">宋体</option>
+                                </select>
+                            </div>
+                            <div>
+                                <label for="formatBodySize">正文字号</label>
+                                <select id="formatBodySize">
+                                    <option value="10.5">五号 / 10.5pt</option>
+                                    <option value="12" selected>小四 / 12pt</option>
+                                    <option value="14">四号 / 14pt</option>
+                                </select>
+                            </div>
+                            <div>
+                                <label for="formatHeading1Size">一级标题</label>
+                                <select id="formatHeading1Size">
+                                    <option value="14">14pt</option>
+                                    <option value="15" selected>15pt</option>
+                                    <option value="16">16pt</option>
+                                    <option value="18">18pt</option>
+                                </select>
+                            </div>
+                            <div>
+                                <label for="formatLineSpacing">行距</label>
+                                <select id="formatLineSpacing">
+                                    <option value="1.25">1.25倍</option>
+                                    <option value="1.5" selected>1.5倍</option>
+                                    <option value="1.75">1.75倍</option>
+                                    <option value="2">2倍</option>
+                                </select>
+                            </div>
+                            <div>
+                                <label for="formatMargin">页边距</label>
+                                <select id="formatMargin">
+                                    <option value="20">较窄 20mm</option>
+                                    <option value="25" selected>标准 25mm</option>
+                                    <option value="30">较宽 30mm</option>
+                                </select>
+                            </div>
+                            <label class="format-check"><input type="checkbox" id="formatIncludeToc" checked /> 生成目录</label>
+                            <label class="format-check"><input type="checkbox" id="formatCover" checked /> 生成封面</label>
+                        </div>
+                        <label for="formatChapters">自定义章节安排</label>
+                        <textarea id="formatChapters" rows="4" placeholder="每行一个公开正文章节标题；留空则使用系统自动规划。&#10;例如：&#10;事件背景与影响链条&#10;技术机理与受影响部件&#10;适航响应与维修保障&#10;综合研判与建议"></textarea>
+                    </details>
                     <input type="submit" value="启动情报任务" class="primary-button" id="submitButton" />
                 </form>
 

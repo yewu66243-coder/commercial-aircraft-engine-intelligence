@@ -18,6 +18,8 @@ from urllib.parse import unquote, urlparse
 
 import mistune
 
+from .format_profile import normalize_report_format_profile
+
 _INVALID_XML = re.compile(r"[\x00-\x08\x0b\x0c\x0e-\x1f\ud800-\udfff\ufffe\uffff]")
 _ANCHOR = re.compile(r'<a\s+(?:id|name)=[\"\']([^\"\']+)[\"\']\s*>\s*</a>', re.I)
 _CAPTION = re.compile(r"^(图|表)\s*\d+(?:[.－-]\d+)?(?:\s|[：:])")
@@ -349,7 +351,7 @@ def _field(paragraph, instruction: str, placeholder: str = ""):
     return run
 
 
-def _display_heading(doc, text: str, size: int = 15):
+def _display_heading(doc, text: str, size: int = 15, heading_font: str = "SimHei"):
     from docx.enum.text import WD_ALIGN_PARAGRAPH as Align
     from docx.shared import Pt
     paragraph = doc.add_paragraph()
@@ -358,13 +360,16 @@ def _display_heading(doc, text: str, size: int = 15):
     paragraph.paragraph_format.space_before = Pt(8)
     paragraph.paragraph_format.space_after = Pt(12)
     run = paragraph.add_run(text)
-    _font(run.font, "SimHei", size, True)
+    _font(run.font, heading_font, size, True)
     return paragraph
 
 
-def _add_cover(doc, title: str, report_label: str = "技术情报研究报告"):
+def _add_cover(doc, title: str, report_label: str = "技术情报研究报告", profile: dict | None = None):
     from docx.enum.text import WD_ALIGN_PARAGRAPH as Align
     from docx.shared import Pt
+    profile = normalize_report_format_profile(profile)
+    body_font = profile["font"]["body"]
+    heading_font = profile["font"]["heading"]
     section = doc.sections[0]
     section.different_first_page_header_footer = True
     for _ in range(3):
@@ -373,7 +378,7 @@ def _add_cover(doc, title: str, report_label: str = "技术情报研究报告"):
     subtitle.alignment = Align.CENTER
     subtitle.paragraph_format.first_line_indent = Pt(0)
     run = subtitle.add_run("商用航空发动机情报研究报告")
-    _font(run.font, "SimHei", 16, True)
+    _font(run.font, heading_font, 16, True)
 
     heading = doc.add_paragraph(style="Title")
     heading.alignment = Align.CENTER
@@ -387,7 +392,7 @@ def _add_cover(doc, title: str, report_label: str = "技术情报研究报告"):
     sample.paragraph_format.first_line_indent = Pt(0)
     sample.paragraph_format.space_before = Pt(18)
     run = sample.add_run(report_label)
-    _font(run.font, "SimSun", 14, False)
+    _font(run.font, body_font, 14, False)
 
     for _ in range(5):
         doc.add_paragraph()
@@ -402,13 +407,14 @@ def _add_cover(doc, title: str, report_label: str = "技术情报研究报告"):
         paragraph.paragraph_format.first_line_indent = Pt(0)
         paragraph.paragraph_format.space_after = Pt(8)
         run = paragraph.add_run(f"{label}：{value}")
-        _font(run.font, "SimSun", 12, False)
+        _font(run.font, body_font, 12, False)
     doc.add_page_break()
 
 
-def _add_word_toc(doc):
+def _add_word_toc(doc, profile: dict | None = None):
     from docx.shared import Pt
-    _display_heading(doc, "目录", 15)
+    profile = normalize_report_format_profile(profile)
+    _display_heading(doc, "目录", profile["size"]["heading1"], profile["font"]["heading"])
     paragraph = doc.add_paragraph()
     paragraph.paragraph_format.first_line_indent = Pt(0)
     _field(paragraph, 'TOC \\o "1-2" \\h \\z \\u', "目录将在 Word 中自动更新")
@@ -455,15 +461,23 @@ def _update_word_fields(path: Path) -> bool:
             pass
 
 
-def _configure_document(doc, title):
+def _configure_document(doc, title, profile: dict | None = None):
     from docx.enum.text import WD_ALIGN_PARAGRAPH as Align
     from docx.enum.style import WD_STYLE_TYPE
     from docx.oxml import OxmlElement
     from docx.oxml.ns import qn
     from docx.shared import Mm, Pt
+    profile = normalize_report_format_profile(profile)
+    font_profile = profile["font"]
+    size_profile = profile["size"]
+    layout = profile["layout"]
     section = doc.sections[0]
-    section.page_width, section.page_height = Mm(210), Mm(297)
-    section.top_margin = section.bottom_margin = section.left_margin = section.right_margin = Mm(25)
+    if layout["page"] == "Letter":
+        section.page_width, section.page_height = Mm(216), Mm(279)
+    else:
+        section.page_width, section.page_height = Mm(210), Mm(297)
+    margin = Mm(layout["margin_mm"])
+    section.top_margin = section.bottom_margin = section.left_margin = section.right_margin = margin
     section.header_distance = section.footer_distance = Mm(12.5)
     section.different_first_page_header_footer = True
     for grid in list(section._sectPr.findall(qn("w:docGrid"))):
@@ -487,9 +501,9 @@ def _configure_document(doc, title):
         doc.settings._element.append(update_fields)
     update_fields.set(qn("w:val"), "true")
     normal = doc.styles["Normal"]
-    _font(normal.font)
+    _font(normal.font, font_profile["body"], size_profile["body"])
     pf = normal.paragraph_format
-    pf.alignment, pf.line_spacing = Align.JUSTIFY, 1.5
+    pf.alignment, pf.line_spacing = Align.JUSTIFY, layout["line_spacing"]
     pf.first_line_indent, pf.space_after = Pt(24), Pt(6)
     pf.widow_control = True
     snap = OxmlElement("w:snapToGrid")
@@ -499,9 +513,17 @@ def _configure_document(doc, title):
         "w:suppressOverlap", "w:jc", "w:textDirection", "w:textAlignment",
         "w:textboxTightWrap", "w:outlineLvl", "w:divId", "w:cnfStyle",
         "w:rPr", "w:sectPr", "w:pPrChange")
-    for name, size in (("Title", 22), ("Heading 1", 15), ("Heading 2", 13), ("Heading 3", 12), ("Heading 4", 12), ("Heading 5", 12)):
+    heading_sizes = {
+        "Title": max(size_profile["heading1"], 18),
+        "Heading 1": size_profile["heading1"],
+        "Heading 2": size_profile["heading2"],
+        "Heading 3": size_profile["heading3"],
+        "Heading 4": size_profile["heading3"],
+        "Heading 5": size_profile["heading3"],
+    }
+    for name, size in heading_sizes.items():
         style = doc.styles[name]
-        _font(style.font, "SimHei", size, True)
+        _font(style.font, font_profile["heading"], size, True)
         sf = style.paragraph_format
         sf.first_line_indent, sf.line_spacing = Pt(0), 1.25
         sf.space_before, sf.space_after = Pt(0 if name == "Title" else 12), Pt(16 if name == "Title" else 6)
@@ -510,13 +532,19 @@ def _configure_document(doc, title):
     for name in ("Report Abstract", "Report Keywords", "Report Caption", "Report Source", "Report Reference", "Report Contents", "Report Table", "Report List"):
         style = doc.styles[name] if name in doc.styles else doc.styles.add_style(name, WD_STYLE_TYPE.PARAGRAPH)
         style.base_style = normal
-        _font(style.font, size=10.5 if name in {"Report Caption", "Report Source", "Report Table"} else 12)
+        if name == "Report Reference":
+            font_name, font_size = font_profile["reference"], size_profile["reference"]
+        elif name in {"Report Caption", "Report Source", "Report Table"}:
+            font_name, font_size = font_profile["body"], size_profile["caption"]
+        else:
+            font_name, font_size = font_profile["body"], size_profile["body"]
+        _font(style.font, font_name, font_size)
         sf = style.paragraph_format
         sf.first_line_indent, sf.space_after = Pt(0), Pt(4 if name == "Report Table" else 6)
-        sf.line_spacing = 1.25 if name in {"Report Table", "Report Source"} else 1.5
+        sf.line_spacing = 1.25 if name in {"Report Table", "Report Source"} else layout["line_spacing"]
         sf.alignment = Align.CENTER if name == "Report Caption" else Align.JUSTIFY if name in {"Report Abstract", "Report Keywords"} else Align.LEFT
     for name in ("Header", "Footer"):
-        _font(doc.styles[name].font, size=9)
+        _font(doc.styles[name].font, font_profile["body"], size=9)
         doc.styles[name].paragraph_format.first_line_indent = Pt(0)
     header = section.header.paragraphs[0]
     header.text, header.alignment = title[:32], Align.CENTER
@@ -586,7 +614,8 @@ def _word_table(doc, token):
                 cell._tc.get_or_add_tcPr().append(cb)
 
 
-def render_word(text: str, destination: str | Path, base_path: Path | str | None = None) -> None:
+def render_word(text: str, destination: str | Path, base_path: Path | str | None = None,
+                format_profile: dict | None = None) -> None:
     """Write editable A4 DOCX; the async wrapper handles raised failures."""
     from docx import Document
     from docx.enum.text import WD_ALIGN_PARAGRAPH as Align
@@ -594,9 +623,11 @@ def render_word(text: str, destination: str | Path, base_path: Path | str | None
     from PIL import Image
     blocks = _blocks(text)
     title = next((b["plain"] for b in blocks if b["role"] == "title"), "研究报告")
+    format_profile = normalize_report_format_profile(format_profile)
     doc = Document()
-    _configure_document(doc, title)
-    _add_cover(doc, title)
+    _configure_document(doc, title, format_profile)
+    if format_profile["layout"].get("cover", True):
+        _add_cover(doc, title, profile=format_profile)
     known_anchors = set()
     styles = {"abstract": "Report Abstract", "keywords": "Report Keywords", "caption": "Report Caption", "source": "Report Source", "references": "Report Reference", "toc": "Report Contents"}
     skipping_toc = False
@@ -607,8 +638,9 @@ def render_word(text: str, destination: str | Path, base_path: Path | str | None
             if role == "title":
                 continue
             if plain == "目录":
-                doc.add_page_break()
-                _add_word_toc(doc)
+                if format_profile["layout"].get("include_toc", True):
+                    doc.add_page_break()
+                    _add_word_toc(doc, format_profile)
                 skipping_toc = True
                 continue
             if skipping_toc:
@@ -693,7 +725,36 @@ def render_word(text: str, destination: str | Path, base_path: Path | str | None
     _update_word_fields(path)
 
 
-def render_pdf(text: str, destination: str | Path, base_path: Path | str | None = None) -> None:
+def _pdf_profile_css(format_profile: dict | None = None) -> str:
+    profile = normalize_report_format_profile(format_profile)
+    font = profile["font"]
+    size = profile["size"]
+    layout = profile["layout"]
+    page = "Letter" if layout["page"] == "Letter" else "A4"
+    margin = layout["margin_mm"]
+    return f"""
+@page {{
+    size: {page};
+    margin: {margin}mm;
+}}
+body {{
+    font-family: "Times New Roman", "{font['body']}", "Noto Serif CJK SC", serif;
+    font-size: {size['body']}pt;
+    line-height: {layout['line_spacing']};
+}}
+h1, h2, h3, h4, h5, h6 {{
+    font-family: "Times New Roman", "{font['heading']}", "{font['body']}", serif;
+}}
+h2 {{ font-size: {size['heading1']}pt; }}
+h3 {{ font-size: {size['heading2']}pt; }}
+h4, h5, h6 {{ font-size: {size['heading3']}pt; }}
+.references {{ font-family: "Times New Roman", "{font['reference']}", serif; font-size: {size['reference']}pt; }}
+figcaption, .caption, .source, table, pre {{ font-size: {size['caption']}pt; }}
+"""
+
+
+def render_pdf(text: str, destination: str | Path, base_path: Path | str | None = None,
+               format_profile: dict | None = None) -> None:
     """Use module-relative GTK and CSS paths, independent of the working dir."""
     project = Path(__file__).resolve().parents[2]
     if sys.platform == "win32" and hasattr(os, "add_dll_directory") and not _DLL_HANDLES:
@@ -704,4 +765,5 @@ def render_pdf(text: str, destination: str | Path, base_path: Path | str | None 
     css_path = Path(__file__).resolve().parents[1] / "styles" / "pdf_styles.css"
     path = Path(destination)
     path.parent.mkdir(parents=True, exist_ok=True)
-    HTML(string=build_report_html(text, base_path), base_url=str(Path(base_path or Path.cwd()).resolve())).write_pdf(str(path), stylesheets=[CSS(filename=str(css_path))])
+    stylesheets = [CSS(filename=str(css_path)), CSS(string=_pdf_profile_css(format_profile))]
+    HTML(string=build_report_html(text, base_path), base_url=str(Path(base_path or Path.cwd()).resolve())).write_pdf(str(path), stylesheets=stylesheets)

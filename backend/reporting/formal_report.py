@@ -4,6 +4,7 @@ from __future__ import annotations
 import re
 from dataclasses import dataclass, field
 from .citations import CitationRegistry
+from .format_profile import normalize_report_format_profile
 from .tone import soften_source_boundary_tone
 
 
@@ -193,6 +194,10 @@ def _captions(markdown):
 
 def prepare_formal_report(markdown, task, sources=(), metadata=None):
     metadata = metadata or {}
+    format_profile = normalize_report_format_profile(metadata.get("report_format_profile"))
+    if metadata.get("report_format_profile") is None and "include_toc" in metadata:
+        format_profile["layout"]["include_toc"] = bool(metadata.get("include_toc"))
+    custom_chapters = format_profile.get("chapters") or []
     public_method_section = bool(metadata.get('public_method_section'))
     registry = CitationRegistry(
         markdown, sources,
@@ -282,9 +287,37 @@ def prepare_formal_report(markdown, task, sources=(), metadata=None):
         warnings.append('缺少专题分析章节，需补充证据及分析。')
     chapters += thematic or [('专题资料分析', '当前尚无足够的专题分析内容。')]
     chapters += [('综合讨论与研究局限', front['discussion']), ('结论与建议', front['conclusion'])]
+    if custom_chapters:
+        pool = chapters[:]
+        reordered = []
+        used = set()
+        for index, chapter in enumerate(custom_chapters):
+            wanted = (chapter.get("title") or "").strip()
+            if not wanted:
+                continue
+            match_index = next(
+                (i for i, (name, _) in enumerate(pool)
+                 if i not in used and (name == wanted or wanted in name or name in wanted)),
+                None,
+            )
+            if match_index is None and index < len(pool) and index not in used:
+                match_index = index
+            if match_index is not None:
+                used.add(match_index)
+                _, body = pool[match_index]
+                reordered.append((wanted, body))
+            else:
+                reordered.append((wanted, f'本章需围绕“{wanted}”补充与任务直接相关的证据和分析。'))
+                warnings.append(f'用户自定义章节“{wanted}”未在原稿中找到对应内容，已保留章节占位。')
+        for index, item in enumerate(pool):
+            if index not in used and item[0] not in {name for name, _ in reordered}:
+                reordered.append(item)
+        if reordered:
+            chapters = reordered
     parts = [f'# {title}', '', '## 摘要', '', front['abstract'].strip(), '', f'**关键词：** {front["keywords"]}', '']
-    parts += ['## 目录', ''] + [f'- [{i} {name}](#sec-{i})' for i, (name, _) in enumerate(chapters, 1)]
-    parts += ['- [参考文献](#references)', '']
+    if format_profile.get("layout", {}).get("include_toc", True):
+        parts += ['## 目录', ''] + [f'- [{i} {name}](#sec-{i})' for i, (name, _) in enumerate(chapters, 1)]
+        parts += ['- [参考文献](#references)', '']
     for index, (name, body) in enumerate(chapters, 1):
         parts += [f'<a id="sec-{index}"></a>', f'## {index} {name}', '', _number_subheadings(body.strip(), index), '']
     for index, (name, body) in enumerate(appendices, 1):
