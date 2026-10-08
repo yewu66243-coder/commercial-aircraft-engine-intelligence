@@ -22,6 +22,12 @@ rem OLLAMA_BASE_URL/OLLAMA_HOST point to local Ollama service.
 rem OLLAMA_MODELS points to bundled model directory.
 set "PYTHONUTF8=1"
 set "PYTHONIOENCODING=utf-8"
+rem Keep local services direct while preserving existing proxy exclusions.
+if defined NO_PROXY (
+    set "NO_PROXY=%NO_PROXY%,localhost,127.0.0.1,::1"
+) else (
+    set "NO_PROXY=localhost,127.0.0.1,::1"
+)
 if not defined OLLAMA_BASE_URL set "OLLAMA_BASE_URL=http://127.0.0.1:11434"
 if not defined OLLAMA_HOST set "OLLAMA_HOST=127.0.0.1:11434"
 if exist "%OLLAMA_MODEL_DIR%" set "OLLAMA_MODELS=%OLLAMA_MODEL_DIR%"

@@ -39,7 +39,7 @@ REPORT_DETAIL_PROFILES: Dict[str, ReportDetailProfile] = {
     "brief": ReportDetailProfile(
         id="brief",
         label="短报告",
-        model="deepseek-chat",
+        model="deepseek-flash",
         body_min_chars=3500,
         body_max_chars=5000,
         section_min_chars=500,

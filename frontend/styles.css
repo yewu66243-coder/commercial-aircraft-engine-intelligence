@@ -2855,6 +2855,71 @@ select:focus {
     margin-top: 4px;
 }
 
+.upload-index-jobs {
+    display: grid;
+    gap: 8px;
+    max-height: 152px;
+    overflow-y: auto;
+    padding-right: 4px;
+    margin-top: 10px;
+}
+
+.upload-index-jobs[hidden] {
+    display: none;
+}
+
+.upload-index-job {
+    display: grid;
+    grid-template-columns: minmax(0, 1fr) auto;
+    gap: 8px;
+    align-items: center;
+    border: 1px solid var(--is-line);
+    border-left: 3px solid var(--is-accent);
+    border-radius: 6px;
+    background: var(--is-panel-2);
+    padding: 8px 10px;
+}
+
+.upload-index-job[data-status="ready"] {
+    border-left-color: var(--is-ok);
+}
+
+.upload-index-job[data-status="failed"] {
+    border-left-color: var(--is-danger);
+}
+
+.upload-index-job[data-status="partial"] {
+    border-left-color: var(--is-warn);
+}
+
+.upload-index-job strong,
+.upload-index-job span {
+    min-width: 0;
+}
+
+.upload-index-job strong {
+    display: block;
+    color: var(--is-text);
+    font-size: 13px;
+    overflow: hidden;
+    text-overflow: ellipsis;
+    white-space: nowrap;
+}
+
+.upload-index-job span {
+    display: block;
+    color: var(--is-muted);
+    font-size: 12px;
+    line-height: 1.45;
+    margin-top: 2px;
+}
+
+.upload-index-job .ghost-button {
+    min-height: 28px;
+    padding: 5px 9px;
+    font-size: 12px;
+}
+
 .check-list {
     display: grid;
     gap: 9px;
@@ -3334,6 +3399,7 @@ select:focus {
 .library-list {
     max-height: 430px;
     overflow-y: auto;
+    overflow-x: hidden;
     padding-right: 4px;
 }
 
@@ -3359,6 +3425,7 @@ select:focus {
     min-height: 0 !important;
     max-height: none !important;
     overflow-y: auto;
+    overflow-x: hidden;
 }
 
 .library-list::-webkit-scrollbar,
@@ -3381,7 +3448,7 @@ select:focus {
 .file-row,
 .mini-item {
     display: grid;
-    grid-template-columns: 1fr auto;
+    grid-template-columns: minmax(0, 1fr) auto;
     gap: 8px;
     align-items: center;
     border: 1px solid var(--is-line);
@@ -3389,6 +3456,7 @@ select:focus {
     padding: 9px;
     background: var(--is-panel-2);
     font-size: 14px;
+    min-width: 0;
 }
 
 .mini-item {
@@ -3421,6 +3489,8 @@ select:focus {
     color: var(--is-muted);
     margin-top: 4px;
     font-size: 12.5px;
+    overflow-wrap: anywhere;
+    word-break: break-word;
 }
 
 .file-actions {
@@ -3550,7 +3620,7 @@ select:focus {
 
 .report-actions {
     display: grid;
-    grid-template-columns: repeat(3, 1fr);
+    grid-template-columns: repeat(3, minmax(0, 1fr));
     gap: 8px;
     padding: 0;
     margin: 0 0 10px;
@@ -3647,6 +3717,48 @@ select:focus {
     border-color: var(--is-line);
     color: var(--is-text);
     box-shadow: 0 18px 46px rgba(42, 73, 105, .16);
+}
+
+.websocket-panel {
+    background: #ffffff !important;
+    color: #111827 !important;
+    border-right: 1px solid #cfe1df !important;
+}
+
+.websocket-panel-header {
+    background: #ffffff;
+    border-bottom: 1px solid #cfe1df;
+}
+
+.websocket-panel-header h3 {
+    color: #0f172a;
+}
+
+.websocket-action-btn {
+    color: #334155;
+}
+
+.websocket-action-btn:hover {
+    background: #e8f4f2;
+    color: #0f766e;
+}
+
+.websocket-status {
+    background: #ffffff;
+}
+
+.websocket-panel .status-label {
+    color: #4b5563;
+}
+
+.websocket-panel .status-value {
+    color: #111827;
+    font-weight: 600;
+    word-break: break-word;
+}
+
+.websocket-panel .status-divider {
+    background: #cfe1df;
 }
 
 .expanded-view {
@@ -3787,3 +3899,11 @@ select:focus {
 #reportContainer th, #reportContainer td { color: #1f2933; border: 0; padding: 6px 8px; overflow-wrap: anywhere; }
 #reportContainer th { border-bottom: 1px solid #222; background: #fff; }
 #reportContainer tr:nth-child(even) { background: transparent; }
+/* Per-source research disposition, kept outside the formal report body. */
+.web-source-tracking { margin: 12px 0; padding: 14px; border: 1px solid #d9e1eb; border-radius: 8px; }
+.web-source-tracking[hidden] { display: none; }
+.web-source-tracking summary { cursor: pointer; font-weight: 600; }
+.web-source-tracking p { margin: 8px 0; font-size: 13px; line-height: 1.6; }
+.web-source-rows { max-height: 420px; overflow: auto; margin-top: 12px; }
+.web-source-row { padding: 12px 0; border-top: 1px solid #d9e1eb; overflow-wrap: anywhere; }
+.web-source-row small { display: block; }

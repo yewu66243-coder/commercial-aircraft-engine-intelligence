@@ -379,6 +379,16 @@ class SelectedLocalPaper:
     author: str = ""
     abstract: str = ""
     source_type: str = "论文"
+    container: str = ""
+    year: str = ""
+    volume: str = ""
+    issue: str = ""
+    pages: str = ""
+    doi: str = ""
+    applicant: str = ""
+    patent_number: str = ""
+    publication_date: str = ""
+    publication_status: str = ""
 
 
 @dataclass
@@ -853,6 +863,16 @@ def _select_index_documents(
                 author=str(paper.get("author") or paper.get("applicant") or ""),
                 abstract=str(paper.get("abstract") or "")[:500],
                 source_type=source_type,
+                container=str(paper.get("container") or paper.get("journal") or ""),
+                year=str(paper.get("year") or paper.get("publication_year") or ""),
+                volume=str(paper.get("volume") or ""),
+                issue=str(paper.get("issue") or ""),
+                pages=str(paper.get("pages") or ""),
+                doi=str(paper.get("doi") or ""),
+                applicant=str(paper.get("applicant") or ""),
+                patent_number=str(paper.get("patent_number") or ""),
+                publication_date=str(paper.get("publication_date") or ""),
+                publication_status=str(paper.get("publication_status") or ""),
             )
         )
 

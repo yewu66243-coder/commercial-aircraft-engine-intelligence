@@ -427,6 +427,11 @@ def _read_local_source_text(source: str, limit: int = 160000) -> str:
             continue
         suffix = path.suffix.lower()
         try:
+            if suffix in {".pdf", ".doc"}:
+                from gpt_researcher.document.text_recovery import read_recovered_text
+                recovered = read_recovered_text(path)
+                if recovered:
+                    return "\n".join(p["text"] for p in recovered["pages"])[:limit]
             if suffix == ".pdf":
                 import fitz  # type: ignore
 
@@ -488,13 +493,25 @@ def _read_url_text(url: str, limit: int = 80000) -> str:
                 content_type = response.headers.get("Content-Type", "")
                 charset = response.headers.get_content_charset()
                 likely_pdf = "application/pdf" in content_type.lower() or url.split("?")[0].lower().endswith(".pdf")
+                prefix = response.read(1024)
+                likely_pdf = likely_pdf or b'%PDF-' in prefix
                 raw_limit = 8 * 1024 * 1024 if likely_pdf else max(limit * 3, limit)
-                raw = response.read(raw_limit)
+                raw = prefix + response.read(max(0, raw_limit - len(prefix)))
 
             if likely_pdf:
                 pdf_text = _extract_pdf_text_from_bytes(raw, limit)
-                if pdf_text:
-                    return pdf_text
+                if not pdf_text:
+                    import requests
+                    with requests.get(url, headers={'User-Agent': 'Mozilla/5.0'}, stream=True, timeout=12) as fallback:
+                        fallback.raise_for_status()
+                        chunks, size = [], 0
+                        for chunk in fallback.iter_content(65536):
+                            size += len(chunk)
+                            if size > 8 * 1024 * 1024:
+                                break
+                            chunks.append(chunk)
+                        pdf_text = _extract_pdf_text_from_bytes(b''.join(chunks), limit)
+                return pdf_text
 
             text = _decode_response_text(raw, charset)
             return _html_to_text(text)[:limit]
@@ -625,9 +642,20 @@ def _check_entity_against_source(entity: Dict[str, Any], source_text: str) -> tu
     return "unsupported", "已读取证据源，但未命中实体名称或关键描述。", confidence
 
 
-def _auto_check_entity_evidence(entity: Dict[str, Any], evidence_map: Dict[str, str]) -> Dict[str, Any]:
+def _auto_check_entity_evidence(entity: Dict[str, Any], evidence_map: Dict[str, str], source_catalog=None) -> Dict[str, Any]:
     refs = [match.group(0) for match in re.finditer(EVIDENCE_REF_RE, str(entity.get("evidence") or ""))]
     if not refs:
+        if source_catalog is not None:
+            from .entity_retrieval import retrieve_entity_evidence
+            retrieved = retrieve_entity_evidence(entity.get('name', ''), entity.get('value', ''), source_catalog)
+            if retrieved:
+                checks = []
+                for item in retrieved:
+                    status, reason, confidence = _check_entity_against_source(entity, item['text'])
+                    checks.append({**item, 'status': status, 'reason': reason, 'confidence': confidence})
+                rank = {'supported': 3, 'partially_supported': 2, 'unsupported': 1}
+                best = max(checks, key=lambda c: (rank.get(c['status'], 0), c['confidence']))
+                return {**best, 'checked_refs': checks, 'evidence_basis': 'saved_source_retrieval'}
         direct_url = URL_RE.search(str(entity.get("evidence") or ""))
         if direct_url:
             refs = [direct_url.group(0)]
@@ -636,11 +664,19 @@ def _auto_check_entity_evidence(entity: Dict[str, Any], evidence_map: Dict[str, 
                 "status": "unchecked",
                 "confidence": 0.0,
                 "checked_refs": [],
-                "reason": "实体没有可解析的证据编号或真实 URL。",
+                "reason": ("已检索本轮原文，未找到可供核验该实体的证据。" if source_catalog is not None
+                           else "实体没有可解析的证据编号或真实 URL，且未提供原文库。"),
             }
 
     checks = []
     for ref in refs[:3]:
+        if source_catalog is not None:
+            from .evidence_samples import saved_pages, check_saved_entity
+            pages, reason = saved_pages(ref, evidence_map, source_catalog)
+            check = check_saved_entity(entity, pages)
+            checks.append({**check, 'ref': ref, 'source': evidence_map.get(ref, ref),
+                           'source_type': 'saved_original', 'reason': reason or check['reason']})
+            continue
         if ref.startswith("http"):
             source_text = _read_url_text(ref)
             source_type = "url" if source_text else "url_unreadable"
@@ -669,12 +705,12 @@ def _auto_check_entity_evidence(entity: Dict[str, Any], evidence_map: Dict[str, 
     }
 
 
-def _run_auto_evidence_check(entities: List[Dict[str, Any]], report: str) -> Dict[str, Any]:
+def _run_auto_evidence_check(entities: List[Dict[str, Any]], report: str, source_catalog=None) -> Dict[str, Any]:
     evidence_map = _extract_evidence_map(report)
     supported = partial = unsupported = unchecked = 0
 
     for entity in entities:
-        check = _auto_check_entity_evidence(entity, evidence_map)
+        check = _auto_check_entity_evidence(entity, evidence_map, source_catalog)
         entity["auto_evidence_check"] = check
         status = check.get("status")
         if status == "supported":
@@ -701,8 +737,8 @@ def _run_auto_evidence_check(entities: List[Dict[str, Any]], report: str) -> Dic
         "auto_evidence_accuracy": auto_accuracy,
         "strict_auto_evidence_accuracy": strict_accuracy,
         "threshold": AUTO_EVIDENCE_THRESHOLD,
-        "requirement_met": auto_accuracy is not None and auto_accuracy >= AUTO_EVIDENCE_THRESHOLD,
-        "note": "该分数表示已抽取实体是否能被证据文本支撑，不等同于含遗漏率的金标准实体抽取准确率。",
+        "requirement_met": strict_accuracy >= AUTO_EVIDENCE_THRESHOLD if checked_total and strict_accuracy is not None else None,
+        "note": "规则初筛仅检查词项及数值命中，不证明语义正确。严格分数的分母包含未核验项，部分命中计0.5；不评价漏抽。",
     }
 
 
@@ -887,9 +923,16 @@ def evaluate_report_entities(
     task: str,
     selected_sources: Iterable[Any] = (),
     threshold: float = ENTITY_THRESHOLD,
+    source_catalog=None,
+    prefer_body=False,
 ) -> Dict[str, Any]:
-    extracted = extract_entities_from_report(report, selected_sources)
-    auto_evidence_eval = _run_auto_evidence_check(extracted, report) if extracted else {
+    extracted = [] if prefer_body else extract_entities_from_report(report, selected_sources)
+    method = 'report_entity_table_extraction'
+    if not extracted:
+        from .evidence_samples import extract_body_candidates
+        extracted = extract_body_candidates(report)
+        method = 'body_rule_candidates'
+    auto_evidence_eval = _run_auto_evidence_check(extracted, report, source_catalog) if extracted else {
         "method": "source_text_alias_number_url_pdf_matching",
         "supported_count": 0,
         "partially_supported_count": 0,
@@ -908,7 +951,7 @@ def evaluate_report_entities(
 
     base: Dict[str, Any] = {
         "status": "auto_evidence_checked" if extracted else "pending_manual_review",
-        "method": "report_entity_table_extraction",
+        "method": method,
         "threshold": threshold,
         "ground_truth_path": str(ground_truth_path) if ground_truth_path else "",
         "extracted_count": len(extracted),
@@ -930,10 +973,12 @@ def evaluate_report_entities(
 
     if not extracted:
         base["status"] = "no_entity_table_found"
-        base["note"] = "未从报告的“实体与参数清单”表格中抽取到实体；请检查 Writer Agent 是否按 V1.2 格式输出。"
+        base["note"] = "内部表格及正文均未识别到可测实体或参数候选，需补充结构化抽取。"
         return base
 
     if not expected:
+        if method == 'body_rule_candidates':
+            base['note'] = '未提供内部实体表，已从正文抽取型号、机构、材料及数值候选并核对原文；属于规则初筛，不覆盖全部实体和漏抽。未提供标准答案，正式准确率待独立裁判复核。'
         return base
 
     matched = _match_entities(extracted, expected)

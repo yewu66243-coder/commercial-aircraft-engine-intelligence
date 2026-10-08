@@ -1,6 +1,7 @@
 from dotenv import load_dotenv
 import logging
 import mimetypes
+import os
 import sys
 from pathlib import Path
 from typing import Any
@@ -57,11 +58,22 @@ from gpt_researcher.document.local_library import (
     resolve_local_library_file,
     save_local_library_file,
 )
+from gpt_researcher.document.upload_indexing import (
+    ACTIVE as UPLOAD_INDEX_ACTIVE_STATUSES,
+    enqueue as enqueue_upload_index_job,
+    ensure_worker as ensure_upload_index_worker,
+    list_jobs as list_upload_index_jobs,
+    retry as retry_upload_index_job,
+)
 from gpt_researcher.intelligence_templates import (
     delete_intelligence_template,
     get_template_catalog,
     save_intelligence_template,
 )
+
+
+def upload_fulltext_index_enabled() -> bool:
+    return os.getenv("UPLOAD_FULLTEXT_INDEX_ENABLED", "false").lower() in {"true", "1", "yes", "on"}
 
 
 def explain_report_exception(exc: Exception) -> dict[str, Any]:
@@ -233,12 +245,57 @@ async def upload_local_library_file(
 ):
     try:
         result = save_local_library_file(file.file, file.filename or "uploaded_document", target)
-        return {"success": True, **result, "library": list_local_library()}
+        fulltext_enabled = upload_fulltext_index_enabled()
+        response: dict[str, Any] = {
+            "success": True,
+            **result,
+            "library": list_local_library(),
+            "fulltext_indexing_enabled": fulltext_enabled,
+        }
+        if fulltext_enabled:
+            try:
+                job = enqueue_upload_index_job(result["path"], target)
+                ensure_upload_index_worker()
+                response["index_job"] = job
+            except Exception as exc:
+                logger.exception("排队全文索引任务失败")
+                response["indexing_error"] = f"全文索引任务未能排队：{exc}"
+        else:
+            response["indexing_message"] = "已按配置跳过全文索引队列，本次上传仅更新摘要索引。"
+        return response
     except ValueError as exc:
         raise HTTPException(status_code=400, detail=str(exc)) from exc
     except Exception as exc:
         logger.exception("上传本地资料失败")
         raise HTTPException(status_code=500, detail=f"上传失败：{exc}") from exc
+
+
+@app.get("/api/local-library/index-jobs")
+async def get_local_library_index_jobs():
+    if not upload_fulltext_index_enabled():
+        return {"jobs": [], "fulltext_indexing_enabled": False}
+    jobs = list_upload_index_jobs()
+    if any(job.get("status") in UPLOAD_INDEX_ACTIVE_STATUSES for job in jobs):
+        try:
+            ensure_upload_index_worker()
+        except Exception:
+            logger.exception("启动上传全文索引后台任务失败")
+    return {"jobs": jobs, "fulltext_indexing_enabled": True}
+
+
+@app.post("/api/local-library/index-jobs/{job_id}/retry")
+async def retry_local_library_index_job(job_id: str):
+    try:
+        job = retry_upload_index_job(job_id)
+        ensure_upload_index_worker()
+        return {"success": True, "job": job, "jobs": list_upload_index_jobs()}
+    except KeyError as exc:
+        raise HTTPException(status_code=404, detail="未找到该索引任务") from exc
+    except ValueError as exc:
+        raise HTTPException(status_code=400, detail=str(exc)) from exc
+    except Exception as exc:
+        logger.exception("重试全文索引任务失败")
+        raise HTTPException(status_code=500, detail=f"重试失败：{exc}") from exc
 
 
 @app.post("/api/local-library/patents/rebuild-index")

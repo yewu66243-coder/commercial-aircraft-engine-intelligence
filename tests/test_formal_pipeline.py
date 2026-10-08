@@ -22,6 +22,7 @@ class FormalPipelineTests(unittest.TestCase):
         service.generation_status = 'ready'
         original_cwd = os.getcwd()
         with TemporaryDirectory() as temporary, ExitStack() as stack:
+            stack.enter_context(patch.dict(os.environ, {'JUDGE_ENABLED': 'false'}))
             stack.enter_context(patch.object(service, 'pre_search_abstracts', new=AsyncMock()))
             stack.enter_context(patch.object(service, 'planner_agent', return_value=['GTF']))
             stack.enter_context(patch.object(service, 'research_agent', new=AsyncMock(return_value=[])))
@@ -36,6 +37,10 @@ class FormalPipelineTests(unittest.TestCase):
                 os.chdir(temporary)
                 result = asyncio.run(service.run())
                 self.assertTrue(all(result['export_status'].values()))
+                evaluation = result['evaluation_report']
+                self.assertTrue(Path(unquote(evaluation['word_path'])).is_file())
+                self.assertTrue(Path(unquote(evaluation['json_path'])).is_file())
+                self.assertEqual(evaluation['assessment']['overall'], '待复核')
                 md = Path(unquote(result['md_path'])).read_text(encoding='utf-8')
                 self.assertEqual(md, result['report'])
                 word = Document(unquote(result['word_path']))
@@ -66,6 +71,11 @@ class FormalPipelineTests(unittest.TestCase):
             source_check = stack.enter_context(patch('three_agent_service.evaluate_public_url_sources', return_value={'supported_count': 1}))
             stack.enter_context(patch('three_agent_service.prune_redundant_unchecked_url_citations', side_effect=lambda text, stats: (text, {'changed': False})))
             stack.enter_context(patch('three_agent_service.evaluate_report_entities', return_value={'extracted_count': 1, 'auto_evidence_eval': {'unchecked_count': 1}}))
+            judge = stack.enter_context(patch('three_agent_service.judge_report', new=AsyncMock(return_value={
+                'status': 'completed', 'message': '离线裁判测试',
+                'entity': {'requirement_met': True}, 'source': {'requirement_met': False}})))
+            stack.enter_context(patch('three_agent_service.export_evaluation_report', new=AsyncMock(return_value={
+                'assessment': {'overall': '待复核'}, 'errors': [], 'word_path': 'outputs/evaluation.docx'})))
             md = stack.enter_context(patch('three_agent_service.write_text_to_md', new=AsyncMock(return_value='outputs/report.md')))
             word = stack.enter_context(patch('three_agent_service.write_md_to_word', new=AsyncMock(return_value='outputs/report.docx')))
             stack.enter_context(patch('three_agent_service.write_md_to_pdf', new=AsyncMock(return_value='')))
@@ -78,11 +88,16 @@ class FormalPipelineTests(unittest.TestCase):
         self.assertEqual(result['export_status']['pdf'], False)
         self.assertIn('部分实体或参数的来源支撑需复核。', result['report_quality']['warnings'])
         self.assertEqual(saved[0]['status'], 'export_partial')
+        self.assertTrue(saved[0]['validation_summary']['entity_requirement_met'])
+        self.assertFalse(saved[0]['validation_summary']['url_requirement_met'])
+        self.assertEqual(saved[0]['independent_judge']['status'], 'completed')
+        self.assertIn('[URL8]', judge.call_args.args[0])
         self.assertTrue(saved[0]['citation_map'])
         self.assertIn('[URL8]', saved[0]['evidence_report'])
         self.assertNotIn('该点待后续核验', result['report'])
         self.assertIn('该点待后续核验', saved[0]['evidence_report'])
-        self.assertEqual(len(saved[0]['verification_notes']), 1)
+        self.assertTrue(any(note.get('kind') == 'inline_verification_marker' for note in saved[0]['verification_notes']))
+        self.assertTrue(any(note.get('kind') == 'method_section_internal' for note in saved[0]['verification_notes']))
         self.assertFalse(any('文件全部生成完毕' in item['message'] for item in result['trace']))
 
     def test_writer_failure_is_explicit_draft_in_service(self):
@@ -101,12 +116,17 @@ class FormalPipelineTests(unittest.TestCase):
     def test_writer_contract_matches_academic_structure(self):
         try:
             module = importlib.import_module('backend.reporting.prompts')
+            detail_module = importlib.import_module('backend.reporting.detail_profiles')
         except ModuleNotFoundError:
             module = None
+            detail_module = None
         self.assertIsNotNone(module, 'Formal writing contract is missing')
+        self.assertIsNotNone(detail_module, 'Report detail profile module is missing')
         prompt = module.build_writer_prompt(task='GTF', tone='objective', report_type='detailed_report', sources_text='', demand_text='', source_template_text='', image_text='', sections_text='', method_context='检索记录时间2026-09-04')
-        for required in ('摘要', '关键词', '资料来源与研究方法', '综合讨论与研究局限', '结论与建议', '核心实体与参数清单（内部核验）'):
+        for required in ('摘要', '关键词', '报告框架规划', '综合研判与后续监测重点', '结论与建议', '核心实体与参数清单（内部核验）'):
             self.assertIn(required, prompt)
+        self.assertIn('公开正文默认不设置“资料来源与研究方法”独立章节', prompt)
+        self.assertIn('不要机械输出“资料来源与研究方法”章节', prompt)
         self.assertIn('项目内报告格式Skill', prompt)
         self.assertIn('规范论文格式报告参考', prompt)
         self.assertIn('[EB/OL]', prompt)
@@ -114,7 +134,22 @@ class FormalPipelineTests(unittest.TestCase):
         self.assertIn('证据来源不清楚', prompt)
         self.assertIn('证据对照矩阵', prompt)
         self.assertIn('避免AI式套话', prompt)
+        self.assertIn('资料边界表达要求', prompt)
+        self.assertIn('免责声明式句子', prompt)
+        self.assertIn('论证结构要求', prompt)
+        self.assertIn('反向提纲', prompt)
+        self.assertIn('不能把材料来源逐条堆砌成事实清单', prompt)
         self.assertNotIn('严格为以下五部分', prompt)
+        brief_profile = detail_module.resolve_report_detail_profile('brief')
+        detailed_prompt_with_brief_chain = module.build_writer_prompt(
+            task='GTF', tone='objective', report_type='detailed_report',
+            sources_text='', demand_text='', source_template_text='',
+            image_text='', sections_text='', method_context='',
+            detail_profile=brief_profile,
+        )
+        self.assertIn('正文建议5000–8000字', detailed_prompt_with_brief_chain)
+        self.assertIn('报告篇幅、结构和分析侧重点仍以报告类型为准', detailed_prompt_with_brief_chain)
+        self.assertNotIn('短报告：正文建议3500', detailed_prompt_with_brief_chain)
 
 
 if __name__ == '__main__':

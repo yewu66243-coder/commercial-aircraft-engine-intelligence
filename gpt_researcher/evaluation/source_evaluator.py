@@ -372,7 +372,7 @@ def _check_claims_against_source(claims: List[str], source_text: str) -> Dict[st
     }
 
 
-def evaluate_public_url_sources(report: str, threshold: float = PUBLIC_URL_SOURCE_THRESHOLD) -> Dict[str, Any]:
+def evaluate_public_url_sources(report: str, threshold: float = PUBLIC_URL_SOURCE_THRESHOLD, *, source_catalog=None) -> Dict[str, Any]:
     evidence_map = _extract_evidence_map(report or "")
     contexts_by_ref = _extract_url_reference_contexts(report or "")
     ordered_refs = sorted(
@@ -400,7 +400,9 @@ def evaluate_public_url_sources(report: str, threshold: float = PUBLIC_URL_SOURC
                     "source_readable": False,
                 }
                 continue
-            future = executor.submit(_read_url_text, url)
+            saved = next((s for s in (source_catalog or {}).get('sources', []) if s.get('locator') == url), None)
+            saved_text = '\n'.join(p.get('text', '') for p in (saved or {}).get('pages', []))
+            future = executor.submit(lambda text: text, saved_text) if saved_text.strip() else executor.submit(_read_url_text, url)
             fetch_jobs[future] = (ref, url, contexts)
 
         for future in as_completed(fetch_jobs):
@@ -409,6 +411,20 @@ def evaluate_public_url_sources(report: str, threshold: float = PUBLIC_URL_SOURC
                 source_text = future.result()
             except Exception:
                 source_text = ""
+            if source_text and source_catalog is not None:
+                from backend.reporting.source_identity import source_id
+                source = next((s for s in source_catalog.setdefault('sources', []) if s.get('locator') == url), None)
+                if source is None:
+                    source = {'locator': url, 'kind': 'web', 'title': url, 'source_id': source_id(url)}
+                    source_catalog['sources'].append(source)
+                if not any(p.get('text', '').strip() for p in source.get('pages', [])):
+                    source['pages'] = [{'page': None, 'text': source_text}]
+                    source['acquisition'] = 'public_url_evaluation'
+                    from ..retrievers.web_evidence_policy import evidence_assessment
+                    source.update(evidence_assessment(source_catalog.get('query', ''), source.get('title'),
+                                                      source_text, url, source.get('published_date')))
+                source['fetch_status'] = 'success'
+                source['fetch_reason'] = ''
             check = _check_claims_against_source(contexts, source_text)
             results_by_ref[ref] = {
                 "ref": ref,
@@ -424,6 +440,9 @@ def evaluate_public_url_sources(report: str, threshold: float = PUBLIC_URL_SOURC
             }
 
     results = [results_by_ref[ref] for ref in ordered_refs if ref in results_by_ref]
+    if source_catalog is not None:
+        source_catalog['readable_sources'] = sum(any(p.get('text', '').strip() for p in s.get('pages', []))
+                                                  for s in source_catalog.get('sources', []))
 
     supported = sum(1 for item in results if item["status"] == "supported")
     partial = sum(1 for item in results if item["status"] == "partially_supported")
@@ -431,8 +450,8 @@ def evaluate_public_url_sources(report: str, threshold: float = PUBLIC_URL_SOURC
     unchecked = sum(1 for item in results if item["status"] == "unchecked")
     cited_count = len(results)
     weighted_score = supported + 0.5 * partial
-    support_accuracy = round(weighted_score / cited_count, 4) if cited_count else None
     checked_count = supported + partial + unsupported
+    support_accuracy = round(weighted_score / cited_count, 4) if checked_count else None
     checked_support_accuracy = round(weighted_score / checked_count, 4) if checked_count else None
 
     return {
@@ -446,7 +465,7 @@ def evaluate_public_url_sources(report: str, threshold: float = PUBLIC_URL_SOURC
         "checked_count": checked_count,
         "support_accuracy": support_accuracy,
         "checked_support_accuracy": checked_support_accuracy,
-        "requirement_met": support_accuracy is not None and support_accuracy >= threshold,
+        "requirement_met": support_accuracy >= threshold if support_accuracy is not None and not unchecked else None,
         "results": results,
         "note": "该指标按正文中被 [URLn] 引用的公开链接计算，核验链接正文是否支撑引用句；无法读取的 URL 按未核验计入分母。",
     }

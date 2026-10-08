@@ -1,0 +1,13 @@
+{
+  "run_id": "eval-20260929-161521-07e639",
+  "mode": "offline_evidence_resolution_only_no_model_verdict",
+  "entity_candidates": 280,
+  "entity_candidates_with_saved_evidence": 62,
+  "public_url_references": 4,
+  "public_claim_samples": 8,
+  "public_claim_samples_with_saved_evidence": 7,
+  "local_references": 5,
+  "readable_local_references": 5,
+  "legacy_all_unresolved_display": "未完成核验（280项待核验）",
+  "note": "Evidence availability is not factual accuracy; no original run or verdict is overwritten."
+}

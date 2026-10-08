@@ -7,7 +7,7 @@
     <link rel="icon" type="image/png" href="/static/software-icon.png" />
     <link rel="alternate icon" href="./static/favicon.ico" />
     <link rel="stylesheet" href="https://cdnjs.cloudflare.com/ajax/libs/font-awesome/6.5.1/css/all.min.css" />
-    <link rel="stylesheet" href="/site/styles.css?v=error-diagnosis-20260910" />
+    <link rel="stylesheet" href="/site/styles.css?v=report-actions-three-downloads-20260930" />
 </head>
 <body>
     <div class="app-shell">
@@ -61,14 +61,14 @@
                             <label for="report_type">报告类型</label>
                             <select name="report_type" id="report_type" required>
                                 <option value="research_report">专题快报</option>
-                                <option value="detailed_report" selected>技术动态研报</option>
                                 <option value="resource_report">型号跟踪</option>
+                                <option value="detailed_report" selected>技术动态研报</option>
                             </select>
                         </div>
                         <div>
                             <label for="reportDetailSelect">报告长短</label>
                             <select id="reportDetailSelect" name="report_detail">
-                                <option value="brief" selected>短报告（DeepSeek Chat）</option>
+                                <option value="brief" selected>短报告（DeepSeek Flash）</option>
                                 <option value="detailed">详细报告（DeepSeek V4 Pro）</option>
                             </select>
                         </div>
@@ -96,7 +96,7 @@
                         <div>
                             <label for="llmProviderSelect">生成大模型</label>
                             <select id="llmProviderSelect" name="llm_provider">
-                                <option value="deepseek:deepseek-chat" selected>DeepSeek Chat</option>
+                                <option value="deepseek:deepseek-flash" selected>DeepSeek Flash</option>
                             </select>
                             <p class="hint-text model-provider-status" id="modelProviderStatus">正在读取模型配置…</p>
                         </div>
@@ -165,6 +165,7 @@
                     </div>
                     <button class="ghost-button full-width" id="uploadLocalFileBtn" type="button">上传并加入检索范围</button>
                     <p class="hint-text" id="uploadStatus">保存路径：local_docs/user_docs、local_docs/all_papers_pool 或 local_docs/all_patent_pool</p>
+                    <div class="upload-index-jobs" id="uploadIndexJobs" hidden></div>
                 </section>
 
                 <section class="panel research-output-container">
@@ -236,6 +237,20 @@
                         <a id="downloadLinkTop" href="#" class="report-action-btn disabled"><i class="fas fa-file-pdf"></i> PDF</a>
                     </div>
                     <p id="reportQualityStatus" class="report-quality-status" role="status" aria-live="polite">中文研究报告：摘要、正文、参考文献；Word / PDF 统一论文式排版。</p>
+                    <details id="webSourceTracking" class="web-source-tracking" hidden>
+                        <summary>网页来源处理明细</summary>
+                        <p id="webSourceSummary"></p>
+                        <label for="webSourceFilter">查看链接：</label>
+                        <select id="webSourceFilter">
+                            <option value="all">全部</option>
+                            <option value="cited">正文已引用</option>
+                            <option value="uncited">正文未引用</option>
+                            <option value="failed">抓取失败 / 未取得文本</option>
+                            <option value="excluded">初筛排除</option>
+                        </select>
+                        <p>初筛和选入写作不代表核验通过；发布日期未知的网页不会标为最新资料。</p>
+                        <div id="webSourceRows" class="web-source-rows"></div>
+                    </details>
                     <div id="reportContainer">
                         <p class="empty-state">报告生成后可在此审阅摘要、研究方法、专题分析与结论，并下载 Word 或 PDF。</p>
                     </div>
@@ -314,7 +329,7 @@
 
     <script src="https://cdnjs.cloudflare.com/ajax/libs/showdown/1.9.1/showdown.min.js"></script>
     <script src="https://cdnjs.cloudflare.com/ajax/libs/dompurify/3.2.6/purify.min.js"></script>
-    <script src="/site/scripts.js?v=error-diagnosis-20260910"></script>
+    <script src="/site/scripts.js?v=report-preview-three-downloads-20260930"></script>
 </body>
 </html>
 

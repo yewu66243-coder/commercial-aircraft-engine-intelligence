@@ -67,8 +67,8 @@ class ModelProviderSelectionTests(unittest.TestCase):
 
         self.assertEqual(brief.label, "短报告")
         self.assertEqual(brief_runtime.provider_id, "deepseek")
-        self.assertEqual(brief_runtime.smart_model, "deepseek-chat")
-        self.assertEqual(brief_runtime.fast_model, "deepseek-chat")
+        self.assertEqual(brief_runtime.smart_model, "deepseek-flash")
+        self.assertEqual(brief_runtime.fast_model, "deepseek-flash")
         self.assertEqual(brief.max_topics, detailed.max_topics)
         self.assertEqual(brief.evidence_budget, detailed.evidence_budget)
         self.assertEqual(brief.writer_max_tokens, detailed.writer_max_tokens)
@@ -88,7 +88,7 @@ class ModelProviderSelectionTests(unittest.TestCase):
             ))
 
         self.assertEqual(service.model_runtime.provider_id, "deepseek")
-        self.assertEqual(service.model_runtime.smart_model, "deepseek-chat")
+        self.assertEqual(service.model_runtime.smart_model, "deepseek-flash")
         self.assertEqual(service.detail_profile.id, "brief")
 
     def test_detailed_report_can_select_qwen_model(self):
@@ -183,6 +183,29 @@ class ModelProviderSelectionTests(unittest.TestCase):
         self.assertEqual(client_factory.call_args.kwargs["api_key"], "qwen-secret")
         self.assertEqual(client_factory.call_args.kwargs["base_url"], "https://qwen.example/v1")
         self.assertEqual(client.chat.completions.create.call_args_list[0].kwargs["model"], "qwen-plus")
+        self.assertNotIn("extra_body", client.chat.completions.create.call_args_list[0].kwargs)
+
+    def test_deepseek_flash_writer_disables_thinking(self):
+        from three_agent_service import ThreeAgentRequestData, ThreeAgentService
+
+        completion = SimpleNamespace(choices=[SimpleNamespace(
+            message=SimpleNamespace(content="# DeepSeek 报告\n\n## 摘要\n测试内容。"),
+            finish_reason="stop",
+        )])
+        client = SimpleNamespace(chat=SimpleNamespace(
+            completions=SimpleNamespace(create=AsyncMock(return_value=completion))))
+        with patch.dict("os.environ", {"OPENAI_API_KEY": "deep-secret"}, clear=True), patch(
+            "three_agent_service.AsyncOpenAI", return_value=client
+        ):
+            service = ThreeAgentService(ThreeAgentRequestData(task="GTF", report_detail="brief"))
+            asyncio.run(service.writer_agent([
+                {"title": "技术", "subtopic": "GTF", "draft": "原始研究材料", "context": []}
+            ]))
+
+        first_call = client.chat.completions.create.call_args_list[0].kwargs
+        self.assertEqual(first_call["model"], "deepseek-flash")
+        self.assertEqual(first_call["extra_body"], {"thinking": {"type": "disabled"}})
+        self.assertLessEqual(first_call["max_tokens"], 8192)
 
     def test_qwen_editorial_uses_the_same_selected_runtime(self):
         from three_agent_service import ThreeAgentRequestData, ThreeAgentService
@@ -289,7 +312,9 @@ class ModelProviderSelectionTests(unittest.TestCase):
             item for item in catalog_response.json()["providers"] if item["id"] == "qwen"
         )["configured"])
         self.assertEqual(report_response.status_code, 400)
-        self.assertIn("DASHSCOPE_API_KEY", report_response.json()["detail"])
+        detail = report_response.json()["detail"]
+        self.assertEqual(detail["code"], "MODEL_CONFIG_ERROR")
+        self.assertIn("DASHSCOPE_API_KEY", detail["technical_detail"])
 
     def test_explicit_request_base_url_wins_over_global_openai_base(self):
         from gpt_researcher.utils import llm
@@ -324,7 +349,7 @@ class ModelProviderSelectionTests(unittest.TestCase):
         self.assertIn('id="reportDetailSelect"', html)
         self.assertIn('value="brief"', html)
         self.assertIn('value="detailed"', html)
-        self.assertIn('value="deepseek:deepseek-chat"', html)
+        self.assertIn('value="deepseek:deepseek-flash"', html)
         self.assertIn("/api/model-providers", script)
         self.assertIn("llm_provider:", script)
         self.assertIn("llm_model:", script)

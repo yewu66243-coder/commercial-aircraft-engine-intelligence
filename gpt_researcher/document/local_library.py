@@ -650,6 +650,11 @@ def extract_document_preview(path: Path, limit: int = 1200) -> str:
     else:
         preview = ""
 
+    if not preview.strip():
+        from .text_recovery import read_recovered_text
+        recovered = read_recovered_text(path)
+        if recovered:
+            preview = "\n".join(page["text"] for page in recovered["pages"])[:limit]
     preview = re.sub(r"\s+", " ", preview).strip()
     return preview[:limit] if preview else f"{FILENAME_FALLBACK_PREFIX}{path.stem}"
 
@@ -893,6 +898,30 @@ def _normalize_index_items(items: list[dict[str, Any]], directory: Path) -> list
     return normalized
 
 
+def _locked_index_update(func):
+    from functools import wraps
+    @wraps(func)
+    def wrapped(index_path, *args, **kwargs):
+        from .library_rag import build_lock
+        directory = get_local_docs_root() / "rag_index" / "summary_locks" / hashlib.sha256(str(index_path).encode()).hexdigest()[:16]
+        deadline = time.monotonic() + 30
+        while True:
+            lock = build_lock(directory)
+            try:
+                lock.__enter__()
+                break
+            except RuntimeError:
+                if time.monotonic() >= deadline:
+                    raise TimeoutError("Summary index is busy")
+                time.sleep(.05)
+        try:
+            return func(index_path, *args, **kwargs)
+        finally:
+            lock.__exit__(None, None, None)
+    return wrapped
+
+
+@_locked_index_update
 def _upsert_index_entry(
     index_path: Path,
     file_path: Path,

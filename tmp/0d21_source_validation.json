@@ -1,0 +1,13 @@
+{
+  "run_id": "eval-20260929-174350-54c6ed",
+  "mode": "saved_run_mapping_and_web_sync_validation_no_model_judgement",
+  "local_references": 5,
+  "readable_local_references": 5,
+  "bibliographies_restored_to_files": 5,
+  "entity_candidates_with_evidence_before": 35,
+  "entity_candidates_with_evidence_after": 100,
+  "entity_candidates_without_sentence_references": 74,
+  "web_references_with_readable_original": 6,
+  "entity_candidates_with_evidence_after_web_sync": 106,
+  "public_claim_samples_with_evidence": 18
+}

@@ -63,6 +63,15 @@ class DocumentLoader:
     async def _load_document(self, file_path: str, file_extension: str) -> list:
         ret_data = []
         try:
+            if file_extension in {"pdf", "doc"}:
+                from .text_recovery import read_recovered_text
+                from langchain_core.documents import Document
+                recovered = await asyncio.to_thread(read_recovered_text, file_path)
+                if recovered:
+                    return [Document(page_content=p["text"], metadata={
+                        "source": file_path, "page": p["page"],
+                        "extraction_method": p.get("method", recovered["method"]),
+                    }) for p in recovered["pages"] if p["text"].strip()]
             loader_dict = {
                 "pdf": PyMuPDFLoader(file_path),
                 "txt": TextLoader(file_path),

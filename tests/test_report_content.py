@@ -66,6 +66,21 @@ class ContentReviewTests(unittest.TestCase):
         self.assertTrue(result['unsupported_caveat_sections'])
         self.assertTrue(any('兜底表述' in warning for warning in result['warnings']))
 
+    def test_disclaimer_style_source_boundary_requires_revision(self):
+        module = self.module()
+        text = report() + '\n## 3 适航响应\n\n所查资料未提供针对该发动机的AD编号或具体合规时限，该问题仍需核验。[URL1]\n'
+        result = module.review_content(text, 'research_report')
+        self.assertTrue(result['unsupported_caveat_sections'])
+        self.assertTrue(any('兜底表述' in warning for warning in result['warnings']))
+
+    def test_source_listing_section_requires_analysis(self):
+        module = self.module()
+        text = report(
+            '资料A显示GTF维修周期变化。资料B指出MRO网络扩张。资料C记载服务公告更新。', copies=3)
+        result = module.review_content(text, 'research_report')
+        self.assertIn('技术机制', result['source_listing_sections'])
+        self.assertTrue(any('偏资料罗列' in warning for warning in result['warnings']))
+
     def test_repeated_paragraphs_do_not_count_as_substance(self):
         module = self.module()
         original = report()
@@ -129,13 +144,18 @@ class ContentReviewTests(unittest.TestCase):
         self.assertEqual(len(topics), 6)
         self.assertIn('主题5', topics[-1])
 
-    def test_brief_report_detail_keeps_full_planner_topics(self):
+    def test_report_detail_does_not_override_report_type_planner_scope(self):
         from three_agent_service import ThreeAgentRequestData, ThreeAgentService
         service = ThreeAgentService(ThreeAgentRequestData(task='GTF技术和市场', report_detail='brief'))
         service.demand_profile = {'matched_topics': [{'name': f'主题{i}', 'priority_questions': [f'问题{i}']} for i in range(8)]}
         topics = service.planner_agent()
-        self.assertEqual(len(topics), 6)
-        self.assertIn('主题5', topics[-1])
+        self.assertEqual(len(topics), 4)
+        detailed = ThreeAgentService(ThreeAgentRequestData(
+            task='GTF技术和市场', report_type='detailed_report', report_detail='brief'))
+        detailed.demand_profile = service.demand_profile
+        detailed_topics = detailed.planner_agent()
+        self.assertEqual(len(detailed_topics), 6)
+        self.assertIn('主题5', detailed_topics[-1])
 
     def test_research_returns_context_and_sources_for_synthesis(self):
         from three_agent_service import ThreeAgentRequestData, ThreeAgentService
@@ -187,7 +207,10 @@ class EnrichmentFlowTests(unittest.TestCase):
         result, service, calls = self.run_writer('', first_reason='length')
         self.assertEqual(result, report())
         self.assertEqual(service.generation_status, 'draft')
-        self.assertEqual(calls.await_count, 1)
+        # The existing completion helper attempts continuation after length.
+        # Its empty second response must keep the draft and skip citation repair.
+        self.assertEqual(calls.await_count, 2)
+        self.assertNotIn('body_citation_repair', service.content_enrichment)
 
     def test_truncated_revision_keeps_complete_first_draft(self):
         result, service, calls = self.run_writer(report(copies=8), second_reason='length')

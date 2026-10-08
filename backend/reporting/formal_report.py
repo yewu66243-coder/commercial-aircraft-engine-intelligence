@@ -4,6 +4,7 @@ from __future__ import annotations
 import re
 from dataclasses import dataclass, field
 from .citations import CitationRegistry
+from .tone import soften_source_boundary_tone
 
 
 @dataclass
@@ -37,6 +38,17 @@ def _move_verification_markers(text, section, notes):
     return cleaned
 
 
+REPORT_TYPE_LABELS = {
+    'research_report': '专题快报',
+    'resource_report': '型号跟踪报告',
+    'detailed_report': '技术动态研报',
+}
+
+
+def report_type_label(report_type: str = '') -> str:
+    return REPORT_TYPE_LABELS.get(report_type or '', '技术情报研究报告')
+
+
 def concise_title(text, task=''):
     title = re.sub(r'^#+\s*', '', text or task).strip().strip('*')
     title = re.split(r'[，,。；;]\s*(?:重点|主要|关注|请|要求|包含|涵盖)', title, maxsplit=1)[0]
@@ -46,6 +58,53 @@ def concise_title(text, task=''):
     if len(title) > 58:
         title = re.split(r'[，,。；;：:]', task, maxsplit=1)[0][:50].rstrip() + '专题研究报告'
     return title or '专题研究报告'
+
+
+def formal_report_title(raw_title: str = '', task: str = '', report_type: str = '') -> str:
+    source = raw_title or task
+    generic = {'商用航空发动机情报研究报告', '规范论文格式报告', '技术情报研究报告', '专题研究报告'}
+    title = re.sub(r'^#+\s*', '', source or '').strip().strip('*').strip('“”"\'')
+    title = re.sub(r'[（(]\s*(?:草稿|初稿|规范论文格式报告)\s*[）)]', '', title)
+    title = title.replace('规范论文格式报告', '').strip()
+    if not title or title in generic:
+        title = concise_title(task)
+    if title in generic and task:
+        title = concise_title(task)
+
+    title = re.sub(r'^\s*(?:请|请你|麻烦)?(?:帮我|为我)?(?:生成|撰写|写|制作|整理|分析)\s*(?:一份|一版|一个)?', '', title)
+    title = re.sub(r'(?:的)?(?:技术情报研究报告|研究报告|报告)\s*$', '', title)
+    title = re.split(r'[，,。；;]\s*(?:重点|主要|关注|请|要求|包含|涵盖|其中|并且|另外)', title, maxsplit=1)[0]
+    title = re.sub(r'\s+', '', title).strip('：:，,。；;、 ')
+    title = re.sub(r'(?:看看|一下|相关|最新|近期)$', '', title)
+    title = re.sub(r'跟踪分析跟踪$', '跟踪分析', title)
+
+    replacements = [
+        (r'技术[、,，]适航与市场影响跟踪$', '技术机理、适航响应与市场影响研究'),
+        (r'技术[、,，]适航与市场影响分析$', '技术机理、适航响应与市场影响研究'),
+        (r'技术[、,，]适航与市场影响研究$', '技术机理、适航响应与市场影响研究'),
+        (r'技术与市场影响跟踪$', '技术与市场影响研究'),
+        (r'适航与维护动态$', '适航与维护动态跟踪分析'),
+        (r'MRO网络与维修能力布局分析$', 'MRO网络与维修能力布局研究'),
+    ]
+    for pattern, replacement in replacements:
+        title = re.sub(pattern, replacement, title)
+
+    if not re.search(r'(?:研究|分析|评估|研判|跟踪|综述|监测)$', title):
+        if report_type == 'resource_report':
+            title += '动态跟踪'
+        elif report_type == 'research_report':
+            title += '跟踪分析'
+        else:
+            title += '研究'
+
+    if len(title) > 52:
+        compact = re.split(r'[：:，,；;]', title, maxsplit=1)[0].strip()
+        if len(compact) >= 12:
+            title = compact
+        if not re.search(r'(?:研究|分析|评估|研判|跟踪|综述|监测)$', title):
+            title += '研究'
+
+    return title or '航空发动机专题研究报告'
 
 
 def _heading(text):
@@ -71,7 +130,7 @@ def _clean_body(text, title=''):
             line = re.sub(r'(?<![\w/\\])__(?=\S)(.+?)(?<=\S)__(?![\w/\\])', r'\1', line)
             line = re.sub(r'</?(?:strong|b)\b[^>]*>', '', line, flags=re.I)
         lines.append(line)
-    return '\n'.join(lines).strip()
+    return soften_source_boundary_tone('\n'.join(lines).strip())
 
 
 def _sections(markdown):
@@ -134,7 +193,13 @@ def _captions(markdown):
 
 def prepare_formal_report(markdown, task, sources=(), metadata=None):
     metadata = metadata or {}
-    registry = CitationRegistry(markdown, sources)
+    public_method_section = bool(metadata.get('public_method_section'))
+    registry = CitationRegistry(
+        markdown, sources,
+        reference_lookup=bool(metadata.get('reference_lookup_enabled')),
+        metadata_resolver=metadata.get('reference_metadata_resolver'),
+        evidence_catalog=(metadata.get('source_catalog') or {}).get('sources', []),
+    )
     raw_title, sections = _sections(markdown)
     warnings = []
     verification_notes = []
@@ -159,8 +224,11 @@ def prepare_formal_report(markdown, task, sources=(), metadata=None):
         elif re.match(r'引言|研究背景|前言', title) or not title:
             front['intro'] += body + '\n\n'
         elif re.search(r'资料来源与研究方法|数据来源与研究方法|^研究方法$', title):
-            front['method'] += body + '\n\n'
-        elif re.search(r'讨论|证据不足|核验建议|研究局限', title):
+            if public_method_section:
+                front['method'] += body + '\n\n'
+            else:
+                verification_notes.append({'kind': 'method_section_internal', 'section': title, 'context': body.strip()})
+        elif re.search(r'讨论|综合研判|后续监测|后续关注|证据不足|核验建议|研究局限', title):
             front['discussion'] += body + '\n\n'
         elif re.search(r'结论|总结与建议', title):
             front['conclusion'] += body + '\n\n'
@@ -172,7 +240,7 @@ def prepare_formal_report(markdown, task, sources=(), metadata=None):
     if not front['intro']:
         front['intro'] = f'本报告围绕“{concise_title(task)}”组织已取得的资料，分析相关问题及证据的适用范围。'
         warnings.append('原稿缺少独立引言，已补入研究范围说明。')
-    if not front['method']:
+    if public_method_section and not front['method']:
         scope = metadata.get('search_scope')
         if scope:
             front['method'] = f'资料检索范围为{scope}。'
@@ -202,12 +270,14 @@ def prepare_formal_report(markdown, task, sources=(), metadata=None):
         front['keywords'] = '；'.join(terms) or concise_title(task)
         warnings.append('关键词从原稿主题提取，需要人工确认。')
 
-    title = concise_title(raw_title, task)
+    title = formal_report_title(raw_title, task, metadata.get('report_type', ''))
     draft = metadata.get('generation_status') == 'draft'
     if draft:
         title = title.removesuffix('（草稿）') + '（草稿）'
         warnings.append(metadata.get('generation_warning') or '综合写作未成功，当前为待整理草稿。')
-    chapters = [('引言', front['intro']), ('资料来源与研究方法', front['method'])]
+    chapters = [('引言', front['intro'])]
+    if public_method_section and front['method']:
+        chapters.append(('资料来源与研究方法', front['method']))
     if not thematic:
         warnings.append('缺少专题分析章节，需补充证据及分析。')
     chapters += thematic or [('专题资料分析', '当前尚无足够的专题分析内容。')]
@@ -231,8 +301,20 @@ def prepare_formal_report(markdown, task, sources=(), metadata=None):
         body = body.rstrip() + '\n\n' + bibliography
     if registry.missing:
         warnings.append('部分正文引文没有对应的来源信息，须补充核对。')
+    from .body_citations import citation_coverage, coverage_summary
+    coverage_view = '\n'.join(parts) + '\n\n## 证据来源列表\n' + '\n'.join(
+        f'- {label} {record["description"]}' for label, record in registry.definitions.items())
+    body_coverage = citation_coverage(coverage_view, sources, (metadata.get('source_catalog') or {}).get('sources', []))
+    warnings.extend(issue['reason'] for issue in body_coverage['issues'])
     if not registry.public:
         warnings.append('正文未建立引用与参考文献的对应关系。')
+    from .reference_metadata import missing_reference_fields
+    reference_issues = [
+        {'id': label, 'title': item.get('title', ''), 'missing_fields': missing_reference_fields(item)}
+        for label, item in registry.public.items() if missing_reference_fields(item)
+    ]
+    if reference_issues:
+        warnings.append(f'{len(reference_issues)} 条参考文献的著录字段尚不完整，具体缺项已保存到研究记录。')
     abstract_length = len(re.sub(r'\[[^\]]*\]|\s+', '', front['abstract']))
     if not 300 <= abstract_length <= 500:
         warnings.append('摘要篇幅需复核，建议正式报告采用300–500字。')
@@ -243,6 +325,8 @@ def prepare_formal_report(markdown, task, sources=(), metadata=None):
         'status': 'draft' if draft else ('needs_review' if warnings else 'ready'),
         'warnings': list(dict.fromkeys(warnings)), 'missing_source_ids': list(dict.fromkeys(registry.missing)),
         'reference_count': len(registry.public), 'figure_count': figure_count, 'table_count': table_count,
+        'reference_metadata_issues': reference_issues,
+        'body_citation_coverage': coverage_summary(body_coverage),
         'abstract_characters': abstract_length, 'keyword_count': keyword_count,
         'format_version': 'academic-report-v1',
     }

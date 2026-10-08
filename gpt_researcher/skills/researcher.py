@@ -8,7 +8,6 @@ and context gathering.
 import asyncio
 import logging
 import os
-import random
 
 from ..actions.agent_creator import choose_agent
 from ..actions.query_processing import get_search_results, plan_research_outline
@@ -17,6 +16,7 @@ from ..document import DocumentLoader, LangChainDocumentLoader, OnlineDocumentLo
 from ..document.local_index import prepare_local_docs_for_query, should_use_local_index
 from ..utils.enum import ReportSource, ReportType
 from ..utils.logging_config import get_json_handler
+from ..retrievers.web_evidence_policy import evidence_assessment
 
 
 class ResearchConductor:
@@ -53,6 +53,8 @@ class ResearchConductor:
         Returns:
             List of queries
         """
+        if getattr(self.researcher, 'compact_web_queries', None):
+            return list(self.researcher.compact_web_queries)
         await stream_output(
             "logs",
             "planning_research",
@@ -369,7 +371,7 @@ class ResearchConductor:
         self.logger.info(f"Generated sub-queries: {sub_queries}")
         
         # If this is not part of a sub researcher, add original query to research for better results
-        if self.researcher.report_type != "subtopic_report":
+        if self.researcher.report_type != "subtopic_report" and not getattr(self.researcher, 'compact_web_queries', None):
             sub_queries.append(query)
 
         if self.researcher.verbose:
@@ -791,6 +793,10 @@ class ResearchConductor:
         prefetched_content = []
         if query_domains is None:
             query_domains = []
+        if getattr(self.researcher, 'compact_web_queries', None):
+            query_domains = getattr(self.researcher, 'compact_query_domains', query_domains)
+        if not hasattr(self.researcher, 'web_candidates'):
+            self.researcher.web_candidates = []
 
         # Iterate through the currently set retrievers
         # This allows the method to work when retrievers are temporarily modified
@@ -815,12 +821,23 @@ class ResearchConductor:
                 for result in search_results:
                     url = result.get("href") or result.get("url")
                     raw_content = result.get("raw_content")
+                    if url:
+                        self.researcher.web_candidates.append({
+                            'url':url, 'title':result.get('title') or '', 'query':query,
+                            'snippet':result.get('body') or result.get('snippet') or '',
+                            'published_date':result.get('published_date') or result.get('publishedDate') or '',
+                            'fetch_status':'not_attempted', 'fetch_reason':'检索已返回，尚未取得正文',
+                        })
                     if url and raw_content and len(raw_content) > 100:
                         # Only raw_content signals that a retriever already fetched the full page.
                         # body is snippet-sized text for most web retrievers and still needs scraping.
                         prefetched_content.append({
                             "url": url,
                             "raw_content": raw_content,
+                            **{key:value for key, value in {
+                                'title':result.get('title'),
+                                'published_date':result.get('published_date') or result.get('publishedDate'),
+                            }.items() if value},
                         })
                         self.researcher.add_research_sources([{"url": url}])
                     elif url:
@@ -830,7 +847,6 @@ class ResearchConductor:
 
         # Get unique URLs
         new_search_urls = await self._get_new_urls(new_search_urls)
-        random.shuffle(new_search_urls)
 
         return new_search_urls, prefetched_content
 
@@ -861,11 +877,38 @@ class ResearchConductor:
             )
 
         # Scrape URLs that need fetching (skip those already provided by retrievers)
-        scraped_content = await self.researcher.scraper_manager.browse_urls(new_search_urls)
+        try:
+            scraped_content = await self.researcher.scraper_manager.browse_urls(new_search_urls)
+        except Exception as exc:
+            self.logger.warning('Scraping batch failed: %s', type(exc).__name__)
+            scraped_content = []
 
         # Merge pre-fetched content from retrievers that already provide full text
         scraped_content.extend(prefetched_content)
+        by_url = {item.get('url'):item for item in scraped_content}
+        attempted = set(new_search_urls) | set(by_url)
+        for candidate in getattr(self.researcher, 'web_candidates', []):
+            url = candidate['url']
+            if url in by_url:
+                candidate.update(fetch_status='success', fetch_reason='')
+                page = by_url[url]
+                for field in ('title', 'published_date'):
+                    if not page.get(field):
+                        page[field] = candidate.get(field, '')
+            elif url in attempted and candidate.get('fetch_status') != 'success':
+                candidate.update(fetch_status='failed', fetch_reason='抓取未返回可用正文（请求失败、空页或文本过短）')
+        for page in scraped_content:
+            page.update(evidence_assessment(
+                getattr(self.researcher, 'evidence_task', getattr(self.researcher, 'query', '')),
+                page.get('title'), page.get('raw_content'), page.get('url', ''), page.get('published_date')))
+        if not hasattr(self.researcher, 'saved_web_evidence'):
+            self.researcher.saved_web_evidence = []
+        self.researcher.saved_web_evidence.extend(scraped_content)
+        from ..retrievers.search_diagnostics import record_search
+        record_search('scraper', sub_query, 'ok' if scraped_content else 'empty',
+                      count=len(scraped_content), message=f'候选URL {len(new_search_urls)}，保存原文 {len(scraped_content)}')
 
+        scraped_content = [page for page in scraped_content if page.get('evidence_eligible', True)]
         if self.researcher.vector_store:
             self.researcher.vector_store.load(scraped_content)
 

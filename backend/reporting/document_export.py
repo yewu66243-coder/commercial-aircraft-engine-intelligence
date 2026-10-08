@@ -362,7 +362,7 @@ def _display_heading(doc, text: str, size: int = 15):
     return paragraph
 
 
-def _add_cover(doc, title: str):
+def _add_cover(doc, title: str, report_label: str = "技术情报研究报告"):
     from docx.enum.text import WD_ALIGN_PARAGRAPH as Align
     from docx.shared import Pt
     section = doc.sections[0]
@@ -386,14 +386,14 @@ def _add_cover(doc, title: str):
     sample.alignment = Align.CENTER
     sample.paragraph_format.first_line_indent = Pt(0)
     sample.paragraph_format.space_before = Pt(18)
-    run = sample.add_run("规范论文格式报告")
+    run = sample.add_run(report_label)
     _font(run.font, "SimSun", 14, False)
 
     for _ in range(5):
         doc.add_paragraph()
     for label, value in [
         ("课题名称", title),
-        ("报告类型", "技术情报研究报告"),
+        ("报告类型", report_label),
         ("生成机构", "商用航空发动机情报工作台"),
         ("成文日期", datetime.now().strftime("%Y年%m月%d日")),
     ]:

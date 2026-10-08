@@ -21,7 +21,13 @@ class BeautifulSoupScraper:
         occurs during the process, an error message is printed and an empty string is returned.
         """
         try:
-            response = self.session.get(self.link, timeout=4)
+            response = self.session.get(self.link, timeout=(5, 20))
+            response.raise_for_status()
+            if b'%PDF-' in response.content[:1024]:
+                import fitz
+                with fitz.open(stream=response.content, filetype='pdf') as document:
+                    text = '\n'.join(page.get_text('text') for page in document)
+                    return text, [], document.metadata.get('title') or self.link
             soup = BeautifulSoup(
                 response.content, "lxml", from_encoding=response.encoding
             )
@@ -38,5 +44,9 @@ class BeautifulSoupScraper:
             return content, image_urls, title
 
         except Exception as e:
-            print("Error! : " + str(e))
+            from ...retrievers.search_diagnostics import record_search
+            response = getattr(e, 'response', None)
+            record_search('web_fetch', self.link, 'failed',
+                          http_status=response.status_code if response is not None else None,
+                          message='网页抓取失败（' + type(e).__name__ + '）')
             return "", [], ""

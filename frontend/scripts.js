@@ -41,6 +41,12 @@ const GPTResearcher = (() => {
   };
   let localLibraryStatsCache = {};
   let coverageRefreshTimer = null;
+  let uploadIndexPollTimer = null;
+  let uploadIndexHideTimer = null;
+  let uploadIndexLastJobs = [];
+  const uploadIndexLastStatuses = new Map();
+  const uploadIndexCompletedAt = new Map();
+  const UPLOAD_INDEX_DONE_VISIBLE_MS = 10000;
   let intelligenceTemplateCache = {
     demand_models: [],
     task_templates: [],
@@ -49,22 +55,22 @@ const GPTResearcher = (() => {
   let modelProviderCatalog = {
     default: 'deepseek',
     providers: [
-      { id: 'deepseek', name: 'DeepSeek', model: 'deepseek-chat', configured: true },
+      { id: 'deepseek', name: 'DeepSeek', model: 'deepseek-flash', configured: true },
       { id: 'qwen', name: '千问', model: 'qwen-plus', configured: null },
     ],
     report_details: [
-      { id: 'brief', label: '短报告', model: 'deepseek-chat' },
+      { id: 'brief', label: '短报告', model: 'deepseek-flash' },
       { id: 'detailed', label: '详细报告', model: 'deepseek-v4-pro' },
     ],
     generation_models: [
-      { id: 'deepseek:deepseek-chat', provider_id: 'deepseek', provider_name: 'DeepSeek', name: 'DeepSeek Chat', model: 'deepseek-chat', report_details: ['brief'], configured: true },
+      { id: 'deepseek:deepseek-flash', provider_id: 'deepseek', provider_name: 'DeepSeek', name: 'DeepSeek Flash', model: 'deepseek-flash', report_details: ['brief'], configured: true },
       { id: 'deepseek:deepseek-v4-pro', provider_id: 'deepseek', provider_name: 'DeepSeek', name: 'DeepSeek V4 Pro', model: 'deepseek-v4-pro', report_details: ['detailed'], configured: true },
       { id: 'qwen:qwen-plus', provider_id: 'qwen', provider_name: '千问', name: '千问 qwen-plus', model: 'qwen-plus', report_details: ['detailed'], configured: null },
     ],
   };
 
   const reportDetailFallbacks = {
-    brief: { id: 'brief', label: '短报告', model: 'deepseek-chat' },
+    brief: { id: 'brief', label: '短报告', model: 'deepseek-flash' },
     detailed: { id: 'detailed', label: '详细报告', model: 'deepseek-v4-pro' },
   };
 
@@ -91,7 +97,7 @@ const GPTResearcher = (() => {
 
   const modelChoiceFallbacks = {
     brief: [
-      { id: 'deepseek:deepseek-chat', provider_id: 'deepseek', provider_name: 'DeepSeek', name: 'DeepSeek Chat', model: 'deepseek-chat', report_details: ['brief'], configured: true },
+      { id: 'deepseek:deepseek-flash', provider_id: 'deepseek', provider_name: 'DeepSeek', name: 'DeepSeek Flash', model: 'deepseek-flash', report_details: ['brief'], configured: true },
     ],
     detailed: [
       { id: 'deepseek:deepseek-v4-pro', provider_id: 'deepseek', provider_name: 'DeepSeek', name: 'DeepSeek V4 Pro', model: 'deepseek-v4-pro', report_details: ['detailed'], configured: true },
@@ -1002,6 +1008,7 @@ const GPTResearcher = (() => {
   const loadResearchEntry = (index) => {
     const entry = conversationHistory[index];
     if (!entry) return;
+    renderWebSourceTracking(null);
 
     // Fill form with the entry data
     document.getElementById('task').value = entry.prompt; // Changed from entry.task for consistency
@@ -1144,6 +1151,7 @@ const GPTResearcher = (() => {
       pdf: downloadLinks.pdf || '',
       docx: downloadLinks.docx || '',
       md: downloadLinks.md || '',
+      evaluation: downloadLinks.evaluation || '',
       json: downloadLinks.json || ''
     };
 
@@ -1860,6 +1868,181 @@ const GPTResearcher = (() => {
     }
   };
 
+  const uploadJobTargetLabel = (target) => ({
+    user_docs: '用户资料库',
+    all_papers_pool: '论文池',
+    all_patent_pool: '专利池',
+  }[target] || '本地资料库');
+
+  const uploadJobStatusLabel = (status) => ({
+    queued: '排队',
+    waiting: '等待',
+    indexing: '索引中',
+    ready: '完成',
+    partial: '部分完成',
+    failed: '失败',
+  }[status] || '处理中');
+
+  const uploadJobIsActive = (status) => ['queued', 'waiting', 'indexing'].includes(status);
+
+  const uploadJobShouldAutoHide = (status) => status === 'ready';
+
+  const getVisibleUploadIndexJobs = (jobs = []) => {
+    const now = Date.now();
+    const liveIds = new Set();
+    jobs.forEach((job) => {
+      if (job?.id) liveIds.add(job.id);
+    });
+    uploadIndexCompletedAt.forEach((_, id) => {
+      if (!liveIds.has(id)) uploadIndexCompletedAt.delete(id);
+    });
+    return jobs.filter((job) => {
+      if (!job?.id) return true;
+      if (!uploadJobShouldAutoHide(job.status)) {
+        uploadIndexCompletedAt.delete(job.id);
+        return true;
+      }
+      if (!uploadIndexCompletedAt.has(job.id)) {
+        uploadIndexCompletedAt.set(job.id, now);
+      }
+      return now - uploadIndexCompletedAt.get(job.id) < UPLOAD_INDEX_DONE_VISIBLE_MS;
+    });
+  };
+
+  const scheduleUploadIndexDoneHide = (jobs = []) => {
+    if (uploadIndexHideTimer) {
+      window.clearTimeout(uploadIndexHideTimer);
+      uploadIndexHideTimer = null;
+    }
+    const now = Date.now();
+    const delays = jobs
+      .filter((job) => job?.id && uploadJobShouldAutoHide(job.status))
+      .map((job) => UPLOAD_INDEX_DONE_VISIBLE_MS - (now - (uploadIndexCompletedAt.get(job.id) || now)))
+      .filter((delay) => delay > 0);
+    if (!delays.length) return;
+    uploadIndexHideTimer = window.setTimeout(() => {
+      uploadIndexHideTimer = null;
+      renderUploadIndexJobs(uploadIndexLastJobs);
+    }, Math.min(...delays) + 50);
+  };
+
+  const renderUploadIndexJobs = (jobs = [], { failedToLoad = false } = {}) => {
+    const box = document.getElementById('uploadIndexJobs');
+    if (!box) return;
+    if (!failedToLoad) {
+      uploadIndexLastJobs = Array.isArray(jobs) ? jobs : [];
+    }
+    const visibleJobs = failedToLoad ? [] : getVisibleUploadIndexJobs(uploadIndexLastJobs);
+    box.innerHTML = '';
+    if (!visibleJobs.length && !failedToLoad) {
+      box.hidden = true;
+      scheduleUploadIndexDoneHide(uploadIndexLastJobs);
+      return;
+    }
+    box.hidden = false;
+    if (failedToLoad) {
+      const item = document.createElement('div');
+      item.className = 'upload-index-job';
+      item.dataset.status = 'partial';
+      const text = document.createElement('div');
+      const title = document.createElement('strong');
+      title.textContent = '全文索引状态暂时无法读取';
+      const message = document.createElement('span');
+      message.textContent = '后台任务可能仍在运行，稍后会自动重新读取。';
+      text.append(title, message);
+      item.appendChild(text);
+      box.appendChild(item);
+      return;
+    }
+
+    visibleJobs.forEach((job) => {
+      const item = document.createElement('div');
+      item.className = 'upload-index-job';
+      item.dataset.status = job.status || 'queued';
+
+      const text = document.createElement('div');
+      const title = document.createElement('strong');
+      title.textContent = `${uploadJobTargetLabel(job.target)} · ${job.file_name || '未命名文件'}`;
+      const message = document.createElement('span');
+      message.textContent = `${uploadJobStatusLabel(job.status)}：${job.message || '等待后台处理'}`;
+      text.append(title, message);
+      item.appendChild(text);
+
+      if (job.id && job.id !== 'upload-index-error' && ['failed', 'partial'].includes(job.status)) {
+        const retryButton = document.createElement('button');
+        retryButton.type = 'button';
+        retryButton.className = 'ghost-button';
+        retryButton.dataset.jobId = job.id;
+        retryButton.textContent = '重试';
+        item.appendChild(retryButton);
+      }
+      box.appendChild(item);
+    });
+    scheduleUploadIndexDoneHide(uploadIndexLastJobs);
+  };
+
+  const scheduleUploadIndexPolling = () => {
+    if (uploadIndexPollTimer) return;
+    uploadIndexPollTimer = window.setInterval(() => pollUploadIndexJobs({ silent: true }), 4000);
+  };
+
+  const stopUploadIndexPolling = () => {
+    if (uploadIndexPollTimer) {
+      window.clearInterval(uploadIndexPollTimer);
+      uploadIndexPollTimer = null;
+    }
+  };
+
+  const pollUploadIndexJobs = async ({ silent = false } = {}) => {
+    try {
+      const response = await fetch('/api/local-library/index-jobs');
+      const data = await response.json();
+      if (!response.ok) throw new Error(data.detail || `状态码 ${response.status}`);
+      const jobs = Array.isArray(data.jobs) ? data.jobs : [];
+      renderUploadIndexJobs(jobs);
+
+      let shouldReloadLibrary = false;
+      jobs.forEach((job) => {
+        const previous = uploadIndexLastStatuses.get(job.id);
+        if (previous && previous !== job.status && ['ready', 'partial'].includes(job.status)) {
+          shouldReloadLibrary = true;
+        }
+        uploadIndexLastStatuses.set(job.id, job.status);
+      });
+      if (shouldReloadLibrary) {
+        await loadLocalLibrary();
+      }
+      if (jobs.some((job) => uploadJobIsActive(job.status))) {
+        scheduleUploadIndexPolling();
+      } else {
+        stopUploadIndexPolling();
+      }
+    } catch (error) {
+      console.error('读取全文索引任务失败:', error);
+      if (!silent) {
+        renderUploadIndexJobs([], { failedToLoad: true });
+      }
+      scheduleUploadIndexPolling();
+    }
+  };
+
+  const retryUploadIndexJob = async (jobId) => {
+    try {
+      uploadIndexCompletedAt.delete(jobId);
+      const response = await fetch(`/api/local-library/index-jobs/${encodeURIComponent(jobId)}/retry`, {
+        method: 'POST',
+      });
+      const data = await response.json();
+      if (!response.ok) throw new Error(data.detail || `状态码 ${response.status}`);
+      renderUploadIndexJobs(Array.isArray(data.jobs) ? data.jobs : [data.job].filter(Boolean));
+      scheduleUploadIndexPolling();
+      showToast('已重新加入全文索引队列');
+    } catch (error) {
+      console.error('重试全文索引失败:', error);
+      showToast(`重试失败：${error.message}`);
+    }
+  };
+
   const uploadLocalLibraryFile = async () => {
     const input = document.getElementById('localFileInput');
     const activeTarget = document.querySelector('.upload-target-btn.active');
@@ -1872,7 +2055,7 @@ const GPTResearcher = (() => {
     const formData = new FormData();
     formData.append('target', target);
     formData.append('file', input.files[0]);
-    setText('uploadStatus', '正在上传并生成索引...');
+    setText('uploadStatus', '正在上传并更新摘要索引...');
 
     try {
       const response = await fetch('/api/local-library/upload', {
@@ -1900,13 +2083,26 @@ const GPTResearcher = (() => {
         all_patent_pool: 'patents_index.json',
       };
       if (data.duplicate) {
-        setText('uploadStatus', `已存在：${data.file_name}，未重复保存；索引方式：${methodLabel}`);
+        setText('uploadStatus', `已存在：${data.file_name}，未重复保存；摘要索引方式：${methodLabel}`);
       } else {
         const extraCount = data.entry_count ? `，当前专利索引 ${data.entry_count} 条` : '';
-        setText('uploadStatus', `已上传：${data.file_name}，已写入 ${targetIndexNameMap[target] || '本地索引'}；索引方式：${methodLabel}${extraCount}`);
+        setText('uploadStatus', `已上传：${data.file_name}，已写入 ${targetIndexNameMap[target] || '本地索引'}；摘要索引方式：${methodLabel}${extraCount}`);
+      }
+      if (data.index_job) {
+        if (data.index_job.id) uploadIndexCompletedAt.delete(data.index_job.id);
+        renderUploadIndexJobs([data.index_job]);
+        scheduleUploadIndexPolling();
+        pollUploadIndexJobs({ silent: true });
+      } else if (data.indexing_error) {
+        renderUploadIndexJobs([{ id: 'upload-index-error', target, file_name: data.file_name, status: 'partial', message: data.indexing_error }]);
+      } else if (data.fulltext_indexing_enabled === false) {
+        renderUploadIndexJobs([]);
       }
       renderLocalLibrary(data.library);
-      showToast(data.duplicate ? '资料已存在，已复用原文件' : '资料已加入下一次检索范围');
+      const summaryOnly = data.fulltext_indexing_enabled === false;
+      showToast(data.duplicate
+        ? (summaryOnly ? '资料已存在，已复用原文件并跳过全文索引' : '资料已存在，已复用原文件并检查全文索引')
+        : (summaryOnly ? '资料已上传，已更新摘要索引' : '资料已上传，全文索引在后台处理'));
     } catch (error) {
       console.error('上传资料失败:', error);
       setText('uploadStatus', `上传失败：${error.message}`);
@@ -2051,6 +2247,14 @@ const GPTResearcher = (() => {
     const uploadButton = document.getElementById('uploadLocalFileBtn');
     if (uploadButton) uploadButton.addEventListener('click', uploadLocalLibraryFile);
 
+    const uploadJobs = document.getElementById('uploadIndexJobs');
+    if (uploadJobs) {
+      uploadJobs.addEventListener('click', (event) => {
+        const button = event.target.closest('button[data-job-id]');
+        if (button) retryUploadIndexJob(button.dataset.jobId);
+      });
+    }
+
     const input = document.getElementById('localFileInput');
     if (input) {
       input.addEventListener('change', () => {
@@ -2070,6 +2274,54 @@ const GPTResearcher = (() => {
     const taskInput = document.getElementById('task');
     if (taskInput) taskInput.addEventListener('input', scheduleCoverageMetricsUpdate);
     loadLocalLibrary();
+  };
+
+  const renderWebSourceTracking = (tracking) => {
+    const panel = document.getElementById('webSourceTracking');
+    if (!panel) return;
+    panel.hidden = !tracking?.sources?.length;
+    const rows = document.getElementById('webSourceRows');
+    rows.replaceChildren();
+    const filter = document.getElementById('webSourceFilter');
+    filter.onchange = null;
+    filter.value = 'all';
+    if (panel.hidden) return;
+    const counts = tracking.summary || {};
+    document.getElementById('webSourceSummary').textContent =
+      `检索返回 ${counts.searched || 0} · 取得文本 ${counts.fetched || 0} · 抓取失败 ${counts.fetch_failed || 0} · 未抓取 ${counts.not_attempted || 0} · 初筛排除 ${counts.excluded || 0} · 送入写作 ${counts.writing_selected || 0} · 正文引用 ${counts.cited || 0}（均按 URL 去重）`;
+    const draw = () => {
+      rows.replaceChildren();
+      const selected = tracking.sources.filter(item =>
+        filter.value === 'cited' ? item.cited : filter.value === 'uncited' ? !item.cited :
+        filter.value === 'failed' ? !item.raw_characters :
+        filter.value === 'excluded' ? item.raw_characters > 0 && !item.evidence_eligible : true);
+      if (!selected.length) rows.textContent = '没有符合此条件的链接。';
+      for (const item of selected) {
+        const card = document.createElement('div');
+        card.className = 'web-source-row';
+        const link = document.createElement('a');
+        link.textContent = item.title || item.url;
+        try {
+          const url = new URL(item.url);
+          if (['https:', 'http:'].includes(url.protocol)) link.href = url.href;
+        } catch (_) { /* Invalid source URLs remain visible as text. */ }
+        link.target = '_blank';
+        link.rel = 'noopener noreferrer';
+        const info = document.createElement('p');
+        info.textContent = `${item.cited ? '正文已引用' : '正文未引用'} · ${item.writing_selected ? '已送入写作' : '未送入写作'} · ${item.published_date || '发布日期未知'} — ${item.reason}`;
+        const urlText = document.createElement('small');
+        urlText.textContent = item.url;
+        card.append(link, info, urlText);
+        if (item.queries?.length) {
+          const queries = document.createElement('p');
+          queries.textContent = `检索词：${item.queries.join('；')}`;
+          card.append(queries);
+        }
+        rows.append(card);
+      }
+    };
+    filter.onchange = draw;
+    draw();
   };
 
   const renderSelectedSources = (sources) => {
@@ -2135,6 +2387,7 @@ const startResearch = async () => {
     // 1. 清理上一轮的输出痕迹
     document.getElementById('output').innerHTML = '';
     document.getElementById('reportContainer').innerHTML = '';
+    renderWebSourceTracking(null);
     const qualityStatus = document.getElementById('reportQualityStatus');
     if (qualityStatus) {
         qualityStatus.textContent = '正在检索资料并撰写研究报告…';
@@ -2267,6 +2520,7 @@ const startResearch = async () => {
         updateDocLink('downloadLinkTop', data.pdf_path, 'PDF');
         updateDocLink('downloadLinkWordTop', data.word_path, 'Word');
         updateDocLink('downloadLinkMdTop', data.md_path, 'Markdown');
+        const evaluation = data.evaluation_report || {};
         
         // 更新页面侧边的按钮
         updateDocLink('downloadLink', data.pdf_path, 'PDF');
@@ -2286,6 +2540,7 @@ const startResearch = async () => {
         // 6. 将最终报告渲染到页面的主体区域
         writeReport({ output: data.report }, converter, true, false);
         renderSelectedSources(data.selected_sources || []);
+        renderWebSourceTracking(data.run_statistics?.web_source_tracking);
 
         // 7. 更新UI状态，结束动画
         lastTaskDurationSeconds = Math.max(0, Math.floor((Date.now() - taskStartTime) / 1000));
@@ -2294,19 +2549,29 @@ const startResearch = async () => {
         const reportState = data.report_status || 'needs_review';
         const warnings = data.report_quality?.warnings || [];
         const exportErrors = data.export_errors || [];
+        const referenceIssues = data.report_quality?.reference_metadata_issues || [];
+        const referenceMessages = referenceIssues.map(item =>
+            `${item.id} ${item.title || '参考文献'}：缺少 ${(item.missing_fields || []).join('、')}`);
         const resultMessage = reportState === 'draft'
             ? '已保存草稿，综合写作尚未完成。请检查研究记录后重新生成。'
+            : referenceIssues.length
+                ? `报告已生成，${referenceIssues.length} 条参考文献待补全。可下载审阅版。`
             : reportState === 'needs_review'
                 ? '研究报告已生成，部分结构或来源需要复核。'
                 : data.report_quality?.editorial_review?.passed
                     ? '研究报告已完成自动校订与来源复查，可以下载。'
                     : '研究报告已生成，可以审阅和下载。';
         if (qualityStatus) {
-            qualityStatus.dataset.state = exportErrors.length ? 'error' : reportState;
-            qualityStatus.textContent = [resultMessage, ...warnings, ...exportErrors].join(' ');
+            qualityStatus.dataset.state = exportErrors.length ? 'error' : referenceIssues.length ? 'needs_review' : reportState;
+            qualityStatus.textContent = [resultMessage, ...referenceMessages, ...warnings, ...exportErrors].join(' ');
         }
         addAgentResponse({ output: resultMessage });
+        referenceMessages.forEach(message => addAgentResponse({ output: message }));
         exportErrors.forEach(message => addAgentResponse({ output: message }));
+        if (evaluation.assessment) {
+            addAgentResponse({ output: `指标测评：${evaluation.assessment.overall}，结果已写入本次运行记录。` });
+        }
+        (evaluation.errors || []).forEach(message => addAgentResponse({ output: message }));
         loadLocalLibrary();
 
         // ================= 修改：将真实的路径保存到历史记录中 =================
@@ -2314,7 +2579,8 @@ const startResearch = async () => {
             pdf: data.pdf_path ? `/${data.pdf_path}` : '', 
             docx: data.word_path ? `/${data.word_path}` : '', 
             md: data.md_path ? `/${data.md_path}` : '', 
-            json: '' 
+            evaluation: evaluation.word_path || evaluation.md_path ? `/${evaluation.word_path || evaluation.md_path}` : '',
+            json: evaluation.json_path ? `/${evaluation.json_path}` : ''
         });
         // ====================================================================
 
@@ -2987,7 +3253,7 @@ const startResearch = async () => {
     // Make top buttons report-actions section visible
     const reportActions = document.querySelector('.report-actions');
     if (reportActions) {
-      reportActions.style.display = 'flex';
+      reportActions.style.display = 'grid';
     }
   }
 

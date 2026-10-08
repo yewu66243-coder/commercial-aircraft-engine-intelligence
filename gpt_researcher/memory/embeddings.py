@@ -22,8 +22,10 @@ Supported providers:
     - custom: Custom OpenAI-compatible API
 """
 
+import ipaddress
 import os
 from typing import Any
+from urllib.parse import urlsplit
 
 OPENAI_EMBEDDING_MODEL = os.environ.get(
     "OPENAI_EMBEDDING_MODEL", "text-embedding-3-small"
@@ -51,6 +53,16 @@ _SUPPORTED_PROVIDERS = {
     "openrouter",
     "minimax",
 }
+
+
+def _is_loopback_url(url: str) -> bool:
+    host = urlsplit(url if "://" in url else f"http://{url}").hostname or ""
+    if host.rstrip(".").lower() == "localhost":
+        return True
+    try:
+        return ipaddress.ip_address(host).is_loopback
+    except ValueError:
+        return False
 
 
 class Memory:
@@ -143,9 +155,18 @@ class Memory:
             case "ollama":
                 from langchain_ollama import OllamaEmbeddings
 
+                base_url = os.getenv("OLLAMA_BASE_URL", "http://127.0.0.1:11434")
+                if _is_loopback_url(base_url):
+                    # HTTPX can inherit a Windows proxy for localhost requests.
+                    # Apply to both clients, including their per-client overrides.
+                    for key in ("client_kwargs", "sync_client_kwargs", "async_client_kwargs"):
+                        embedding_kwargs[key] = {
+                            **(embedding_kwargs.get(key) or {}),
+                            "trust_env": False,
+                        }
                 _embeddings = OllamaEmbeddings(
                     model=model,
-                    base_url=os.getenv("OLLAMA_BASE_URL", "http://127.0.0.1:11434"),
+                    base_url=base_url,
                     **embedding_kwargs,
                 )
             case "together":

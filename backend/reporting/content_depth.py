@@ -11,6 +11,8 @@ _UNSUPPORTED_CAVEAT = re.compile(
     r'(?:证据|事实|数据|来源|出处|依据).{0,8}(?:不清楚|不明确|不足|有限|缺乏|缺少|无法(?:确认|证实|核实|验证)|尚(?:未|无法)(?:确认|证实|核实|验证))'
     r'|(?:缺乏|缺少|没有).{0,8}(?:证据|事实依据|来源支撑|数据支撑)'
     r'|(?:尚(?:未|无法)|不能|无法).{0,6}(?:证实|确认|核实|验证).{0,12}(?:上述|该|这些|这一|前述)?(?:判断|结论|说法|推断|数据)?'
+    r'|(?:所查资料|所引资料|本轮资料|本轮材料).{0,12}(?:未(?:提供|显示|说明|覆盖|明确)|没有).{0,30}(?:信息|资料|证据|编号|时限|要求|范围)?'
+    r'|(?:原文|资料).{0,8}(?:未明确|尚未明确).{0,30}(?:需|应).{0,8}(?:核验|核实|核查|确认)'
 )
 _AI_TONE = re.compile(
     r'(?:不仅|不只|不只是|不但).{0,28}(?:更是|更|还|也)'
@@ -109,18 +111,27 @@ def _paragraphs(body):
             yield text
 
 
+def _evidence_listing_ratio(body):
+    paragraphs = list(_paragraphs(body))
+    if not paragraphs:
+        return 0.0
+    listing = 0
+    for paragraph in paragraphs:
+        sourceish = len(re.findall(r'(?:资料|文献|报告|专利|公告|显示|指出|提到|披露|记载|介绍)', paragraph))
+        analytic = len(re.findall(r'(?:因此|这意味着|由此|说明|反映|导致|约束|传导|影响|需要|应当|区别|比较|相较|取决于)', paragraph))
+        if sourceish >= 2 and analytic == 0:
+            listing += 1
+    return listing / max(1, len(paragraphs))
+
+
 def review_content(markdown, report_type='research_report', detail_profile=None):
-    if detail_profile is not None:
-        minimum = detail_profile.body_min_chars
-        section_minimum = detail_profile.section_min_chars
-        expected_themes = detail_profile.expected_themes
-    else:
-        minimum = {'research_report': 2500, 'detailed_report': 5000, 'resource_report': 3000}.get(report_type, 2500)
-        section_minimum = 500 if report_type == 'detailed_report' else 350
-        expected_themes = 3 if report_type == 'detailed_report' else 2
+    minimum = {'research_report': 2500, 'detailed_report': 5000, 'resource_report': 3000}.get(report_type, 2500)
+    section_minimum = 500 if report_type == 'detailed_report' else 350
+    expected_themes = 3 if report_type == 'detailed_report' else 2
     seen, duplicates, count, themes, thin = set(), 0, 0, 0, []
     placeholders = 0
     unsupported_caveats = []
+    source_listing_sections = []
     ai_tone_hits = 0
     for title, body in _sections(markdown):
         if _EXCLUDED.search(title):
@@ -128,6 +139,8 @@ def review_content(markdown, report_type='research_report', detail_profile=None)
         placeholders += len(re.findall(r'\[(?:URL\s*\?|原文\s*\?|材料引述|来源待补)\]', body, re.I))
         if _UNSUPPORTED_CAVEAT.search(body):
             unsupported_caveats.append(title)
+        if _evidence_listing_ratio(body) >= 0.5 and not _FRONT_BACK.search(title):
+            source_listing_sections.append(title)
         ai_tone_hits += len(_AI_TONE.findall(body))
         section_count = 0
         for paragraph in _paragraphs(body):
@@ -154,6 +167,8 @@ def review_content(markdown, report_type='research_report', detail_profile=None)
         warnings.append(f'存在{placeholders}处尚未定位的来源占位标记；须用已有真实来源补齐，无法定位的具体断言移入内部核验记录。')
     if unsupported_caveats:
         warnings.append('正文出现“证据/来源不清楚”式兜底表述，请删除无依据断言或移入内部核验记录：' + '、'.join(unsupported_caveats[:6]) + '。')
+    if source_listing_sections:
+        warnings.append('以下章节偏资料罗列，需补充判断、证据解释和对研究问题的意义：' + '、'.join(source_listing_sections[:6]) + '。')
     if ai_tone_hits >= 3:
         warnings.append('正文存在较多AI式套话或拔高表达，需改为具体、平实、由证据推进的研究报告语言。')
     return {'body_characters': count, 'suggested_minimum': minimum,
@@ -161,6 +176,7 @@ def review_content(markdown, report_type='research_report', detail_profile=None)
             'duplicate_paragraphs': duplicates, 'warnings': warnings,
             'unresolved_placeholders': placeholders,
             'unsupported_caveat_sections': unsupported_caveats,
+            'source_listing_sections': source_listing_sections,
             'ai_tone_hits': ai_tone_hits,
             'needs_enrichment': bool(warnings), 'check_kind': 'structural_heuristics_not_fact_verification'}
 

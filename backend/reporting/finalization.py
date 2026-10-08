@@ -13,12 +13,15 @@ from .content_depth import review_content, bind_local_source_filenames, _section
 from .formal_report import prepare_formal_report
 from .image_evidence import insert_missing_figures, normalize_figure_sources
 from .source_grounding import pack_sources, source_text
+from .body_citations import citation_coverage
 
 
 def source_passages(originals):
     """Stable, immutable passages copied from the actual extracted source pages."""
     passages = []
     for source in originals:
+        if source.get('evidence_eligible') is False:
+            continue
         for page in source.get('pages', []):
             text = page.get('text', '')
             for start in range(0, len(text), 1800):
@@ -32,7 +35,7 @@ def source_passages(originals):
 def review_source_packet(originals, blocks, budget=65000):
     """Give each cited file a share of the review packet; preserve passage IDs."""
     locators = {loc for block in blocks for loc in block['locators']}
-    relevant = [s for s in originals if not locators or s['locator'] in locators]
+    relevant = [s for s in originals if s.get('evidence_eligible', True) and (not locators or s['locator'] in locators)]
     quota = budget // max(1, len(relevant))
     groups = []
     for source in relevant:
@@ -87,8 +90,8 @@ def verified_quote_spans(quote, original):
     return pieces
 
 
-def claim_blocks(report):
-    registry = CitationRegistry(report)
+def claim_blocks(report, sources=(), originals=()):
+    registry = CitationRegistry(report, sources, evidence_catalog=originals)
     blocks = []
     heading = ''
     buffer = []
@@ -111,7 +114,8 @@ def claim_blocks(report):
             r'^\s*(?:!\[|\*{0,2}(?:图源|图题[:：]|图片来源|图\s*\d|表\s*\d))|^\s*\|?\s*[-:| ]+$', line))
         if not body.strip():
             continue
-        refs = list(dict.fromkeys(REF_RE.findall(body)))
+        citation_body = registry.normalize_author_citations(body)
+        refs = list(dict.fromkeys(REF_RE.findall(citation_body)))
         explicit = re.findall(r'\[(?:原文|来源URL)\s*[:：][^\]]+\]', body)
         locators = []
         for ref in refs + explicit:
@@ -119,20 +123,23 @@ def claim_blocks(report):
             locator = record.get('file_name') or record.get('url')
             if locator:
                 locators.append(locator)
-        numbers = _numbers(body)
-        if refs or explicit or numbers:
+        numbers = _numbers(citation_body)
+        if refs or explicit:
             blocks.append({'id':f'B{len(blocks)+1}', 'section':heading, 'text':body,
                            'locators':list(dict.fromkeys(locators)), 'numbers':sorted(numbers)})
     return blocks
 
 
 def check_contract(report, task, sources, originals, images, report_type):
-    prepared = prepare_formal_report(report, task, sources)
+    prepared = prepare_formal_report(report, task, sources, metadata={'source_catalog': {'sources': originals}})
     depth = review_content(report, report_type)
-    issues = [{'kind':'format', 'reason':w} for w in prepared.quality['warnings']]
+    citation_issues = prepared.quality.get('body_citation_coverage', {}).get('issues', [])
+    issues = [{'kind':'format', 'reason':w} for w in prepared.quality['warnings']
+              if w not in {i['reason'] for i in citation_issues}]
+    issues += citation_issues
     issues += [{'kind':'content', 'reason':w} for w in depth['warnings']]
     catalog = {s['locator']:s for s in originals}
-    for block in claim_blocks(report):
+    for block in claim_blocks(report, sources, originals):
         known = [catalog[loc] for loc in block['locators'] if loc in catalog and source_text(catalog[loc])]
         for locator in block['locators']:
             if locator not in catalog or not source_text(catalog[locator]):
@@ -229,6 +236,13 @@ def validate_review(review, blocks, originals, *, require_passages=False):
 def usable_edit(original, candidate):
     if not candidate.strip().startswith('# ') or len(candidate) < len(original) * .6:
         return False
+    if citation_coverage(original)['cited_paragraph_count'] and not citation_coverage(candidate)['cited_paragraph_count']:
+        return False
+    previous = CitationRegistry(original).definitions
+    following = CitationRegistry(candidate).definitions
+    for label in previous.keys() & following.keys():
+        if any(previous[label].get(key) != following[label].get(key) for key in ('url', 'file_name')):
+            return False
     before = {name for name, _ in _sections(original) if not re.search(r'内部核验|证据来源|参考文献|目录', name)}
     after = {name for name, _ in _sections(candidate)}
     return before.issubset(after)
@@ -478,7 +492,7 @@ async def finalize_report(report, *, task, report_type, sources, catalog, images
     if not any(source_text(s).strip() for s in catalog['sources']):
         audit['reason'] = '没有可用于自动校订的原文，保留已有报告。'
         return report, audit
-    evidence = pack_sources(catalog, task + '\n' + report, budget=65000)
+    evidence = pack_sources(catalog, task + '\n' + report, budget=65000, purpose='review')
     image_text = json.dumps([{k:v for k,v in image.items() if k in {'source_file','page','markdown_path','caption'}}
                              for image in images if image.get('caption_matched')], ensure_ascii=False)
     pending = check_contract(report,task,sources,catalog['sources'],images,report_type)['issues']
@@ -507,7 +521,7 @@ async def finalize_report(report, *, task, report_type, sources, catalog, images
     for turn in range(len(audit['rounds']), max_rounds):
         round_started = time.perf_counter()
         prior_pending = copy.deepcopy(pending)
-        before_blocks = claim_blocks(report)
+        before_blocks = claim_blocks(report, sources, catalog['sources'])
         by_id = {b['id']:b for b in before_blocks}
         for issue in pending:
             block_id = issue.get('block') or issue.get('section')
@@ -535,14 +549,17 @@ async def finalize_report(report, *, task, report_type, sources, catalog, images
 围绕每个专题展开机制、数据及适用范围、来源对比、案例与分析。原文没有的数值或技术结论必须纠正、限定或删除，不能为了保留字数保留错误。
 摘要控制在350–430个可见字符（包括汉字、英文、数字和标点），避免超出500字符；关键词3–5个；不输出目录。正文普通字重，不使用粗体主题句。
 详细报告在有可比材料时至少采用2张简洁分析对照表，如技术措施/时间与状态/来源差异，不用内部实体清单代替正文表格；每张表后解释差异，不重复堆砌数据。
+先按反向提纲检查全文：各公开章节的首句应能串成“对象—原因—影响—研判—建议”的论证路线。若某章只是资料罗列，应改写为“判断—证据—分析—任务含义”的连续段落。
 长报告和短报告都要清理AI式套话：避免“不仅……更……”“不是……而是……”等拔高句式，避免“值得注意的是、综上所述、充分体现、深刻反映”等空泛过渡；用具体证据和任务含义推进段落。
 严禁在正式正文中先写一个大段确定性判断，再补一句“证据来源不清楚、尚无法证实、缺少事实依据、来源支撑不足”。没有证据的具体断言必须删除、缩窄成可支撑表述，或只移入“## 待核验事项（内部核验）”。
+“所查资料未提供/未显示/未说明”“所引资料未提供/未显示/未说明”“原文未明确，需核验”等句式不能作为段落收尾兜底；必要的资料边界集中写入综合讨论或后台核验事项。
 纠正错引、型号混用、计划当实际、历史预测当当前事实、相关关系当因果、未报道当不存在等问题。
 资料来源与研究方法严格依据下方实际记录，不能编造实验、检索时间范围、全部事实核验通过或使用了未取得的资料。
 实际过程：{method_context}
 仅使用下方原文中能够定位的来源。短编号[原文1]/[URL1]全篇唯一，证据来源列表完整列出精确文件名/真实URL。
 正文通过作者或自然文献称谓引出来源，内部编号仅用于方括号引文，不写“原文1写道”“见原文3”等工作记录式叙述。
 允许纠正和删除错误引用，但不能改变保留下来的编号与原来源的对应关系。正文数据、表格、摘要、讨论和结论同步更新。
+重要事实段落和数据表应就近建立来源关联；同段相关事实可合并引用，不要求逐句标注。内部实体表、来源列表和图片图源不算正文引文，不能用它们掩盖整篇正文无引用。对 missing_body_citations 或 uncited_fact_paragraphs，须按原文补充正文引文；无法支持时缩窄或删除相应事实，不能只增补来源列表。
 尽量不要引入资料没有直接给出的推算数值；可用文字解释关系。稿中“内部核验”的实体清单也必须同步修订。
 不存在来源支持的具体断言移到“## 待核验事项（内部核验）”，正文用自然学术语言讨论资料边界，不留（待核验）标记。
 正文可以说明资料范围和研究局限，但不能使用局限说明推翻前文结论；如果必须这么写，说明前文断言本身不应保留。
@@ -557,6 +574,7 @@ async def finalize_report(report, *, task, report_type, sources, catalog, images
 <report_to_edit>\n{prompt_report}\n</report_to_edit>
 '''
         try:
+            prompt += '\n正文引用保留来源编号与完整文件名或URL；不要求每句话都带引用。无引用实体由独立核验在本轮原文库中检索证据。'
             if turn > 0:
                 prompt += '''只输出JSON对象：{"replacements":[{"old":"需修改段落在输入稿中的完整原文","new":"修正后的完整段落"}]}。
 只替换确有问题的段落、表格或摘要，old必须逐字复制且在输入稿唯一出现，各处替换不得重叠。无需修改的段落不要输出。保留图片路径和图源，不调整章节标题。没有修改时返回空数组。
@@ -581,7 +599,7 @@ async def finalize_report(report, *, task, report_type, sources, catalog, images
             candidate, _ = insert_missing_figures(candidate, images, task, sources)
             candidate = normalize_figure_sources(candidate, images)
             contract = check_contract(candidate,task,sources,catalog['sources'],images,report_type)
-            all_blocks = claim_blocks(candidate)
+            all_blocks = claim_blocks(candidate, sources, catalog['sources'])
             if turn == 0 and not previous_audit:
                 blocks, review_mode = all_blocks, 'full_initial'
             else:
@@ -598,6 +616,7 @@ async def finalize_report(report, *, task, report_type, sources, catalog, images
 qualified仅用于正文已经明确限定的合理推断，仍须给出其真实依据。引用不对应、事实或时点不符判unsupported。
 另外检查摘要独立完整、方法如实、正文逻辑和图文对应、结论有据；这些问题放issues。
 如果正文出现“证据来源不清楚、证据不足、无法证实、缺少事实依据”等兜底表述，且它是在否定前文已经写成确定结论的内容，必须在issues中要求删除或改写该断言，而不是允许以免责声明保留。
+如果正文出现“所查资料未提供/未显示/未说明”“所引资料未提供/未显示/未说明”“原文未明确，需核验”等高频资料边界句，必须判断其是否应收窄、集中到综合讨论，或移入内部核验事项。
 如果正文存在密集AI式套话、模板化三段式、装饰性加粗或空泛拔高，也在issues中提出具体修订要求。
 图片候选只提供提取记录与原文图题，未提供图片像素。不要据增长预测型原文图题猜测图片是趋势曲线，也不要要求把中性场景图题改成量化结论。中性原文配图可用于背景展示，不能证明量化趋势。
 输出JSON对象：{{"checks":[{{"id":"B1","verdict":"supported|qualified|unsupported|insufficient","reason":"简短依据或具体改法","evidence":[{{"passage_id":"从下方原文片段原样复制ID"}}]}}],"issues":[{{"section":"标题","reason":"具体问题与修订要求"}}]}}。
