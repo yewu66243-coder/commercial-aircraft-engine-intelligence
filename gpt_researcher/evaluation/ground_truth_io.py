@@ -1,0 +1,535 @@
+"""Validation and storage for entity-evaluation ground-truth uploads."""
+
+from __future__ import annotations
+
+import hashlib
+import json
+import math
+import os
+import posixpath
+import re
+import tempfile
+import zipfile
+from collections import Counter
+from decimal import Decimal, InvalidOperation
+from pathlib import Path
+from typing import Any
+from xml.etree import ElementTree
+
+from openpyxl import load_workbook
+
+
+MAX_UPLOAD_BYTES = 5 * 1024 * 1024
+ALLOWED_SUFFIXES = {".json", ".xlsx"}
+MAX_XLSX_MEMBER_BYTES = 8 * 1024 * 1024
+MAX_XLSX_UNCOMPRESSED_BYTES = 20 * 1024 * 1024
+MAX_XLSX_CELLS = 100_000
+_WORKSHEET_RELATIONSHIP_TYPE = (
+    "http://schemas.openxmlformats.org/officeDocument/2006/relationships/worksheet"
+)
+
+_CATEGORY_ALIASES = {
+    "organization": {"机构", "企业", "公司", "制造商", "监管机构", "研究机构", "organization"},
+    "model": {"型号", "产品", "发动机型号", "部件型号", "平台", "model"},
+    "material": {"材料", "合金", "涂层", "复合材料", "工艺材料", "material"},
+    "parameter": {"参数", "性能参数", "技术指标", "数值", "规格", "parameter"},
+    "time": {"时间", "日期", "年份", "阶段", "里程碑", "time"},
+}
+_REQUIRED_XLSX_COLUMNS = ("类别", "名称")
+_OPTIONAL_XLSX_COLUMNS = ("别名", "数值", "单位", "容差")
+_PARAMETER_VALUE_RE = re.compile(
+    r"^\s*(?P<number>[-+]?(?:\d+(?:,\d{3})*(?:\.\d*)?|\.\d+)(?:[eE][-+]?\d+)?)"
+    r"\s*(?P<unit>°?[A-Za-z]+|[%％])?\s*$"
+)
+
+
+class GroundTruthValidationError(ValueError):
+    """A safe, stable validation error suitable for API responses."""
+
+    def __init__(self, code: str, message: str):
+        self.code = code
+        self.message = message
+        super().__init__(message)
+
+
+def _error(code: str, message: str) -> None:
+    raise GroundTruthValidationError(code, message)
+
+
+def _normalize_category(value: Any) -> str:
+    normalized = str(value or "").strip().lower()
+    for category, aliases in _CATEGORY_ALIASES.items():
+        if normalized in {alias.lower() for alias in aliases}:
+            return category
+    return "other"
+
+
+def _normalized_key(value: Any) -> str:
+    return re.sub(r"[\s\-_./:：,，;；()（）\[\]【】'\"“”‘’]+", "", str(value or "").lower())
+
+
+def _clean_aliases(value: Any, location: str = "") -> list[str]:
+    if not isinstance(value, list) or not all(isinstance(alias, str) for alias in value):
+        _error("invalid_aliases", f"标准答案实体别名必须是字符串列表。{location}")
+    aliases: list[str] = []
+    seen: set[str] = set()
+    for alias in value:
+        _validate_utf8_text(alias, location)
+        cleaned = _normalized_key(alias)
+        if cleaned and cleaned not in seen:
+            seen.add(cleaned)
+            aliases.append(cleaned)
+    return aliases
+
+
+def _validate_utf8_text(value: str, location: str = "") -> None:
+    try:
+        value.encode("utf-8", "strict")
+    except UnicodeError:
+        _error("invalid_text", f"标准答案包含无法编码为 UTF-8 的文本。{location}")
+
+
+def _normalized_unit(value: Any) -> str:
+    return re.sub(r"\s+", "", str(value or "").replace("％", "%").replace("℃", "°C").replace("℉", "°F")).lower()
+
+
+def _parse_parameter_number(value: Any, unit: Any = None) -> tuple[Decimal, str]:
+    if isinstance(value, bool):
+        raise ValueError
+    if isinstance(value, (int, float)):
+        try:
+            number = Decimal(str(value))
+        except InvalidOperation as error:
+            raise ValueError from error
+        embedded_unit = ""
+    elif isinstance(value, str):
+        match = _PARAMETER_VALUE_RE.fullmatch(value)
+        if not match:
+            raise ValueError
+        try:
+            number = Decimal(match.group("number").replace(",", ""))
+        except InvalidOperation as error:
+            raise ValueError from error
+        embedded_unit = match.group("unit") or ""
+    else:
+        raise ValueError
+    if not number.is_finite():
+        raise ValueError
+    try:
+        matcher_value = float(number)
+    except (OverflowError, ValueError):
+        raise ValueError
+    if not math.isfinite(matcher_value):
+        raise ValueError
+    if unit is not None and not isinstance(unit, str):
+        raise ValueError
+    explicit_unit = _normalized_unit(unit) if unit and unit.strip() else ""
+    normalized_embedded_unit = _normalized_unit(embedded_unit)
+    if explicit_unit and normalized_embedded_unit and explicit_unit != normalized_embedded_unit:
+        raise ValueError
+    return number, explicit_unit or normalized_embedded_unit
+
+
+def _normalized_parameter_value(value: Any, unit: Any = None) -> tuple[str, str]:
+    if value is None:
+        return "<missing>", _normalized_unit(unit)
+    try:
+        number, normalized_unit = _parse_parameter_number(value, unit)
+        normalized_number = "0" if number == 0 else str(number.normalize())
+    except (InvalidOperation, OverflowError, ValueError) as error:
+        raise ValueError from error
+    return normalized_number, normalized_unit
+
+
+def _validate_parameter_fields(
+    entity: dict[str, Any], normalized: dict[str, Any], location: str = ""
+) -> None:
+    if "value" in entity and entity["value"] is not None:
+        value = entity["value"]
+        if isinstance(value, bool) or not isinstance(value, (int, float, str)):
+            _error("invalid_parameter", f"标准答案参数值必须是数值或数值字符串。{location}")
+        if isinstance(value, str):
+            _validate_utf8_text(value, location)
+        try:
+            _parse_parameter_number(value, entity.get("unit"))
+        except ValueError:
+            _error("invalid_parameter", f"标准答案参数值必须是有限单一数值。{location}")
+        normalized["value"] = value.strip() if isinstance(value, str) else value
+    if "unit" in entity and entity["unit"] is not None:
+        unit = entity["unit"]
+        if not isinstance(unit, str):
+            _error("invalid_parameter", f"标准答案参数的单位必须是字符串。{location}")
+        _validate_utf8_text(unit, location)
+        normalized["unit"] = unit.strip()
+
+    tolerance = entity.get("tolerance", 0.01)
+    try:
+        tolerance_value = float(tolerance)
+    except (OverflowError, TypeError, ValueError):
+        _error("invalid_parameter", f"标准答案参数的容差必须是非负有限数值。{location}")
+    if (
+        isinstance(tolerance, bool)
+        or not isinstance(tolerance, (int, float))
+        or not math.isfinite(tolerance_value)
+        or tolerance_value < 0
+    ):
+        _error("invalid_parameter", f"标准答案参数的容差必须是非负有限数值。{location}")
+    normalized["tolerance"] = tolerance_value
+
+
+def canonicalize_ground_truth_payload(payload: Any, expected_task: str) -> dict[str, Any]:
+    """Validate a decoded payload and return the sole canonical representation."""
+    if not isinstance(payload, dict):
+        _error("invalid_schema", "标准答案顶层结构必须是对象。")
+
+    if not isinstance(expected_task, str):
+        _error("invalid_text", "标准答案任务文本无效。")
+    _validate_utf8_text(expected_task)
+    if "task" not in payload:
+        task = expected_task
+    elif not isinstance(payload["task"], str) or payload["task"] != expected_task:
+        _error("task_mismatch", "标准答案声明的任务与当前任务不一致。")
+    else:
+        task = payload["task"]
+    _validate_utf8_text(task)
+
+    entities = payload.get("entities")
+    if not isinstance(entities, list):
+        _error("invalid_schema", "标准答案实体列表结构无效。")
+    if not entities:
+        _error("empty_entities", "标准答案实体列表不能为空。")
+
+    normalized_entities: list[dict[str, Any]] = []
+    duplicate_keys: set[tuple[str, str, str, str]] = set()
+    for entity in entities:
+        if not isinstance(entity, dict):
+            _error("invalid_entity", "标准答案包含无效实体。")
+        row_context = entity.get("_row_context")
+        location = f"（{row_context}）" if isinstance(row_context, str) and row_context else ""
+        raw_type = entity.get("type")
+        if raw_type is None or (isinstance(raw_type, str) and not raw_type.strip()):
+            raw_type = entity.get("category")
+        name = entity.get("name")
+        if not isinstance(raw_type, str) or not raw_type.strip() or not isinstance(name, str) or not name.strip():
+            _error("invalid_entity", f"标准答案实体缺少有效类别或名称。{location}")
+        _validate_utf8_text(raw_type, location)
+        _validate_utf8_text(name, location)
+
+        normalized = {
+            "type": _normalize_category(raw_type),
+            "name": name.strip(),
+            "aliases": _clean_aliases(entity["aliases"] if "aliases" in entity else [], location),
+        }
+        if normalized["type"] == "parameter":
+            _validate_parameter_fields(entity, normalized, location)
+
+        try:
+            value_key, unit_key = _normalized_parameter_value(
+                normalized.get("value"), normalized.get("unit")
+            )
+        except ValueError:
+            _error("invalid_parameter", f"标准答案参数值必须是有限单一数值。{location}")
+        duplicate_key = (
+            normalized["type"],
+            _normalized_key(normalized["name"]),
+            value_key,
+            unit_key,
+        )
+        if duplicate_key in duplicate_keys:
+            _error("duplicate_entity", f"标准答案包含重复实体。{location}")
+        duplicate_keys.add(duplicate_key)
+        normalized_entities.append(normalized)
+
+    return {"task": task, "entities": normalized_entities}
+
+
+def _validate_upload_path(path: Path) -> None:
+    suffix = path.suffix.lower()
+    if suffix not in ALLOWED_SUFFIXES:
+        _error("unsupported_file_type", "仅支持 JSON 或 XLSX 标准答案文件。")
+    try:
+        size = path.stat().st_size
+    except OSError:
+        _error("unreadable_file", "标准答案文件无法读取。")
+    if size == 0:
+        _error("empty_file", "标准答案文件不能为空。")
+    if size > MAX_UPLOAD_BYTES:
+        _error("file_too_large", "标准答案文件不能超过 5 MiB。")
+
+
+def validate_ground_truth_upload_path(path: str | Path) -> Path:
+    upload_path = Path(path)
+    _validate_upload_path(upload_path)
+    return upload_path
+
+
+def read_ground_truth_json(path: str | Path) -> Any:
+    """Read JSON with a single safe error boundary shared by legacy callers."""
+    try:
+        with Path(path).open("r", encoding="utf-8") as handle:
+            return json.load(handle)
+    except (OSError, UnicodeError, json.JSONDecodeError, ValueError, RecursionError):
+        _error("invalid_json", "标准答案文件不是有效 JSON。")
+
+
+def _column_number(column: str) -> int:
+    value = 0
+    for letter in column:
+        value = value * 26 + ord(letter) - ord("A") + 1
+    return value
+
+
+def _dimension_cell_count(reference: str) -> int:
+    end = reference.split(":")[-1].upper()
+    match = re.fullmatch(r"([A-Z]+)([1-9]\d*)", end)
+    if not match:
+        return 0
+    return _column_number(match.group(1)) * int(match.group(2))
+
+
+def _relationship_target_part(target: str) -> str:
+    """Resolve an internal workbook relationship target to a safe ZIP part name."""
+    if not target or "\\" in target or ".." in target.split("/"):
+        _error("invalid_excel", "标准答案 XLSX 工作表路径无效。")
+    if target.startswith("/"):
+        part_name = target[1:]
+    else:
+        part_name = posixpath.join("xl", target)
+    part_name = posixpath.normpath(part_name)
+    if part_name.startswith("../") or part_name == ".." or not part_name.startswith("xl/"):
+        _error("invalid_excel", "标准答案 XLSX 工作表路径无效。")
+    return part_name
+
+
+def _worksheet_parts(archive: zipfile.ZipFile, members: list[zipfile.ZipInfo]) -> list[str]:
+    """Return worksheet XML parts referred to by workbook.xml relationships."""
+    member_names = {member.filename for member in members}
+    if "xl/workbook.xml" not in member_names or "xl/_rels/workbook.xml.rels" not in member_names:
+        _error("invalid_excel", "标准答案 XLSX 工作簿结构无效。")
+    try:
+        with archive.open("xl/workbook.xml") as source:
+            workbook_root = ElementTree.parse(source).getroot()
+        with archive.open("xl/_rels/workbook.xml.rels") as source:
+            relationships_root = ElementTree.parse(source).getroot()
+    except (OSError, KeyError, ElementTree.ParseError):
+        _error("invalid_excel", "标准答案 XLSX 工作簿结构无效。")
+
+    relationship_ids = {
+        next((value for key, value in sheet.attrib.items() if key.rsplit("}", 1)[-1] == "id"), "")
+        for sheet in workbook_root.iter()
+        if sheet.tag.rsplit("}", 1)[-1] == "sheet"
+    }
+    if not relationship_ids or "" in relationship_ids:
+        _error("invalid_excel", "标准答案 XLSX 工作簿结构无效。")
+
+    worksheet_targets: dict[str, str] = {}
+    for relationship in relationships_root.iter():
+        if relationship.tag.rsplit("}", 1)[-1] != "Relationship":
+            continue
+        if relationship.attrib.get("Type") != _WORKSHEET_RELATIONSHIP_TYPE:
+            continue
+        if relationship.attrib.get("TargetMode", "Internal") != "Internal":
+            _error("invalid_excel", "标准答案 XLSX 工作表路径无效。")
+        relationship_id = relationship.attrib.get("Id")
+        target = relationship.attrib.get("Target")
+        if relationship_id and target:
+            worksheet_targets[relationship_id] = _relationship_target_part(target)
+
+    parts: list[str] = []
+    for relationship_id in relationship_ids:
+        part_name = worksheet_targets.get(relationship_id)
+        if not part_name or part_name not in member_names:
+            _error("invalid_excel", "标准答案 XLSX 工作簿结构无效。")
+        parts.append(part_name)
+    return parts
+
+
+def _preflight_xlsx(path: Path) -> None:
+    try:
+        with zipfile.ZipFile(path) as archive:
+            members = archive.infolist()
+            total_uncompressed = sum(member.file_size for member in members)
+            if total_uncompressed > MAX_XLSX_UNCOMPRESSED_BYTES or any(
+                member.file_size > MAX_XLSX_MEMBER_BYTES for member in members
+            ):
+                _error("xlsx_too_large", "标准答案 XLSX 解压内容超过安全限制。")
+            actual_cells = 0
+            for part_name in _worksheet_parts(archive, members):
+                with archive.open(part_name) as source:
+                    for event, element in ElementTree.iterparse(source, events=("start", "end")):
+                        tag = element.tag.rsplit("}", 1)[-1]
+                        if event == "start" and tag == "dimension":
+                            reference = element.attrib.get("ref", "")
+                            if _dimension_cell_count(reference) > MAX_XLSX_CELLS:
+                                _error("xlsx_too_large", "标准答案 XLSX 声明的工作表范围超过安全限制。")
+                        elif event == "start" and tag == "c":
+                            actual_cells += 1
+                            if actual_cells > MAX_XLSX_CELLS:
+                                _error("xlsx_too_large", "标准答案 XLSX 实际单元格数量超过安全限制。")
+                        elif event == "end":
+                            element.clear()
+    except GroundTruthValidationError:
+        raise
+    except (OSError, zipfile.BadZipFile, ValueError, ElementTree.ParseError):
+        _error("invalid_excel", "标准答案 XLSX 文件无法读取。")
+
+
+def _split_aliases(value: Any) -> list[str]:
+    if value is None:
+        return []
+    return [part.strip() for part in re.split(r"[;；]", str(value)) if part.strip()]
+
+
+def _xlsx_payload(path: Path) -> dict[str, Any]:
+    workbook = None
+    formula_workbook = None
+    rows = None
+    formula_rows = None
+    parse_error: GroundTruthValidationError | None = None
+    try:
+        _preflight_xlsx(path)
+        workbook = load_workbook(path, read_only=True, data_only=True, keep_links=False)
+        formula_workbook = load_workbook(path, read_only=True, data_only=False, keep_links=False)
+        visible_sheets = [sheet for sheet in workbook.worksheets if sheet.sheet_state == "visible"]
+        if not visible_sheets:
+            _error("invalid_excel", "标准答案 XLSX 文件没有可见工作表。")
+        worksheet = visible_sheets[0]
+        if worksheet.max_row * worksheet.max_column > MAX_XLSX_CELLS:
+            _error("xlsx_too_large", "标准答案 XLSX 声明的工作表范围超过安全限制。")
+        formula_worksheet = next(
+            sheet for sheet in formula_workbook.worksheets if sheet.title == worksheet.title
+        )
+        rows = worksheet.iter_rows(values_only=False)
+        formula_rows = formula_worksheet.iter_rows(values_only=False)
+        try:
+            header_cells = next(rows)
+            formula_header_cells = next(formula_rows)
+        except StopIteration:
+            _error("missing_columns", f"工作表{worksheet.title}缺少必需列。")
+        for data_cell, formula_cell in zip(header_cells, formula_header_cells):
+            if formula_cell.data_type == "f" and data_cell.value is None:
+                _error(
+                    "formula_without_cached_value",
+                    f"工作表{worksheet.title}，第 1 行的公式没有缓存值。",
+                )
+
+        headers = {
+            str(cell.value).strip(): index
+            for index, cell in enumerate(header_cells)
+            if cell.value is not None and str(cell.value).strip()
+        }
+        missing_columns = [column for column in _REQUIRED_XLSX_COLUMNS if column not in headers]
+        if missing_columns:
+            _error("missing_columns", f"工作表{worksheet.title}缺少必需列：{'、'.join(missing_columns)}。")
+
+        entities: list[dict[str, Any]] = []
+        known_columns = (*_REQUIRED_XLSX_COLUMNS, *_OPTIONAL_XLSX_COLUMNS)
+        for row_number, (row_cells, formula_row_cells) in enumerate(zip(rows, formula_rows), start=2):
+            for data_cell, formula_cell in zip(row_cells, formula_row_cells):
+                if formula_cell.data_type == "f" and data_cell.value is None:
+                    _error(
+                        "formula_without_cached_value",
+                        f"工作表{worksheet.title}，第 {row_number} 行的公式没有缓存值。",
+                    )
+            if all(cell.value is None for cell in row_cells):
+                continue
+            values = {
+                column: row_cells[index].value if index < len(row_cells) else None
+                for column, index in headers.items()
+                if column in known_columns
+            }
+            entity: dict[str, Any] = {
+                "type": values.get("类别"),
+                "name": values.get("名称"),
+                "aliases": _split_aliases(values.get("别名")),
+                "_row_context": f"工作表{worksheet.title}，第 {row_number} 行",
+            }
+            for source, target in (("数值", "value"), ("单位", "unit"), ("容差", "tolerance")):
+                if values.get(source) is not None:
+                    entity[target] = values[source]
+            entities.append(entity)
+        return {"entities": entities}
+    except GroundTruthValidationError:
+        raise
+    except Exception:
+        parse_error = GroundTruthValidationError("invalid_excel", "标准答案 XLSX 文件无法读取。")
+    finally:
+        if rows is not None:
+            rows.close()
+        if formula_rows is not None:
+            formula_rows.close()
+        if workbook is not None:
+            workbook.close()
+        if formula_workbook is not None:
+            formula_workbook.close()
+    if parse_error is not None:
+        raise parse_error
+
+
+def load_ground_truth_upload(path: str | Path, expected_task: str) -> dict[str, Any]:
+    """Load a JSON or XLSX upload and return its validated canonical form."""
+    upload_path = validate_ground_truth_upload_path(path)
+    if upload_path.suffix.lower() == ".json":
+        payload = read_ground_truth_json(upload_path)
+    else:
+        payload = _xlsx_payload(upload_path)
+    return canonicalize_ground_truth_payload(payload, expected_task)
+
+
+def ground_truth_path_for_task(task: str, destination_dir: str | Path) -> Path:
+    if not isinstance(task, str):
+        _error("invalid_text", "标准答案任务文本无效。")
+    _validate_utf8_text(task)
+    digest = hashlib.sha256(task.encode("utf-8")).hexdigest()[:20]
+    return Path(destination_dir) / f"{digest}.json"
+
+
+def persist_ground_truth_upload(
+    content: bytes, original_name: str, task: str, destination_dir: str | Path
+) -> dict[str, Any]:
+    """Validate bytes and atomically store canonical JSON without trusting its filename."""
+    if not isinstance(content, bytes):
+        _error("invalid_upload", "标准答案上传内容无效。")
+    suffix = Path(original_name or "").suffix.lower()
+    if suffix not in ALLOWED_SUFFIXES:
+        _error("unsupported_file_type", "仅支持 JSON 或 XLSX 标准答案文件。")
+    if not content:
+        _error("empty_file", "标准答案文件不能为空。")
+    if len(content) > MAX_UPLOAD_BYTES:
+        _error("file_too_large", "标准答案文件不能超过 5 MiB。")
+
+    directory = Path(destination_dir)
+    directory.mkdir(parents=True, exist_ok=True)
+    temporary_paths: set[Path] = set()
+    canonical_path = ground_truth_path_for_task(task, directory)
+    try:
+        with tempfile.NamedTemporaryFile(
+            mode="wb", suffix=suffix, prefix=".ground-truth-", dir=directory, delete=False
+        ) as temporary:
+            upload_path = Path(temporary.name)
+            temporary_paths.add(upload_path)
+            temporary.write(content)
+        canonical = load_ground_truth_upload(upload_path, task)
+
+        with tempfile.NamedTemporaryFile(
+            mode="w", encoding="utf-8", suffix=".tmp", prefix=".ground-truth-", dir=directory, delete=False
+        ) as temporary:
+            canonical_temporary_path = Path(temporary.name)
+            temporary_paths.add(canonical_temporary_path)
+            json.dump(canonical, temporary, ensure_ascii=False, separators=(",", ":"))
+        os.replace(canonical_temporary_path, canonical_path)
+        temporary_paths.remove(canonical_temporary_path)
+    finally:
+        for temporary_path in temporary_paths:
+            try:
+                temporary_path.unlink(missing_ok=True)
+            except OSError:
+                pass
+
+    category_counts = dict(Counter(entity["type"] for entity in canonical["entities"]))
+    return {
+        "stored_name": canonical_path.name,
+        "sha256": hashlib.sha256(content).hexdigest(),
+        "entity_count": len(canonical["entities"]),
+        "category_counts": category_counts,
+    }

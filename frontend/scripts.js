@@ -26,6 +26,12 @@ const GPTResearcher = (() => {
   let apiResponsesReceived = 0;
   let taskStartTime = null;
   let lastTaskDurationSeconds = null;
+  let currentEvaluationRunId = ''; // 当前报告记录，用于重新测评
+  let currentEvaluationTask = ''; // 当前任务名，用于标准答案上传
+  let currentGroundTruth = null; // { name, entityCount }
+  let lastEvaluationSummary = null; // 最近一次渲染的稳定摘要
+  let evaluationRequestSeq = 0; // 任务切换序号，用于丢弃过期的上传/重测回调
+  let evaluationBusy = false; // 上传或重新测评进行中，禁止再次发起
   let currentTaskId = null;
   let taskProgress = null;
   let taskProgressPollInterval = null;
@@ -360,6 +366,9 @@ const GPTResearcher = (() => {
 
     // Initialize local document library panel
     initLocalLibraryPanel();
+
+    // Initialize evaluation upload and rerun controls
+    initEvaluationControls();
 
     // Initialize demand model, task template and source template panels
     initIntelligenceTemplates();
@@ -1070,6 +1079,9 @@ const GPTResearcher = (() => {
     // Clear current research/report areas
     document.getElementById('output').innerHTML = '';
     document.getElementById('reportContainer').innerHTML = '';
+    // 旧历史一般没有稳定摘要：清空测评运行编号、标准答案状态和下载链接
+    lastEvaluationSummary = null;
+    resetEvaluationControls();
     document.getElementById('selectedImagesContainer').innerHTML = '';
     document.getElementById('selectedImagesContainer').style.display = 'none';
 
@@ -2385,6 +2397,8 @@ const startResearch = async () => {
       return;
     }
     // 1. 清理上一轮的输出痕迹
+    resetEvaluationControls();
+    lastEvaluationSummary = null;
     document.getElementById('output').innerHTML = '';
     document.getElementById('reportContainer').innerHTML = '';
     renderWebSourceTracking(null);
@@ -2541,6 +2555,13 @@ const startResearch = async () => {
         writeReport({ output: data.report }, converter, true, false);
         renderSelectedSources(data.selected_sources || []);
         renderWebSourceTracking(data.run_statistics?.web_source_tracking);
+        // 记录本次运行编号与任务名，供上传标准答案和重新测评复用
+        const runStatistics = data.run_statistics || {};
+        currentEvaluationRunId = typeof runStatistics.run_id === 'string' ? runStatistics.run_id : '';
+        const statisticsTask = typeof runStatistics.task === 'string' ? runStatistics.task.trim() : '';
+        currentEvaluationTask = statisticsTask || document.getElementById('task')?.value?.trim() || '';
+        lastEvaluationSummary = runStatistics.evaluation_summary || null;
+        renderEvaluation(lastEvaluationSummary);
 
         // 7. 更新UI状态，结束动画
         lastTaskDurationSeconds = Math.max(0, Math.floor((Date.now() - taskStartTime) / 1000));
@@ -4293,6 +4314,157 @@ const startResearch = async () => {
       console.error('Error collecting MCP data:', error);
       showToast('Error processing MCP configuration');
       return null;
+    }
+  };
+
+  // ====================================================================
+  // ==================== 自动测评面板：上传 / 重新测评 ====================
+  // ====================================================================
+  const setEvaluationActionStatus = (message) => {
+    const status = document.getElementById('evaluationActionStatus');
+    if (status) status.textContent = message || '';
+  };
+
+  const setEvaluationBusy = (busy) => {
+    evaluationBusy = Boolean(busy);
+    const upload = document.getElementById('evaluationUploadButton');
+    const rerun = document.getElementById('evaluationRerunButton');
+    if (upload) {
+      upload.disabled = evaluationBusy;
+      if (evaluationBusy) upload.setAttribute('aria-busy', 'true');
+      else upload.removeAttribute('aria-busy');
+    }
+    if (rerun) {
+      rerun.disabled = evaluationBusy || !currentEvaluationRunId;
+      if (evaluationBusy) rerun.setAttribute('aria-busy', 'true');
+      else rerun.removeAttribute('aria-busy');
+    }
+  };
+
+  const resetEvaluationControls = () => {
+    // 递增序号：让仍在飞行的上传/重测回调失效，避免把旧任务的状态写回新面板
+    evaluationRequestSeq += 1;
+    evaluationBusy = false;
+    currentEvaluationRunId = '';
+    currentEvaluationTask = '';
+    currentGroundTruth = null;
+    setEvaluationBusy(false);
+    window.EvaluationPanel?.reset();
+    setEvaluationActionStatus('');
+  };
+
+  const renderEvaluation = (summary, actionStatus) => {
+    window.EvaluationPanel?.render(summary, undefined, {
+      canRerun: Boolean(currentEvaluationRunId) && !evaluationBusy,
+      groundTruth: currentGroundTruth,
+      actionStatus: actionStatus || '',
+    });
+  };
+
+  const evaluationErrorMessage = async (response, fallback) => {
+    if (response.status === 413) return '标准答案文件不能超过 5 MiB。';
+    try {
+      const payload = await response.json();
+      const detail = payload?.detail;
+      if (typeof detail === 'string') return detail;
+      // 只展示服务端安全文案，不回显内部错误码
+      if (detail && typeof detail.message === 'string') return detail.message;
+    } catch (error) {
+      /* fall through to the generic message */
+    }
+    return fallback;
+  };
+
+  const uploadEvaluationGroundTruth = async (file) => {
+    const task = currentEvaluationTask || document.getElementById('task')?.value?.trim() || '';
+    if (!task) {
+      setEvaluationActionStatus('请先填写任务名称，再上传标准答案。');
+      return;
+    }
+    const requestSeq = evaluationRequestSeq;
+    setEvaluationBusy(true);
+    setEvaluationActionStatus('正在校验标准答案…');
+    try {
+      const formData = new FormData();
+      formData.append('task', task);
+      formData.append('file', file, file.name);
+      const response = await fetch('/api/evaluation-ground-truth', { method: 'POST', body: formData });
+      if (requestSeq !== evaluationRequestSeq) return; // 任务已切换，丢弃过期结果
+      if (!response.ok) {
+        setEvaluationActionStatus(`上传失败：${await evaluationErrorMessage(response, '标准答案校验未通过。')}`);
+        return;
+      }
+      const payload = await response.json();
+      currentGroundTruth = {
+        name: payload.stored_name || file.name || '标准答案',
+        entityCount: payload.entity_count ?? 0,
+      };
+      const message = currentEvaluationRunId
+        ? `已保存标准答案 ${currentGroundTruth.name}（${currentGroundTruth.entityCount} 个实体）；点击“重新测评”后生效。`
+        : `已保存标准答案 ${currentGroundTruth.name}（${currentGroundTruth.entityCount} 个实体）；将在下次生成报告时生效。`;
+      // 面板有摘要时通过渲染刷新状态文本，否则只更新操作提示
+      if (lastEvaluationSummary) renderEvaluation(lastEvaluationSummary, message);
+      else setEvaluationActionStatus(message);
+    } catch (error) {
+      if (requestSeq !== evaluationRequestSeq) return;
+      setEvaluationActionStatus('上传失败：无法连接后台服务。');
+    } finally {
+      setEvaluationBusy(false);
+    }
+  };
+
+  const rerunEvaluation = async () => {
+    if (!currentEvaluationRunId) {
+      setEvaluationActionStatus('当前没有可重新测评的报告记录。');
+      return;
+    }
+    if (evaluationBusy) return; // 已有重测在飞行，避免并发写同一条记录
+    const requestSeq = evaluationRequestSeq;
+    setEvaluationBusy(true);
+    setEvaluationActionStatus('正在重新测评已保存的最终正文…');
+    try {
+      const response = await fetch(`/api/report-evaluation/${encodeURIComponent(currentEvaluationRunId)}`, {
+        method: 'POST',
+      });
+      if (requestSeq !== evaluationRequestSeq) return;
+      if (!response.ok) {
+        setEvaluationActionStatus(`重新测评失败：${await evaluationErrorMessage(response, '请稍后重试。')}`);
+        return;
+      }
+      const payload = await response.json();
+      const summary = payload.evaluation_summary || null;
+      if (!summary) {
+        // 保留上一次可用摘要，避免面板连同操作区一起消失
+        setEvaluationActionStatus('重新测评未返回可用摘要，请稍后重试。');
+        return;
+      }
+      lastEvaluationSummary = summary;
+      renderEvaluation(lastEvaluationSummary, '已按当前标准答案完成重新测评，历史记录已保留。');
+    } catch (error) {
+      if (requestSeq !== evaluationRequestSeq) return;
+      setEvaluationActionStatus('重新测评失败：无法连接后台服务。');
+    } finally {
+      setEvaluationBusy(false);
+    }
+  };
+
+  const initEvaluationControls = () => {
+    const input = document.getElementById('evaluationGroundTruthInput');
+    const uploadButton = document.getElementById('evaluationUploadButton');
+    const rerunButton = document.getElementById('evaluationRerunButton');
+
+    if (uploadButton && input && input.dataset.evaluationBound !== '1') {
+      input.dataset.evaluationBound = '1';
+      uploadButton.addEventListener('click', () => input.click());
+      input.addEventListener('change', () => {
+        const file = input.files && input.files[0];
+        if (file) void uploadEvaluationGroundTruth(file);
+        input.value = ''; // 允许重复选择同一个文件
+      });
+    }
+    if (rerunButton && rerunButton.dataset.evaluationBound !== '1') {
+      rerunButton.dataset.evaluationBound = '1';
+      rerunButton.addEventListener('click', () => { void rerunEvaluation(); });
     }
   };
 

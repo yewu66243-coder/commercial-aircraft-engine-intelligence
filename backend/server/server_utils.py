@@ -9,12 +9,13 @@ from typing import Awaitable, Dict, List, Any
 from fastapi.responses import JSONResponse, FileResponse
 from gpt_researcher.document.document import DocumentLoader
 from gpt_researcher import GPTResearcher
-from utils import write_md_to_pdf, write_md_to_word, write_text_to_md
+from backend.utils import write_md_to_pdf, write_md_to_word, write_text_to_md
 from pathlib import Path
 from datetime import datetime
 from fastapi import HTTPException
 import logging
 import hashlib
+import unicodedata
 
 from .multi_agent_runner import run_multi_agent_task
 
@@ -292,21 +293,154 @@ def update_environment_variables(config: Dict[str, str]):
         os.environ[key] = value
 
 
+_WINDOWS_RESERVED_NAMES = {
+    "CON", "PRN", "AUX", "NUL",
+    *(f"COM{index}" for index in range(1, 10)),
+    *(f"LPT{index}" for index in range(1, 10)),
+}
+
+
+def secure_filename(filename: str) -> str:
+    """Return a portable basename or reject explicit traversal/reserved names."""
+    if not isinstance(filename, str):
+        raise ValueError("filename is empty")
+    normalized = unicodedata.normalize("NFKC", filename)
+    if re.search(r"(^|[\\/])\.\.([\\/]|$)", normalized):
+        raise ValueError("path traversal is not allowed")
+    normalized = re.sub(r"^[A-Za-z]:", "", normalized)
+    normalized = "".join(
+        character
+        for character in normalized
+        if unicodedata.category(character) not in {"Cc", "Cf"}
+    )
+    cleaned = re.sub(r"[\\/:*?\"<>|]", "", normalized)
+    cleaned = re.sub(r"^[.\s]+", "", cleaned).rstrip(". ")
+    if not cleaned:
+        raise ValueError("filename is empty")
+    if len(cleaned.encode("utf-8")) > 255:
+        raise ValueError("filename is too long")
+    stem = cleaned.split(".", 1)[0].upper()
+    if stem in _WINDOWS_RESERVED_NAMES:
+        raise ValueError("filename uses a reserved name")
+    return cleaned
+
+
+def validate_file_path(file_path: str, base_directory: str) -> str:
+    """Resolve a path and ensure it remains within the configured document root."""
+    base = os.path.realpath(os.path.abspath(base_directory))
+    candidate = os.path.realpath(os.path.abspath(file_path))
+    try:
+        if os.path.commonpath([base, candidate]) != base:
+            raise ValueError("file path is outside allowed directory")
+    except ValueError as exc:
+        if "outside allowed directory" in str(exc):
+            raise
+        raise ValueError("file path is outside allowed directory") from exc
+    return candidate
+
+
+def _truncate_utf8(value: str, max_bytes: int) -> str:
+    if max_bytes <= 0:
+        return ""
+    result = []
+    used = 0
+    for character in value:
+        size = len(character.encode("utf-8"))
+        if used + size > max_bytes:
+            break
+        result.append(character)
+        used += size
+    return "".join(result)
+
+
+def _conflict_filename(filename: str, index: int) -> str:
+    stem, suffix = os.path.splitext(filename)
+    marker = f"_{index}"
+    marker_bytes = len(marker.encode("utf-8"))
+    suffix_bytes = len(suffix.encode("utf-8"))
+    stem_budget = 255 - marker_bytes - suffix_bytes
+    if stem_budget < 1:
+        suffix = _truncate_utf8(suffix, 255 - marker_bytes - 1)
+        stem_budget = 255 - marker_bytes - len(suffix.encode("utf-8"))
+    shortened_stem = _truncate_utf8(stem, stem_budget) or "f"
+    return f"{shortened_stem}{marker}{suffix}"
+
+
+def _exact_deletion_name(filename: str) -> str:
+    """Validate an existing basename without rewriting it to another name."""
+    if not isinstance(filename, str) or not filename or filename in {".", ".."}:
+        raise ValueError("filename is empty")
+    if filename != filename.rstrip(". "):
+        raise ValueError("trailing dots or spaces are not allowed")
+    if os.path.isabs(filename) or any(character in filename for character in ("/", "\\", ":")):
+        raise ValueError("path separators are not allowed")
+    if any(unicodedata.category(character) in {"Cc", "Cf"} for character in filename):
+        raise ValueError("control characters are not allowed")
+    if len(filename.encode("utf-8")) > 255:
+        raise ValueError("filename is too long")
+    return filename
+
+
 async def handle_file_upload(file, DOC_PATH: str) -> Dict[str, str]:
-    file_path = os.path.join(DOC_PATH, os.path.basename(file.filename))
-    with open(file_path, "wb") as buffer:
-        shutil.copyfileobj(file.file, buffer)
+    try:
+        filename = secure_filename(file.filename or "")
+        os.makedirs(DOC_PATH, exist_ok=True)
+        file_path = validate_file_path(os.path.join(DOC_PATH, filename), DOC_PATH)
+    except ValueError as exc:
+        raise HTTPException(status_code=400, detail=f"Invalid file: {exc}") from exc
+
+    original_filename = filename
+    conflict_index = 0
+    buffer = None
+    while buffer is None:
+        if conflict_index:
+            filename = _conflict_filename(original_filename, conflict_index)
+            try:
+                file_path = validate_file_path(os.path.join(DOC_PATH, filename), DOC_PATH)
+            except ValueError as exc:
+                raise HTTPException(status_code=400, detail=f"Invalid file: {exc}") from exc
+        try:
+            buffer = open(file_path, "xb")
+        except FileExistsError:
+            conflict_index += 1
+        except OSError as exc:
+            raise HTTPException(status_code=400, detail="Invalid file path") from exc
+
+    try:
+        with buffer:
+            while True:
+                chunk = file.file.read(1024 * 1024)
+                if not isinstance(chunk, (bytes, bytearray)):
+                    raise TypeError("upload stream must return bytes")
+                if not chunk:
+                    break
+                buffer.write(chunk)
+    except Exception as exc:
+        try:
+            os.remove(file_path)
+        except OSError:
+            pass
+        raise HTTPException(status_code=400, detail="Invalid file content") from exc
     print(f"File uploaded to {file_path}")
 
     document_loader = DocumentLoader(DOC_PATH)
     await document_loader.load()
 
-    return {"filename": file.filename, "path": file_path}
+    return {"filename": filename, "path": file_path}
 
 
 async def handle_file_deletion(filename: str, DOC_PATH: str) -> JSONResponse:
-    file_path = os.path.join(DOC_PATH, os.path.basename(filename))
-    if os.path.exists(file_path):
+    try:
+        exact_name = _exact_deletion_name(filename)
+        file_path = os.path.abspath(os.path.join(DOC_PATH, exact_name))
+        validate_file_path(file_path, DOC_PATH)
+    except ValueError as exc:
+        return JSONResponse(status_code=400, content={"message": f"Invalid file: {exc}"})
+    if os.path.islink(file_path):
+        return JSONResponse(status_code=400, content={"message": "Target symlink is not allowed"})
+    if os.path.isdir(file_path):
+        return JSONResponse(status_code=400, content={"message": "Target is not a file"})
+    if os.path.isfile(file_path):
         os.remove(file_path)
         print(f"File deleted: {file_path}")
         return JSONResponse(content={"message": "File deleted successfully"})

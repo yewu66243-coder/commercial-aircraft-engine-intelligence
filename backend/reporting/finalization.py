@@ -16,6 +16,399 @@ from .source_grounding import pack_sources, source_text
 from .body_citations import citation_coverage
 
 
+_STYLE_ACTIONS = ('不作', '不进行', '不据此', '无法据此', '不对')
+_STYLE_JUDGMENTS = ('判断', '推断', '结论', '区分', '定性')
+_STYLE_SOURCE_WORDS = ('文献', '资料', '原文')
+_STYLE_GAP_WORDS = ('未说明', '未涉及', '未取得', '未建立')
+_STYLE_REPORT_SUBJECT_RE = re.compile(r'本报告|本文|(?<![\u4e00-\u9fff])报告')
+_STYLE_THIRD_PARTY_RE = re.compile(r'监管机构|航空公司|制造商|运营商|公司|企业|机构')
+_STYLE_SCOPE_ONLY_RE = re.compile(
+    r'^\s*(?:受资料范围限制|鉴于证据不足)[，,]?\s*(?:本报告\s*)?'
+    r'(?:不作|不进行|不据此|无法据此|不对)[^，,；;。！？.!?]{0,160}'
+    r'(?:判断|推断|结论|区分|定性)[^，,；;。！？.!?]{0,160}[。！？.!?]?'
+    r'(?:\s*\[(?:(?:原文|URL|文献|来源)\s*\d+|\d+)\])*\s*$', re.I)
+_STYLE_RETRACTION_RE = re.compile(
+    r'[，,；;]\s*((?:因此|故)(?:无法证实|不作确定性结论)[^。！？.!?]*[。！？.!?]?(?:\[[^\]]+\])*)$')
+_STYLE_EMPTY_RE = re.compile(r'^[\s，,；;：:。.!！？?（）()\[\]、]*(?:因此|故|所以|并且)?[\s，,；;：:。.!！？?（）()\[\]、]*$')
+_STYLE_LIST_PREFIX_RE = re.compile(r'^\s*(?:[-*+]|\d+[.)])\s+')
+_STYLE_CAPTION_PREFIX_RE = re.compile(
+    r'^\s*(?:\*\*(?:图|表)\s*\d+\s*[:：.．]\*\*|(?:图|表)\s*\d+\s*[:：.．])\s*')
+
+
+def _style_first(text, words, start=0):
+    positions = [text.find(word, start) for word in words]
+    return min((position for position in positions if position >= 0), default=-1)
+
+
+def _style_clauses(sentence):
+    """Keep each clause's original separator for partial deletion."""
+    clauses = []
+    start = 0
+    for index, character in enumerate(sentence):
+        if character in '，,；;':
+            clauses.append((sentence[start:index], character))
+            start = index + 1
+    clauses.append((sentence[start:], ''))
+    return clauses
+
+
+def _report_owns_action(lead):
+    """Recognize a report subject, not a report recording another actor."""
+    reports = list(_STYLE_REPORT_SUBJECT_RE.finditer(lead))
+    if not reports:
+        return False
+    last_report = reports[-1].start()
+    for actor in _STYLE_THIRD_PARTY_RE.finditer(lead):
+        if actor.start() <= last_report:
+            continue
+        tail = lead[actor.end():].strip()
+        if tail not in ('', '仍', '也', '均', '尚', '暂', '还', '将', '并'):
+            continue  # A distant name is part of the report's topic, not its subject.
+        before = lead[:actor.start()].rstrip()
+        if before.endswith(('对', '针对', '关于', '依据', '根据', '基于', '就', '向')):
+            continue  # The third party is the object of the report's judgment.
+        # A nearby third-party name is the more recent subject. If its role is
+        # unclear, preserving the sentence is safer than deleting its claim.
+        return False
+    return True
+
+
+def _formal_style_edits(sentence):
+    """Return kept prose and audited disclaimer clauses from one sentence."""
+    scope_preface = bool(re.match(r'^\s*(?:受资料范围限制|鉴于证据不足)', sentence))
+    if scope_preface and _STYLE_SCOPE_ONLY_RE.fullmatch(sentence):
+        return '', [('scope_preface_with_conclusion', sentence.strip())]
+
+    clauses = _style_clauses(sentence)
+    connectors = {'', '但', '因此', '故', '所以', '则', '对此'}
+    substantive_prefix = [0]
+    for body, _ in clauses:
+        substantive_prefix.append(substantive_prefix[-1] + (body.strip() not in connectors))
+    source_seen = False
+    report_seen = False
+    gap_clause = -1
+    candidates = []
+    for index, (body, _) in enumerate(clauses):
+        source_seen |= _style_first(body, _STYLE_SOURCE_WORDS) >= 0
+        if source_seen and (_style_first(body, _STYLE_GAP_WORDS) >= 0
+                            or ('未将' in body and '建立关联' in body)):
+            gap_clause = index
+        action = _style_first(body, _STYLE_ACTIONS)
+        if action < 0 or _style_first(body, _STYLE_JUDGMENTS, action) < 0:
+            report_seen |= '本报告' in body or '本文' in body
+            continue
+        lead = body[:action].strip()
+        explicit = _report_owns_action(lead)
+        implied = lead in connectors
+        if not explicit and not implied:
+            # A named actor in this clause becomes the nearest subject for
+            # a following subjectless judgment, even if the report quoted it.
+            report_seen = False
+            continue
+        rationale = gap_clause if gap_clause >= 0 else (0 if scope_preface else -1)
+        intervening_fact = (rationale >= 0 and
+                            substantive_prefix[index] > substantive_prefix[rationale + 1])
+        if not explicit and (intervening_fact or not (scope_preface or gap_clause >= 0 or report_seen)):
+            report_seen |= '本报告' in body or '本文' in body
+            continue
+        rule = ('source_gap_with_conclusion' if gap_clause >= 0
+                else 'self_referential_conclusion')
+        candidates.append((index, rule, intervening_fact))
+        report_seen |= '本报告' in body or '本文' in body
+    if not candidates:
+        return sentence, []
+
+    if len(candidates) == 1:
+        index, rule, intervening_fact = candidates[0]
+        if index == len(clauses) - 1 and (
+                len(clauses) == 1 or
+                (gap_clause >= 0 and not intervening_fact) or
+                (index == 1 and sentence.lstrip().startswith('因此涉及'))):
+            return '', [(rule, sentence.strip())]
+
+    removed_indexes = {index for index, _, _ in candidates}
+    kept_indexes = [index for index in range(len(clauses)) if index not in removed_indexes]
+    if not kept_indexes:
+        return '', [(rule, sentence.strip()) for _, rule, _ in candidates]
+    kept = clauses[kept_indexes[0]][0]
+    if kept_indexes[0] > 0:
+        kept = re.sub(r'^\s*(?:但|因此|故|所以)[，,]?\s*', '', kept)
+    for previous, current in zip(kept_indexes, kept_indexes[1:]):
+        kept += (clauses[previous][1] or '，') + clauses[current][0]
+    if kept_indexes[-1] < len(clauses) - 1 and not kept.rstrip().endswith(tuple('。！？.!?')):
+        kept = kept.rstrip() + (sentence[-1] if sentence[-1] in '。！？.!?' else '。')
+    removed = []
+    for index, rule, _ in candidates:
+        body = clauses[index][0]
+        marker = clauses[index - 1][1] if index > 0 else clauses[index][1]
+        removed.append((rule, (marker + body if index > 0 else body + marker).strip()))
+    return kept, removed
+
+
+def _is_orphan_reference(text):
+    remaining = text.strip()
+    seen = False
+    while remaining:
+        match = REF_RE.match(remaining)
+        if not match:
+            return False
+        seen = True
+        remaining = remaining[match.end():].lstrip()
+    return seen
+
+
+def _formal_style_sentences(text):
+    """Scan sentence boundaries without splitting decimal or standard identifiers."""
+    start = 0
+    index = 0
+    while index < len(text):
+        character = text[index]
+        if character not in '。！？.!?':
+            index += 1
+            continue
+        if (character == '.' and index and index + 1 < len(text)
+                and text[index - 1].isascii() and text[index - 1].isalnum()
+                and text[index + 1].isascii() and text[index + 1].isalnum()):
+            index += 1
+            continue
+        end = index + 1
+        while True:
+            citation_start = end
+            while citation_start < len(text) and text[citation_start] in ' \t':
+                citation_start += 1
+            citation = REF_RE.match(text, citation_start)
+            if citation is None:
+                break
+            end = citation.end()
+        yield text[start:end]
+        start = end
+        index = end
+    if start < len(text):
+        yield text[start:]
+
+
+def _markdown_pair_ends(text):
+    """Pair unescaped Markdown brackets once, including nested groups."""
+    stacks = {'[': [], '(': []}
+    pairs = {}
+    index = 0
+    while index < len(text):
+        if text[index] == '\\':
+            index += 2
+            continue
+        character = text[index]
+        if character in stacks:
+            stacks[character].append(index)
+        elif character == ']' and stacks['[']:
+            pairs[stacks['['].pop()] = index + 1
+        elif character == ')' and stacks['(']:
+            pairs[stacks['('].pop()] = index + 1
+        index += 1
+    return pairs
+
+
+def _protected_markdown_end(text, index, pairs):
+    if text[index] == '`':
+        run = 1
+        while index + run < len(text) and text[index + run] == '`':
+            run += 1
+        closing = text.find('`' * run, index + run)
+        return closing + run if closing >= 0 else None
+    label_start = index + 1 if text.startswith('![', index) else index
+    if label_start < len(text) and text[label_start] == '[':
+        label_end = pairs.get(label_start)
+        if label_end is not None and label_end < len(text) and text[label_end] == '(':
+            return pairs.get(label_end)
+    if text.startswith('<http://', index) or text.startswith('<https://', index):
+        closing = text.find('>', index + 1)
+        return closing + 1 if closing >= 0 else None
+    return None
+
+
+def _markdown_chunks(text):
+    """Yield prose and protected Markdown verbatim; no placeholder is inserted."""
+    pairs = _markdown_pair_ends(text)
+    start = 0
+    index = 0
+    while index < len(text):
+        end = _protected_markdown_end(text, index, pairs)
+        if end is None:
+            index += 1
+            continue
+        if start < index:
+            yield False, text[start:index]
+        yield True, text[index:end]
+        start = end
+        index = end
+    if start < len(text):
+        yield False, text[start:]
+
+
+def _clean_formal_style_text(text):
+    """Return edited text and exact removed spans for one line or table cell."""
+    original_text = text
+    prefix = ''
+    list_marker = _STYLE_LIST_PREFIX_RE.match(text)
+    if list_marker:
+        prefix, text = text[:list_marker.end()], text[list_marker.end():]
+    caption = _STYLE_CAPTION_PREFIX_RE.match(text)
+    if caption:
+        prefix += text[:caption.end()]
+        text = text[caption.end():]
+    kept = []
+    removed = []
+    for protected, chunk in _markdown_chunks(text):
+        if protected:
+            kept.append(chunk)
+            continue
+        for sentence in _formal_style_sentences(chunk):
+            edited, clause_removals = _formal_style_edits(sentence)
+            if clause_removals:
+                removed.extend(clause_removals)
+                if edited:
+                    kept.append(edited)
+                continue
+            retraction = _STYLE_RETRACTION_RE.search(sentence)
+            if retraction:
+                removed.append(('retracted_conclusion', retraction.group()))
+                sentence = sentence[:retraction.start()] + '。'
+            if removed:
+                sentence = sentence.lstrip()
+            kept.append(sentence)
+    if not removed:
+        return original_text, []
+    cleaned = ''.join(kept).strip()
+    cleaned = re.sub(r' {2,}', ' ', cleaned)
+    cleaned = re.sub(r'\(\s*\)|（\s*）', '', cleaned)
+    if _is_orphan_reference(cleaned) or _STYLE_EMPTY_RE.fullmatch(cleaned):
+        cleaned = ''
+    if cleaned:
+        cleaned = prefix + cleaned
+    elif prefix:
+        rule, original = removed[0]
+        removed[0] = (rule, prefix + original)
+    return cleaned, removed
+
+
+def _split_markdown_table_cells(line):
+    """Split on pipes preceded by an even number of backslashes."""
+    delimiters = []
+    for index, character in enumerate(line):
+        if character != '|':
+            continue
+        backslashes = 0
+        cursor = index - 1
+        while cursor >= 0 and line[cursor] == '\\':
+            backslashes += 1
+            cursor -= 1
+        if backslashes % 2 == 0:
+            delimiters.append(index)
+    if len(delimiters) < 2:
+        return None
+    cells = [line[left + 1:right] for left, right in zip(delimiters, delimiters[1:])]
+    return line[:delimiters[0] + 1], cells, line[delimiters[-1]:]
+
+
+def clean_formal_report_style(report: str) -> tuple[str, dict[str, object]]:
+    """Remove self-referential report disclaimers after editorial work.
+
+    The audit stores only removed text and its nearest Markdown heading.
+    """
+    items = []
+    lines = report.splitlines()
+    output = []
+    section = ''
+    orphan_after_removed_line = False
+    fence_character = ''
+    fence_length = 0
+    for index, line in enumerate(lines):
+        if fence_character:
+            output.append(line)
+            if re.match(r'^[ \t]{0,3}' + re.escape(fence_character) +
+                        '{' + str(fence_length) + r',}[ \t]*$', line):
+                fence_character = ''
+                fence_length = 0
+            orphan_after_removed_line = False
+            continue
+        opening_fence = re.match(r'^[ \t]{0,3}(`{3,}|~{3,})', line)
+        if opening_fence:
+            marker = opening_fence.group(1)
+            fence_character, fence_length = marker[0], len(marker)
+            output.append(line)
+            orphan_after_removed_line = False
+            continue
+        heading = re.match(r'^#{1,6}\s+(.+?)\s*$', line)
+        if heading:
+            section = heading.group(1).strip()
+            output.append(line)
+            orphan_after_removed_line = False
+            continue
+        if re.match(r'^\s*\|?\s*:?-{3,}', line):
+            output.append(line)
+            orphan_after_removed_line = False
+            continue
+        if line.lstrip().startswith('|') and line.rstrip().endswith('|'):
+            # The row immediately before a separator is the header.
+            if index + 1 < len(lines) and re.match(r'^\s*\|?\s*:?-{3,}', lines[index + 1]):
+                output.append(line)
+                orphan_after_removed_line = False
+                continue
+            split = _split_markdown_table_cells(line)
+            if split is None:
+                output.append(line)
+                orphan_after_removed_line = False
+                continue
+            row_prefix, cells, row_suffix = split
+            edited = []
+            row_changed = False
+            for cell in cells:
+                cleaned, removed = _clean_formal_style_text(cell.strip())
+                edited.append((cell, cleaned, bool(removed)))
+                row_changed |= bool(removed)
+                items.extend({'section': section, 'rule': rule, 'text': text}
+                             for rule, text in removed)
+            if not row_changed:
+                output.append(line)
+                orphan_after_removed_line = False
+                continue
+            values = [cleaned if removed else cell.strip() for cell, cleaned, removed in edited]
+            values = [value if value and not _is_orphan_reference(value) else '—'
+                      for value in values]
+            if all(value == '—' for value in values[1:]):
+                orphan_after_removed_line = False
+                continue
+            rebuilt = [cell if not removed and value == cell.strip() else f' {value} '
+                       for (cell, _, removed), value in zip(edited, values)]
+            output.append(row_prefix + '|'.join(rebuilt) + row_suffix)
+            orphan_after_removed_line = False
+            continue
+        cleaned, removed = _clean_formal_style_text(line)
+        items.extend({'section': section, 'rule': rule, 'text': text}
+                     for rule, text in removed)
+        if removed:
+            if cleaned:
+                output.append(cleaned)
+                orphan_after_removed_line = False
+            else:
+                orphan_after_removed_line = True
+        elif _is_orphan_reference(line) and orphan_after_removed_line:
+            # A citation on its own line can be left behind by a removed sentence.
+            continue
+        else:
+            output.append(line)
+            if line.strip():
+                orphan_after_removed_line = False
+    audit = {'version': 'formal-style-cleanup-v1', 'removed_count': len(items),
+             'removed_items': items}
+    if not items:
+        return report, audit
+    cleaned = '\n'.join(output)
+    cleaned = re.sub(r'\n{3,}', '\n\n', cleaned)
+    if report.endswith('\n'):
+        cleaned += '\n'
+    return cleaned, audit
+
+
 def source_passages(originals):
     """Stable, immutable passages copied from the actual extracted source pages."""
     passages = []

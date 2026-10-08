@@ -109,22 +109,55 @@ class ReportImageTests(unittest.TestCase):
                         self.assertEqual(service.ensure_report_images_inserted(raw), raw)
 
     def test_run_checks_images_before_evaluation_and_export(self):
-        class StopAfterImageCheck(Exception):
-            pass
+        """图片必须在测评之前插入：测评看到的正文要包含已插入的图片。"""
+        from tests.test_formal_pipeline import evaluation_result
+        calls = []
+        evaluated = []
         with TemporaryDirectory() as directory:
             service = self.service_and_image(Path(directory))
+            # 图片已预置在 service.report_images；文献只补齐结果组装需要的字段
+            service.selected_local_papers = [
+                SimpleNamespace(file_name='gtf.pdf', source_path=str(Path(directory) / 'gtf.pdf'),
+                                title='GTF 维修网络', score=0.9, author=''),
+            ]
             raw = '# 报告\n\n## 2 维修网络\nGTF维修能力分析。\n\n## 参考文献\n'
-            def evaluate(text):
-                self.assertIn('![GTF维修现场]', text)
-                raise StopAfterImageCheck()
+            prepared = SimpleNamespace(markdown=raw, quality={'status': 'ready', 'warnings': []},
+                                       citation_map={}, verification_notes=[])
+
+            def collect_images():
+                calls.append('images')
+                return None
+
+            async def evaluate(**kwargs):
+                calls.append('evaluation')
+                evaluated.append(kwargs.get('report', ''))
+                return evaluation_result()
+
             with patch.object(service, 'pre_search_abstracts', new=AsyncMock()), \
                  patch.object(service, 'planner_agent', return_value=[]), \
                  patch.object(service, 'research_agent', new=AsyncMock(return_value=[])), \
-                 patch.object(service, 'collect_report_images'), \
+                 patch.object(service, 'collect_report_images', side_effect=collect_images), \
                  patch.object(service, 'writer_agent', new=AsyncMock(return_value=raw)), \
-                 patch('three_agent_service.evaluate_public_url_sources', side_effect=evaluate):
-                with self.assertRaises(StopAfterImageCheck):
-                    asyncio.run(service.run())
+                 patch.object(service, 'editorial_agent', new=AsyncMock(side_effect=lambda text: text)), \
+                 patch.object(service, 'append_evaluation_record', return_value='record.json'), \
+                 patch('three_agent_service.build_source_catalog',
+                       return_value={'sources': [], 'errors': []}), \
+                 patch('three_agent_service.evaluate_saved_report', new=AsyncMock(side_effect=evaluate)), \
+                 patch('three_agent_service.prepare_formal_report', return_value=prepared), \
+                 patch('three_agent_service.review_content', return_value={'warnings': []}), \
+                 patch('three_agent_service.write_text_to_md',
+                       new=AsyncMock(return_value='outputs/report.md')), \
+                 patch('three_agent_service.write_md_to_pdf',
+                       new=AsyncMock(return_value='outputs/report.pdf')), \
+                 patch('three_agent_service.write_md_to_word',
+                       new=AsyncMock(return_value='outputs/report.docx')):
+                asyncio.run(service.run())
+
+        self.assertIn('images', calls)
+        self.assertIn('evaluation', calls)
+        self.assertLess(calls.index('images'), calls.index('evaluation'))
+        self.assertEqual(len(evaluated), 1)
+        self.assertIn('![GTF维修现场]', evaluated[0])
 
     def test_shared_figure_source_is_not_duplicate_body_prose(self):
         from backend.reporting.content_depth import review_content

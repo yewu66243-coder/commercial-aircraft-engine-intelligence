@@ -7,7 +7,7 @@
     <link rel="icon" type="image/png" href="/static/software-icon.png" />
     <link rel="alternate icon" href="./static/favicon.ico" />
     <link rel="stylesheet" href="https://cdnjs.cloudflare.com/ajax/libs/font-awesome/6.5.1/css/all.min.css" />
-    <link rel="stylesheet" href="/site/styles.css?v=report-actions-three-downloads-20260930" />
+    <link rel="stylesheet" href="/site/styles.css?v=merged-evaluation-dashboard-20261008" />
 </head>
 <body>
     <div class="app-shell">
@@ -251,6 +251,37 @@
                         <p>初筛和选入写作不代表核验通过；发布日期未知的网页不会标为最新资料。</p>
                         <div id="webSourceRows" class="web-source-rows"></div>
                     </details>
+                    <section id="evaluationPanel" class="evaluation-panel" aria-labelledby="evaluationPanelTitle" hidden>
+                        <div class="evaluation-heading">
+                            <h3 id="evaluationPanelTitle">自动测评结果</h3>
+                            <span>实体 F1 90% · 链接可访问率 98% · 结论支撑准确率 90%</span>
+                        </div>
+                        <div class="evaluation-metrics">
+                            <div class="evaluation-card"><span>实体 Precision</span><b id="evaluationEntityPrecision">—</b><small id="evaluationEntityPrecisionStatus">待测评</small></div>
+                            <div class="evaluation-card"><span>实体 Recall / F1</span><b id="evaluationEntityRecallF1">—</b><small id="evaluationEntityRecallF1Status">待测评</small></div>
+                            <div class="evaluation-card"><span>链接可访问率</span><b id="evaluationLinkAccessibility">—</b><small id="evaluationLinkAccessibilityStatus">待测评</small></div>
+                            <div class="evaluation-card"><span>结论支撑准确率</span><b id="evaluationClaimSupport">—</b><small id="evaluationClaimSupportStatus">待测评</small></div>
+                        </div>
+                        <p id="evaluationMessage" class="evaluation-message" aria-live="polite" hidden></p>
+                        <div class="evaluation-actions">
+                            <input id="evaluationGroundTruthInput" class="evaluation-file-input" type="file" accept=".json,.xlsx" hidden />
+                            <button id="evaluationUploadButton" type="button" class="evaluation-action-btn"><i class="fas fa-upload"></i> 上传/替换标准答案</button>
+                            <button id="evaluationRerunButton" type="button" class="evaluation-action-btn" disabled>重新测评</button>
+                            <a id="evaluationDownloadWord" href="#" class="evaluation-action-btn disabled" aria-disabled="true"><i class="fas fa-file-word"></i> 测评报告 Word</a>
+                            <a id="evaluationDownloadPdf" href="#" class="evaluation-action-btn disabled" aria-disabled="true"><i class="fas fa-file-pdf"></i> 测评报告 PDF</a>
+                        </div>
+                        <p id="evaluationGroundTruthStatus" class="evaluation-ground-truth">当前标准答案：未上传（实体严格指标暂不可用）</p>
+                        <p id="evaluationActionStatus" class="evaluation-action-status" role="status" aria-live="polite"></p>
+                        <details class="evaluation-details">
+                            <summary>查看分类明细</summary>
+                            <div class="evaluation-table-wrap">
+                                <table>
+                                    <thead><tr><th>类别</th><th>TP</th><th>FP</th><th>FN</th><th>Precision</th><th>Recall</th><th>F1</th></tr></thead>
+                                    <tbody id="evaluationCategoryBody"></tbody>
+                                </table>
+                            </div>
+                        </details>
+                    </section>
                     <div id="reportContainer">
                         <p class="empty-state">报告生成后可在此审阅摘要、研究方法、专题分析与结论，并下载 Word 或 PDF。</p>
                     </div>
@@ -329,7 +360,8 @@
 
     <script src="https://cdnjs.cloudflare.com/ajax/libs/showdown/1.9.1/showdown.min.js"></script>
     <script src="https://cdnjs.cloudflare.com/ajax/libs/dompurify/3.2.6/purify.min.js"></script>
-    <script src="/site/scripts.js?v=report-preview-three-downloads-20260930"></script>
+    <script src="/site/evaluation_panel.js?v=merged-evaluation-dashboard-20261008"></script>
+    <script src="/site/scripts.js?v=merged-evaluation-dashboard-20261008"></script>
 </body>
 </html>
 
