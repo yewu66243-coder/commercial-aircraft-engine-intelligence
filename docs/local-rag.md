@@ -1,10 +1,19 @@
 # Local document RAG
 
-The three-agent service now uses two-stage local retrieval: existing metadata
-selection followed by persisted body-chunk retrieval within the selected files.
-Retrieved excerpts are passed to the writer with original filenames and PDF page
-numbers. Excerpt labels are retrieval identifiers, not bibliography numbers.
-Original documents remain the source used by evidence verification.
+## Current Workbench Behavior
+
+The workbench uses title/abstract metadata selection and reads the selected
+original documents. Report-time vector retrieval and upload-time full-text
+indexing have been removed from the workbench, including their environment
+switches, queue routes and frontend controls. Uploads update summary indexes.
+Existing full-text databases and build/job state were deleted on 2026-10-15.
+OCR text caches and summary-index locks remain because summary extraction and
+source verification still use them; they are not vector indexes.
+
+## Legacy Standalone Tools
+
+The following describes retained standalone tools, not the active report or
+upload workflow. Running a build command explicitly will recreate index data.
 
 The on-demand implementation is complemented by a full-library SQLite index.
 Run `portable_python\python.exe build_local_rag.py --build` from the project root
@@ -15,7 +24,7 @@ Use `--inventory` to count files, `--status` to read progress, and `--stop` to
 request a pause at the next embedding batch. `--limit N` is a partial test run.
 
 The database is `local_docs/rag_index/library.sqlite3`. A cross-process build
-lock prevents duplicate builders; WAL transactions allow reports to search
+lock prevents duplicate builders; WAL transactions allow standalone searches of
 completed documents while the batch build continues. Each document is committed
 atomically. A stopped document is rebuilt on resume. No-text PDFs and unsupported
 formats are recorded separately; an embedding-service failure interrupts the
@@ -45,10 +54,8 @@ Configuration uses the existing EMBEDDING provider/model. Optional environment
 variables (defaults shown):
 
 ```dotenv
-LOCAL_RAG_ENABLED=true
 LOCAL_RAG_CHUNK_SIZE=1000
 LOCAL_RAG_CHUNK_OVERLAP=120
-LOCAL_RAG_MAX_CONTEXT_CHUNKS=18
 ```
 
 Chunk lengths are characters, not tokens. LOCAL_RAG_INDEX_DIR optionally overrides
@@ -61,8 +68,5 @@ It suits the bounded set of documents selected per task. Atomic file replacement
 and an in-process lock protect concurrent tasks within one server process; shared
 index writes from multiple server processes are not supported.
 
-The task log reports indexing and retrieval stages. The evaluation record's
-local_rag field records index counts, failures and retrieved file/page/chunk IDs.
-If indexing or embedding fails, the task continues using existing local document
-reading and logs the fallback. A first retrieval takes longer because embedding
-results have not yet been cached.
+New workbench report records do not contain local_rag or library_rag fields.
+Historical report records are preserved and may still contain those fields.

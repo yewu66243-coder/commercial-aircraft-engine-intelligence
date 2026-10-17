@@ -198,6 +198,8 @@ def prepare_formal_report(markdown, task, sources=(), metadata=None):
     if metadata.get("report_format_profile") is None and "include_toc" in metadata:
         format_profile["layout"]["include_toc"] = bool(metadata.get("include_toc"))
     custom_chapters = format_profile.get("chapters") or []
+    requested_titles = {item["title"] for item in custom_chapters}
+    custom_sections = {}
     public_method_section = bool(metadata.get('public_method_section'))
     registry = CitationRegistry(
         markdown, sources,
@@ -222,6 +224,9 @@ def prepare_formal_report(markdown, task, sources=(), metadata=None):
         body = _clean_body(_move_verification_markers(body, title, verification_notes), title)
         if not body:
             continue
+        if title in requested_titles:
+            custom_sections[title] = body
+            continue
         if title in {'摘要', '执行摘要', '中文摘要'}:
             front['abstract'] += body + '\n\n'
         elif title == '关键词':
@@ -242,7 +247,7 @@ def prepare_formal_report(markdown, task, sources=(), metadata=None):
         else:
             thematic.append((title, body))
 
-    if not front['intro']:
+    if not front['intro'] and not custom_chapters:
         front['intro'] = f'本报告围绕“{concise_title(task)}”组织已取得的资料，分析相关问题及证据的适用范围。'
         warnings.append('原稿缺少独立引言，已补入研究范围说明。')
     if public_method_section and not front['method']:
@@ -257,14 +262,14 @@ def prepare_formal_report(markdown, task, sources=(), metadata=None):
         else:
             front['method'] = '本报告依据已提供的资料进行主题归纳。原始检索条件与时间未完整记录，资料覆盖范围需要进一步核实。'
         warnings.append('原稿缺少研究方法章节，已据可用记录补入方法说明。')
-    if not front['discussion']:
+    if not front['discussion'] and not custom_chapters:
         front['discussion'] = '当前材料尚缺少独立的跨来源比较与局限讨论，需要在核对证据适用范围后补充。'
         warnings.append('综合讨论与研究局限需要补充。')
-    if not front['conclusion']:
+    if not front['conclusion'] and not custom_chapters:
         front['conclusion'] = '当前材料尚未形成可核验的综合结论，需进一步完成证据分析。'
         warnings.append('原稿没有可用的结论章节。')
     if not front['abstract']:
-        excerpt = re.sub(r'[#*]', '', front['conclusion']).strip()
+        excerpt = re.sub(r'[#*]', '', front['conclusion'] or '\n'.join(custom_sections.values())).strip()
         front['abstract'] = excerpt[:500] if len(excerpt) <= 500 else re.split(r'(?<=[。！？])', excerpt[:500])[:-1]
         if isinstance(front['abstract'], list):
             front['abstract'] = ''.join(front['abstract'])
@@ -283,7 +288,7 @@ def prepare_formal_report(markdown, task, sources=(), metadata=None):
     chapters = [('引言', front['intro'])]
     if public_method_section and front['method']:
         chapters.append(('资料来源与研究方法', front['method']))
-    if not thematic:
+    if not thematic and not custom_chapters:
         warnings.append('缺少专题分析章节，需补充证据及分析。')
     chapters += thematic or [('专题资料分析', '当前尚无足够的专题分析内容。')]
     chapters += [('综合讨论与研究局限', front['discussion']), ('结论与建议', front['conclusion'])]
@@ -291,26 +296,28 @@ def prepare_formal_report(markdown, task, sources=(), metadata=None):
         pool = chapters[:]
         reordered = []
         used = set()
-        for index, chapter in enumerate(custom_chapters):
+        for chapter in custom_chapters:
             wanted = (chapter.get("title") or "").strip()
             if not wanted:
+                continue
+            if wanted in custom_sections:
+                reordered.append((wanted, custom_sections[wanted]))
                 continue
             match_index = next(
                 (i for i, (name, _) in enumerate(pool)
                  if i not in used and (name == wanted or wanted in name or name in wanted)),
                 None,
             )
-            if match_index is None and index < len(pool) and index not in used:
-                match_index = index
             if match_index is not None:
                 used.add(match_index)
                 _, body = pool[match_index]
                 reordered.append((wanted, body))
             else:
-                reordered.append((wanted, f'本章需围绕“{wanted}”补充与任务直接相关的证据和分析。'))
-                warnings.append(f'用户自定义章节“{wanted}”未在原稿中找到对应内容，已保留章节占位。')
+                warnings.append(f'用户自定义章节“{wanted}”未在原稿中找到对应内容，需要重新撰写。')
         for index, item in enumerate(pool):
-            if index not in used and item[0] not in {name for name, _ in reordered}:
+            if index not in used and item[1].strip() and item[0] not in {name for name, _ in reordered} and not (
+                item[0] == '专题资料分析' and not thematic
+            ):
                 reordered.append(item)
         if reordered:
             chapters = reordered

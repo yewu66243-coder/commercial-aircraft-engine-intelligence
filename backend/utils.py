@@ -7,10 +7,10 @@ import urllib.parse
 import aiofiles
 
 if __package__:
-    from .reporting.document_export import clean_text, render_pdf, render_word, resolve_image_path
+    from .reporting.document_export import clean_text, render_pdf, render_word, resolve_image_path, convert_word_to_pdf
 else:
     # backend.server also imports this module as top-level "utils".
-    from reporting.document_export import clean_text, render_pdf, render_word, resolve_image_path
+    from reporting.document_export import clean_text, render_pdf, render_word, resolve_image_path, convert_word_to_pdf
 
 
 IMAGE_PATTERN = r'!\[([^\]]*)\]\((/outputs/[^)]+|file:///[^)]+)\)'
@@ -49,7 +49,13 @@ async def write_md_to_pdf(text: str, filename: str = "", format_profile: dict | 
     """Return the URL-encoded PDF path, or an empty string on export failure."""
     file_path = f"outputs/{filename[:60]}.pdf"
     try:
-        await asyncio.to_thread(render_pdf, text, file_path, Path.cwd(), format_profile)
+        if (format_profile or {}).get("template"):
+            word_path = Path(file_path).with_suffix(".docx")
+            if not word_path.is_file():
+                await asyncio.to_thread(render_word, text, word_path, Path.cwd(), format_profile)
+            await asyncio.to_thread(convert_word_to_pdf, word_path, file_path)
+        else:
+            await asyncio.to_thread(render_pdf, text, file_path, Path.cwd(), format_profile)
         print(f"Report written to {file_path}")
         return urllib.parse.quote(file_path)
     except Exception as exc:

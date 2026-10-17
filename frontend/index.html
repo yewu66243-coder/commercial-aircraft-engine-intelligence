@@ -7,7 +7,7 @@
     <link rel="icon" type="image/png" href="/static/software-icon.png" />
     <link rel="alternate icon" href="./static/favicon.ico" />
     <link rel="stylesheet" href="https://cdnjs.cloudflare.com/ajax/libs/font-awesome/6.5.1/css/all.min.css" />
-    <link rel="stylesheet" href="/site/styles.css?v=fixed-four-panel-layout-20261008" />
+    <link rel="stylesheet" href="/site/styles.css?v=report-font-options-20261015" />
 </head>
 <body>
     <div class="app-shell">
@@ -103,8 +103,8 @@
                                 <summary>自定义模型 API 管理</summary>
                                 <div class="custom-model-grid">
                                     <div>
-                                        <label for="customModelName">服务名称</label>
-                                        <input type="text" id="customModelName" placeholder="例如：客户私有模型" />
+                                        <label for="customModelName">配置名称（自定义）</label>
+                                        <input type="text" id="customModelName" placeholder="例如：公司千问接口" title="为这组 API 配置起一个便于辨认的名称，无需与服务商或模型名称一致" />
                                     </div>
                                     <div>
                                         <label for="customModelBaseUrl">API Base URL</label>
@@ -119,6 +119,7 @@
                                     <button type="button" id="testCustomModelBtn">测试连接</button>
                                     <button type="button" id="saveCustomModelBtn">保存模型</button>
                                 </div>
+                                <h3 class="custom-model-list-heading">已保存的 API <span id="customModelCount">0</span></h3>
                                 <div class="custom-model-list" id="customModelList"></div>
                                 <p class="hint-text" id="customModelStatus">仅支持 OpenAI-compatible Chat Completions 接口；API Key 保存在本机 local_docs 配置中。</p>
                             </details>
@@ -126,22 +127,72 @@
                     </div>
                     <details class="format-settings" id="reportFormatSettings">
                         <summary>报告格式设置</summary>
+                        <div class="report-template-controls">
+                            <label for="reportTemplateSelect">Word 排版模板</label>
+                            <select id="reportTemplateSelect"><option value="">系统默认格式</option></select>
+                            <div class="report-template-actions">
+                                <button type="button" id="importReportTemplateBtn"><i class="fas fa-file-import" aria-hidden="true"></i> 导入模板</button>
+                                <a href="/api/report-templates/standard" download><i class="fas fa-download" aria-hidden="true"></i> 标准模板</a>
+                                <button type="button" id="previewReportTemplateBtn" title="按当前模板下载示例 Word，检查排版；不启动情报检索或报告生成" disabled><i class="fas fa-file-word" aria-hidden="true"></i> 下载排版示例</button>
+                            </div>
+                            <input type="file" id="reportTemplateFile" accept=".docx" hidden />
+                            <p id="reportTemplateStatus" class="hint-text" role="status" aria-live="polite"></p>
+                            <dl id="reportTemplateSummary" class="report-template-summary" hidden></dl>
+                            <label class="format-check" id="templateChaptersLabel" hidden><input type="checkbox" id="useTemplateChapters" /> 采用模板章节</label>
+                        </div>
                         <div class="format-settings-grid">
                             <div>
                                 <label for="formatBodyFont">正文字体</label>
                                 <select id="formatBodyFont">
+                                    <optgroup label="中文字体">
                                     <option value="SimSun" selected>宋体</option>
+                                    <option value="SimHei">黑体</option>
                                     <option value="Microsoft YaHei">微软雅黑</option>
                                     <option value="FangSong">仿宋</option>
                                     <option value="KaiTi">楷体</option>
+                                    <option value="DengXian">等线</option>
+                                    <option value="STZhongsong">华文中宋</option>
+                                    <option value="STSong">华文宋体</option>
+                                    <option value="STFangsong">华文仿宋</option>
+                                    <option value="STKaiti">华文楷体</option>
+                                    <option value="STXihei">华文细黑</option>
+                                    <option value="LiSu">隶书</option>
+                                    <option value="YouYuan">幼圆</option>
+                                    </optgroup>
+                                    <optgroup label="西文字体">
+                                    <option value="Times New Roman">Times New Roman</option>
+                                    <option value="Arial">Arial</option>
+                                    <option value="Calibri">Calibri</option>
+                                    <option value="Cambria">Cambria</option>
+                                    <option value="Georgia">Georgia</option>
+                                    </optgroup>
                                 </select>
                             </div>
                             <div>
                                 <label for="formatHeadingFont">标题字体</label>
                                 <select id="formatHeadingFont">
+                                    <optgroup label="中文字体">
                                     <option value="SimHei" selected>黑体</option>
                                     <option value="Microsoft YaHei">微软雅黑</option>
                                     <option value="SimSun">宋体</option>
+                                    <option value="FangSong">仿宋</option>
+                                    <option value="KaiTi">楷体</option>
+                                    <option value="DengXian">等线</option>
+                                    <option value="STZhongsong">华文中宋</option>
+                                    <option value="STSong">华文宋体</option>
+                                    <option value="STFangsong">华文仿宋</option>
+                                    <option value="STKaiti">华文楷体</option>
+                                    <option value="STXihei">华文细黑</option>
+                                    <option value="LiSu">隶书</option>
+                                    <option value="YouYuan">幼圆</option>
+                                    </optgroup>
+                                    <optgroup label="西文字体">
+                                    <option value="Times New Roman">Times New Roman</option>
+                                    <option value="Arial">Arial</option>
+                                    <option value="Calibri">Calibri</option>
+                                    <option value="Cambria">Cambria</option>
+                                    <option value="Georgia">Georgia</option>
+                                    </optgroup>
                                 </select>
                             </div>
                             <div>
@@ -155,10 +206,12 @@
                             <div>
                                 <label for="formatHeading1Size">一级标题</label>
                                 <select id="formatHeading1Size">
-                                    <option value="14">14pt</option>
-                                    <option value="15" selected>15pt</option>
-                                    <option value="16">16pt</option>
-                                    <option value="18">18pt</option>
+                                    <option value="12">小四 / 12pt</option>
+                                    <option value="14">四号 / 14pt</option>
+                                    <option value="15" selected>小三 / 15pt</option>
+                                    <option value="16">三号 / 16pt</option>
+                                    <option value="18">小二 / 18pt</option>
+                                    <option value="22">二号 / 22pt</option>
                                 </select>
                             </div>
                             <div>
@@ -248,7 +301,6 @@
                     </div>
                     <button class="ghost-button full-width" id="uploadLocalFileBtn" type="button">上传并加入检索范围</button>
                     <p class="hint-text" id="uploadStatus">保存路径：local_docs/user_docs、local_docs/all_papers_pool 或 local_docs/all_patent_pool</p>
-                    <div class="upload-index-jobs" id="uploadIndexJobs" hidden></div>
                 </section>
 
                 <section class="panel research-output-container">
@@ -319,7 +371,6 @@
                         <a id="downloadLinkWordTop" href="#" class="report-action-btn disabled"><i class="fas fa-file-word"></i> Word</a>
                         <a id="downloadLinkTop" href="#" class="report-action-btn disabled"><i class="fas fa-file-pdf"></i> PDF</a>
                     </div>
-                    <p id="reportQualityStatus" class="report-quality-status" role="status" aria-live="polite">中文研究报告：摘要、正文、参考文献；Word / PDF 统一论文式排版。</p>
                     <details id="webSourceTracking" class="web-source-tracking" hidden>
                         <summary>网页来源处理明细</summary>
                         <p id="webSourceSummary"></p>
@@ -334,37 +385,6 @@
                         <p>初筛和选入写作不代表核验通过；发布日期未知的网页不会标为最新资料。</p>
                         <div id="webSourceRows" class="web-source-rows"></div>
                     </details>
-                    <section id="evaluationPanel" class="evaluation-panel" aria-labelledby="evaluationPanelTitle" hidden>
-                        <div class="evaluation-heading">
-                            <h3 id="evaluationPanelTitle">自动测评结果</h3>
-                            <span>实体 F1 90% · 链接可访问率 98% · 结论支撑准确率 90%</span>
-                        </div>
-                        <div class="evaluation-metrics">
-                            <div class="evaluation-card"><span>实体 Precision</span><b id="evaluationEntityPrecision">—</b><small id="evaluationEntityPrecisionStatus">待测评</small></div>
-                            <div class="evaluation-card"><span>实体 Recall / F1</span><b id="evaluationEntityRecallF1">—</b><small id="evaluationEntityRecallF1Status">待测评</small></div>
-                            <div class="evaluation-card"><span>链接可访问率</span><b id="evaluationLinkAccessibility">—</b><small id="evaluationLinkAccessibilityStatus">待测评</small></div>
-                            <div class="evaluation-card"><span>结论支撑准确率</span><b id="evaluationClaimSupport">—</b><small id="evaluationClaimSupportStatus">待测评</small></div>
-                        </div>
-                        <p id="evaluationMessage" class="evaluation-message" aria-live="polite" hidden></p>
-                        <div class="evaluation-actions">
-                            <input id="evaluationGroundTruthInput" class="evaluation-file-input" type="file" accept=".json,.xlsx" hidden />
-                            <button id="evaluationUploadButton" type="button" class="evaluation-action-btn"><i class="fas fa-upload"></i> 上传/替换标准答案</button>
-                            <button id="evaluationRerunButton" type="button" class="evaluation-action-btn" disabled>重新测评</button>
-                            <a id="evaluationDownloadWord" href="#" class="evaluation-action-btn disabled" aria-disabled="true"><i class="fas fa-file-word"></i> 测评报告 Word</a>
-                            <a id="evaluationDownloadPdf" href="#" class="evaluation-action-btn disabled" aria-disabled="true"><i class="fas fa-file-pdf"></i> 测评报告 PDF</a>
-                        </div>
-                        <p id="evaluationGroundTruthStatus" class="evaluation-ground-truth">当前标准答案：未上传（实体严格指标暂不可用）</p>
-                        <p id="evaluationActionStatus" class="evaluation-action-status" role="status" aria-live="polite"></p>
-                        <details class="evaluation-details">
-                            <summary>查看分类明细</summary>
-                            <div class="evaluation-table-wrap">
-                                <table>
-                                    <thead><tr><th>类别</th><th>TP</th><th>FP</th><th>FN</th><th>Precision</th><th>Recall</th><th>F1</th></tr></thead>
-                                    <tbody id="evaluationCategoryBody"></tbody>
-                                </table>
-                            </div>
-                        </details>
-                    </section>
                     <div id="reportContainer">
                         <p class="empty-state">报告生成后可在此审阅摘要、研究方法、专题分析与结论，并下载 Word 或 PDF。</p>
                     </div>
@@ -443,8 +463,8 @@
 
     <script src="https://cdnjs.cloudflare.com/ajax/libs/showdown/1.9.1/showdown.min.js"></script>
     <script src="https://cdnjs.cloudflare.com/ajax/libs/dompurify/3.2.6/purify.min.js"></script>
-    <script src="/site/evaluation_panel.js?v=merged-evaluation-dashboard-20261008"></script>
-    <script src="/site/scripts.js?v=merged-evaluation-dashboard-20261008"></script>
+    <script src="/site/history-storage.js?v=history-local-storage-20261017"></script>
+    <script src="/site/scripts.js?v=history-local-storage-20261017"></script>
 </body>
 </html>
 

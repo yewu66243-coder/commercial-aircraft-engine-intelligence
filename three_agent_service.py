@@ -26,6 +26,7 @@ from backend.reporting.prompts import (
 )
 from backend.reporting.framework import build_report_framework_plan, format_framework_for_prompt
 from backend.reporting.format_profile import normalize_report_format_profile
+from backend.reporting.template_store import resolve_template_profile
 from backend.reporting.content_depth import pack_evidence, review_content, usable_revision, bind_local_source_filenames
 from backend.reporting.detail_profiles import (
     ReportDetailProfile,
@@ -45,8 +46,6 @@ from backend.reporting.web_source_tracking import build_web_source_tracking
 from gpt_researcher.retrievers.web_evidence_policy import build_topic_queries
 from backend.reporting.finalization import clean_formal_report_style, finalize_report
 from gpt_researcher.document.local_index import SelectedLocalPaper, prepare_local_docs_for_query
-from gpt_researcher.document.local_rag import build_or_update_local_rag_index, retrieve_local_rag_matches, format_rag_context
-from gpt_researcher.document.library_rag import search_library, extend_selection_with_matches
 from gpt_researcher.document.local_image_extractor import extract_local_report_images
 from gpt_researcher.evaluation.evidence_samples import evaluate_local_references
 from gpt_researcher.evaluation.independent_judge import judge_report
@@ -396,20 +395,6 @@ def writer_max_tokens_for_model(model_name: str, detail_profile: Optional[Report
     return output_tokens
 
 
-def report_local_rag_enabled(environment=None) -> bool:
-    """Whether report generation should use local full-text vector retrieval.
-
-    This is intentionally separate from LOCAL_RAG_ENABLED so the existing
-    full-text index can keep being built and preserved while report generation
-    temporarily avoids Ollama embedding calls.
-    """
-    environment = os.environ if environment is None else environment
-    value = environment.get("REPORT_LOCAL_RAG_ENABLED")
-    if value is None:
-        value = environment.get("LOCAL_RAG_ENABLED", "true")
-    return str(value).lower() in {"true", "1", "yes", "on"}
-
-
 def report_editor_max_rounds(environment=None) -> int:
     """Return the configured balanced review limit, bounded to supported modes."""
     environment = os.environ if environment is None else environment
@@ -565,7 +550,7 @@ class ThreeAgentService:
 
     def __init__(self, request: ThreeAgentRequestData):
         self.request = request
-        self.report_format_profile = normalize_report_format_profile(request.report_format_profile)
+        self.report_format_profile = resolve_template_profile(request.report_format_profile)
         self.detail_profile: Optional[ReportDetailProfile] = None
         if request.report_detail:
             self.detail_profile, self.model_runtime = resolve_report_detail_model_runtime(
@@ -582,9 +567,6 @@ class ThreeAgentService:
         self.trace: List[Dict[str, str]] = []
         self.local_doc_path: Optional[str] = None
         self.selected_local_papers: List[SelectedLocalPaper] = []
-        self.rag_retrieval_context = ""
-        self.rag_retrieval_stats = {}
-        self.library_rag_stats = {}
         self.report_images: List[Dict[str, Any]] = []
         self.generation_status = "pending"
         self.generation_warning = ""
@@ -886,76 +868,9 @@ class ThreeAgentService:
             include_user_docs="user_docs" in local_scopes,
             include_patents="patents" in local_scopes,
         )
-        rag_enabled = report_local_rag_enabled()
-        if rag_enabled:
-            self._log("Librarian Agent", "正在从已建立的全库正文索引中查找相关资料。")
-            try:
-                library_result = await asyncio.to_thread(
-                    search_library, self.expanded_task_query, scopes=local_scopes,
-                    max_chunks=max_docs * 3,
-                )
-                added = 0
-                if library_result["matches"]:
-                    added = await asyncio.to_thread(
-                        extend_selection_with_matches, selection, library_result["matches"], max_docs,
-                    )
-                self.library_rag_stats = {"searched_chunks": library_result["chunk_count"],
-                                          "additional_documents": added}
-                self._log("Librarian Agent", f"全库正文检索完成：检索 {library_result['chunk_count']} 个片段，补充 {added} 份精读资料。")
-            except Exception as exc:
-                logging.getLogger(__name__).exception("Full-library RAG search failed")
-                self.library_rag_stats = {"error_type": type(exc).__name__}
-                self._log("Librarian Agent", "全库正文检索暂不可用，继续使用摘要筛选和入选资料正文检索。")
-        else:
-            self.library_rag_stats = {"enabled": False, "reason": "REPORT_LOCAL_RAG_ENABLED=false"}
-            self.rag_retrieval_stats = {"enabled": False, "reason": "REPORT_LOCAL_RAG_ENABLED=false"}
-            self._log("Librarian Agent", "报告生成阶段已关闭全文向量检索，将仅使用摘要索引和已选资料精读；全文索引库会保留。")
         if selection.has_documents:
             self.local_doc_path = selection.doc_path
             self.selected_local_papers = selection.selected
-            if rag_enabled:
-                self._log("Librarian Agent", "正在更新入选资料的正文分块索引，并检索与任务相关的原文片段。")
-                try:
-                    max_chunks = int(os.getenv("LOCAL_RAG_MAX_CONTEXT_CHUNKS", "18"))
-                    try:
-                        cached = await asyncio.to_thread(
-                            search_library, self.expanded_task_query, scopes=local_scopes,
-                            source_paths=[item.source_path for item in self.selected_local_papers],
-                            max_chunks=max_chunks,
-                        )
-                    except Exception:
-                        logging.getLogger(__name__).exception("Full-library cache unavailable")
-                        cached = {"matches": [], "indexed_paths": []}
-                    cached_paths = set(cached.get("indexed_paths", []))
-                    pending = [item for item in self.selected_local_papers
-                               if str(Path(item.source_path).resolve()) not in cached_paths]
-                    build_stats = {"errors": [], "reused_library_documents": len(cached_paths)}
-                    retrieval = {"matches": [], "context": ""}
-                    if pending:
-                        build_stats.update(await asyncio.to_thread(build_or_update_local_rag_index, pending))
-                        retrieval = await asyncio.to_thread(
-                            retrieve_local_rag_matches, self.expanded_task_query,
-                            sources=pending, max_chunks=max_chunks,
-                        )
-                    if cached["matches"]:
-                        retrieval["matches"] = sorted(cached["matches"] + retrieval["matches"],
-                                                      key=lambda match: match.score, reverse=True)[:max_chunks]
-                        retrieval["context"] = format_rag_context(retrieval["matches"])
-                    self.rag_retrieval_context = retrieval["context"]
-                    self.rag_retrieval_stats = {
-                        **build_stats, "enabled": True,
-                        "retrieved_chunks": len(retrieval["matches"]),
-                        "matches": [{"file_name": match.chunk.file_name,
-                                     "page": match.chunk.page, "chunk_id": match.chunk.chunk_id,
-                                     "score": match.score} for match in retrieval["matches"]],
-                    }
-                    self._log("Librarian Agent", f"正文检索完成：召回 {len(retrieval['matches'])} 个原文片段，已保留文件和页码定位。")
-                    if build_stats["errors"]:
-                        self._log("Librarian Agent", f"有 {len(build_stats['errors'])} 份资料未能建立正文索引，详情已记入任务记录。")
-                except Exception as exc:
-                    logging.getLogger(__name__).exception("Local RAG retrieval failed")
-                    self.rag_retrieval_stats = {"enabled": False, "error_type": type(exc).__name__}
-                    self._log("Librarian Agent", "正文向量检索暂不可用，本次继续使用摘要筛选与原文精读。请检查嵌入模型服务和本地索引。")
             selected_names = ", ".join(item.file_name for item in selection.selected)
             print(f"[Librarian Agent] Selected {len(selection.selected)} local document(s): {selected_names}")
             self._log(
@@ -1235,7 +1150,7 @@ class ThreeAgentService:
                     image_text=image_candidate_text, sections_text=section_text,
                     framework_text=framework_text,
                     detail_profile=self.detail_profile,
-                    evidence_text=(self.rag_retrieval_context + "\n\n" if self.rag_retrieval_context else "") + (pack_sources(self.source_catalog, self.request.task, budget=50000)
+                    evidence_text=(pack_sources(self.source_catalog, self.request.task, budget=50000)
                                    or packed["text"]),
                     method_context=(
                         f"检索记录时间：{getattr(self, 'started_at', self._now_iso())}；"
@@ -1243,7 +1158,6 @@ class ThreeAgentService:
                         f"本地纳入资料数：{len(self.selected_local_papers)}；"
                         f"每轮精读/抓取上限配置：{self.request.max_search_results}。"
                         + ("本地资料按题名、摘要与文件名的主题匹配进行初筛；" if self.selected_local_papers else "本次未纳入本地资料；")
-                        + ("入选资料经过正文分块向量检索，召回片段保留原文来源定位；" if self.rag_retrieval_context else "")
                         +
                         "对选定资料进行主题归纳和来源对照。尚未进行最终报告证据核验，不能声称核验通过。"
                     ),
@@ -1640,8 +1554,6 @@ class ThreeAgentService:
             ],
             "task_template_id": self.request.task_template_id,
             "selected_source_count": len(self.selected_local_papers),
-            "local_rag": self.rag_retrieval_stats,
-            "library_rag": self.library_rag_stats,
             "selected_source_files": [item.file_name for item in self.selected_local_papers],
             "report_image_count": inserted_report_image_count,
             "report_image_inserted_count": inserted_report_image_count,
@@ -1745,10 +1657,14 @@ class ThreeAgentService:
         
         # 调用 utils.py 中的函数，生成三种格式的文件，存入 outputs 文件夹
         md_path = await write_text_to_md(final_report, filename)
-        pdf_path = await write_md_to_pdf(final_report, filename, self.report_format_profile)
         word_path = await write_md_to_word(final_report, filename, self.report_format_profile)
+        pdf_path = await write_md_to_pdf(final_report, filename, self.report_format_profile)
         export_status = {"markdown": bool(md_path), "pdf": bool(pdf_path), "word": bool(word_path)}
         export_errors = [f"{name}导出失败" for name, succeeded in export_status.items() if not succeeded]
+        if self.report_format_profile.get("template") and not pdf_path:
+            message = "模板 PDF 转换未完成，请检查本机 Word 或 LibreOffice 转换服务；已生成的 Word 可以继续下载。"
+            export_errors.append(message)
+            self._log("System", message)
         completed_elapsed = time.perf_counter() - started_perf
         completed_at = self._now_iso()
         progress_snapshot = get_report_progress(self.task_id, include_running_duration=True) or {}

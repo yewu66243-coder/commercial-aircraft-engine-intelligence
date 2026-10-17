@@ -18,7 +18,7 @@ from urllib.parse import unquote, urlparse
 
 import mistune
 
-from .format_profile import normalize_report_format_profile
+from .format_profile import LATIN_REPORT_FONTS, normalize_report_format_profile
 
 _INVALID_XML = re.compile(r"[\x00-\x08\x0b\x0c\x0e-\x1f\ud800-\udfff\ufffe\uffff]")
 _ANCHOR = re.compile(r'<a\s+(?:id|name)=[\"\']([^\"\']+)[\"\']\s*>\s*</a>', re.I)
@@ -264,7 +264,8 @@ def _font(font, chinese="SimSun", size=12, bold=False):
     from docx.oxml import OxmlElement
     from docx.oxml.ns import qn
     from docx.shared import Pt, RGBColor
-    font.name, font.size, font.bold = "Times New Roman", Pt(size), bold
+    latin_font = chinese if chinese in LATIN_REPORT_FONTS else "Times New Roman"
+    font.name, font.size, font.bold = latin_font, Pt(size), bold
     font.color.rgb = RGBColor(0, 0, 0)
     rpr = font._element.get_or_add_rPr()
     fonts = rpr.find(qn("w:rFonts"))
@@ -272,7 +273,7 @@ def _font(font, chinese="SimSun", size=12, bold=False):
         fonts = OxmlElement("w:rFonts")
         rpr.insert(0, fonts)
     for attribute in ("ascii", "hAnsi", "cs"):
-        fonts.set(qn("w:" + attribute), "Times New Roman")
+        fonts.set(qn("w:" + attribute), latin_font)
     fonts.set(qn("w:eastAsia"), chinese)
     for attribute in ("asciiTheme", "hAnsiTheme", "eastAsiaTheme", "cstheme"):
         fonts.attrib.pop(qn("w:" + attribute), None)
@@ -298,13 +299,13 @@ def _word_inline(paragraph, tokens, bold=False, italic=False):
                 hyperlink.set(qn("r:id"), paragraph.part.relate_to(url, RT.HYPERLINK, is_external=True))
             hyperlink.set(qn("w:history"), "1")
             run = paragraph.add_run(_plain(token.get("children", [])))
-            run.bold, run.italic = bold, italic
+            run.bold, run.italic = True if bold else None, True if italic else None
             hyperlink.append(run._r)
             paragraph._p.append(hyperlink)
         elif kind in {"text", "codespan", "softbreak", "linebreak"}:
             # A Markdown source newline is flowing whitespace, not Shift+Enter.
             run = paragraph.add_run(" " if kind == "softbreak" else "\n" if kind == "linebreak" else token.get("raw", ""))
-            run.bold, run.italic = bold, italic
+            run.bold, run.italic = True if bold else None, True if italic else None
         elif kind not in {"inline_html", "image"}:
             _word_inline(paragraph, token.get("children", []), bold, italic)
 
@@ -414,7 +415,19 @@ def _add_cover(doc, title: str, report_label: str = "技术情报研究报告", 
 def _add_word_toc(doc, profile: dict | None = None):
     from docx.shared import Pt
     profile = normalize_report_format_profile(profile)
-    _display_heading(doc, "目录", profile["size"]["heading1"], profile["font"]["heading"])
+    if profile.get("template"):
+        from docx.enum.style import WD_STYLE_TYPE
+        from docx.oxml import OxmlElement
+        from docx.oxml.ns import qn
+        name = "Report Contents Title"
+        style = doc.styles[name] if name in doc.styles else doc.styles.add_style(name, WD_STYLE_TYPE.PARAGRAPH)
+        style.base_style = doc.styles["Heading 1"]
+        outline = OxmlElement("w:outlineLvl")
+        outline.set(qn("w:val"), "9")
+        style.element.get_or_add_pPr().append(outline)
+        doc.add_paragraph("目录", name)
+    else:
+        _display_heading(doc, "目录", profile["size"]["heading1"], profile["font"]["heading"])
     paragraph = doc.add_paragraph()
     paragraph.paragraph_format.first_line_indent = Pt(0)
     _field(paragraph, 'TOC \\o "1-2" \\h \\z \\u', "目录将在 Word 中自动更新")
@@ -435,6 +448,8 @@ def _update_word_fields(path: Path) -> bool:
         pythoncom.CoInitialize()
         word = win32com.client.DispatchEx("Word.Application")
         word.Visible = False
+        word.DisplayAlerts = 0
+        word.AutomationSecurity = 3
         doc = word.Documents.Open(str(path.resolve()))
         for toc in doc.TablesOfContents:
             toc.Update()
@@ -565,8 +580,10 @@ def _word_table(doc, token):
     rows, widths = _table_rows(token), _column_widths(_table_rows(token))
     table = doc.add_table(rows=0, cols=len(widths))
     table.autofit = False
+    section = doc.sections[-1]
+    usable_mm = min(160, (section.page_width - section.left_margin - section.right_margin) / 36000)
     for column, width in zip(table.columns, widths):
-        column.width = Mm(160 * width)
+        column.width = Mm(usable_mm * width)
     borders = OxmlElement("w:tblBorders")
     for edge in ("top", "left", "bottom", "right", "insideH", "insideV"):
         border = OxmlElement("w:" + edge)
@@ -587,7 +604,7 @@ def _word_table(doc, token):
         if index == 0:
             row._tr.get_or_add_trPr().append(OxmlElement("w:tblHeader"))
         for col, cell in enumerate(row.cells):
-            cell.width = Mm(160 * widths[col])
+            cell.width = Mm(usable_mm * widths[col])
             cell.vertical_alignment = WD_CELL_VERTICAL_ALIGNMENT.CENTER
             if index == 0 or index % 2 == 0:
                 shade = OxmlElement("w:shd")
@@ -624,10 +641,19 @@ def render_word(text: str, destination: str | Path, base_path: Path | str | None
     blocks = _blocks(text)
     title = next((b["plain"] for b in blocks if b["role"] == "title"), "研究报告")
     format_profile = normalize_report_format_profile(format_profile)
-    doc = Document()
-    _configure_document(doc, title, format_profile)
-    if format_profile["layout"].get("cover", True):
+    template_mode = bool(format_profile.get("template"))
+    retained_cover = False
+    if template_mode:
+        from .template_store import prepare_template_document, resolve_template_profile
+        format_profile = resolve_template_profile(format_profile)
+        doc, retained_cover = prepare_template_document(format_profile, title)
+    else:
+        doc = Document()
+        _configure_document(doc, title, format_profile)
+    if format_profile["layout"].get("cover", True) and not retained_cover:
         _add_cover(doc, title, profile=format_profile)
+    elif not format_profile["layout"].get("cover", True):
+        doc.add_paragraph(title, "Title")
     known_anchors = set()
     styles = {"abstract": "Report Abstract", "keywords": "Report Keywords", "caption": "Report Caption", "source": "Report Source", "references": "Report Reference", "toc": "Report Contents"}
     skipping_toc = False
@@ -649,7 +675,7 @@ def render_word(text: str, destination: str | Path, base_path: Path | str | None
                 doc.add_page_break()
             style = "Title" if role == "title" else "Heading " + str(min(5, max(1, token.get("attrs", {}).get("level", 2) - 1)))
             paragraph = doc.add_paragraph(style=style)
-            _word_inline(paragraph, token.get("children", []), bold=True)
+            _word_inline(paragraph, token.get("children", []), bold=not template_mode)
             _word_bookmarks(paragraph, token.get("anchors", []), known_anchors)
         elif skipping_toc:
             continue
@@ -670,7 +696,9 @@ def render_word(text: str, destination: str | Path, base_path: Path | str | None
                         source.save(buffer, format="PNG")
                         buffer.seek(0)
                         width, height = source.size
-                        scale = min(160 / width, 175 / height)
+                        section = doc.sections[-1]
+                        usable = min(160, (section.page_width - section.left_margin - section.right_margin) / 36000)
+                        scale = min(usable / width, 175 / height)
                         shape = paragraph.add_run().add_picture(buffer, width=Mm(width * scale), height=Mm(height * scale))
                         shape._inline.docPr.set("descr", alt)
                 else:
@@ -714,7 +742,8 @@ def render_word(text: str, destination: str | Path, base_path: Path | str | None
             if token.get("figure_source"):
                 paragraph.alignment = Align.CENTER
             elif role == "references":
-                paragraph.paragraph_format.left_indent, paragraph.paragraph_format.first_line_indent = Pt(24), Pt(-24)
+                if not template_mode:
+                    paragraph.paragraph_format.left_indent, paragraph.paragraph_format.first_line_indent = Pt(24), Pt(-24)
                 paragraph.paragraph_format.keep_together = False
             elif role == "caption":
                 paragraph.paragraph_format.first_line_indent = Pt(0)
@@ -725,6 +754,69 @@ def render_word(text: str, destination: str | Path, base_path: Path | str | None
     _update_word_fields(path)
 
 
+def convert_word_to_pdf(source: str | Path, destination: str | Path) -> None:
+    """Convert the actual Word layout; do not silently replace it with HTML."""
+    import shutil
+    import subprocess
+    from tempfile import TemporaryDirectory
+    source, destination = Path(source).resolve(), Path(destination).resolve()
+    destination.parent.mkdir(parents=True, exist_ok=True)
+    word_failure = None
+    if sys.platform == "win32":
+        word = document = None
+        initialized = False
+        try:
+            import pythoncom
+            import win32com.client
+            pythoncom.CoInitialize()
+            initialized = True
+            word = win32com.client.DispatchEx("Word.Application")
+            word.Visible = False
+            word.DisplayAlerts = 0
+            word.AutomationSecurity = 3
+            document = word.Documents.Open(str(source), ReadOnly=True, AddToRecentFiles=False)
+            for toc in document.TablesOfContents:
+                toc.Update()
+            document.ExportAsFixedFormat(str(destination), 17)
+            return
+        except Exception as exc:
+            word_failure = exc
+        finally:
+            if document is not None:
+                try:
+                    document.Close(False)
+                except Exception:
+                    pass
+            if word is not None:
+                try:
+                    word.Quit()
+                except Exception:
+                    pass
+            if initialized:
+                pythoncom.CoUninitialize()
+    executable = os.environ.get("REPORT_LIBREOFFICE_PATH") or shutil.which("soffice")
+    if not executable:
+        for folder in (os.environ.get("ProgramFiles", ""), os.environ.get("ProgramFiles(x86)", "")):
+            candidate = Path(folder) / "LibreOffice" / "program" / "soffice.exe"
+            if candidate.is_file():
+                executable = str(candidate)
+                break
+    if not executable:
+        if word_failure is not None and not isinstance(word_failure, ImportError):
+            raise RuntimeError("模板 Word 已生成，但 Word 自动转换服务不可用。请先在运行系统的账户中正常打开 Word 完成初始化，或安装 LibreOffice 后重试。") from word_failure
+        raise RuntimeError("模板 Word 已生成；模板 PDF 转换需要 Microsoft Word 或 LibreOffice。请安装其中之一后重试。")
+    with TemporaryDirectory(prefix="report-pdf-") as temporary:
+        output = Path(temporary)
+        result = subprocess.run([executable, f"-env:UserInstallation={(output / 'profile').as_uri()}",
+                                 "--headless", "--convert-to", "pdf", "--outdir", str(output), str(source)],
+                                capture_output=True, timeout=120,
+                                creationflags=0x08000000 if sys.platform == "win32" else 0)
+        generated = output / source.with_suffix(".pdf").name
+        if result.returncode or not generated.is_file():
+            raise RuntimeError("模板 PDF 转换失败，请确认 Word 文件可正常打开，并检查本机文档转换服务。")
+        shutil.copyfile(generated, destination)
+
+
 def _pdf_profile_css(format_profile: dict | None = None) -> str:
     profile = normalize_report_format_profile(format_profile)
     font = profile["font"]
@@ -732,23 +824,26 @@ def _pdf_profile_css(format_profile: dict | None = None) -> str:
     layout = profile["layout"]
     page = "Letter" if layout["page"] == "Letter" else "A4"
     margin = layout["margin_mm"]
+    def family(name):
+        primary = f'"{name}", "Times New Roman"' if name in LATIN_REPORT_FONTS else f'"Times New Roman", "{name}"'
+        return primary + ', "SimSun", "Noto Serif CJK SC", serif'
     return f"""
 @page {{
     size: {page};
     margin: {margin}mm;
 }}
 body {{
-    font-family: "Times New Roman", "{font['body']}", "Noto Serif CJK SC", serif;
+    font-family: {family(font['body'])};
     font-size: {size['body']}pt;
     line-height: {layout['line_spacing']};
 }}
 h1, h2, h3, h4, h5, h6 {{
-    font-family: "Times New Roman", "{font['heading']}", "{font['body']}", serif;
+    font-family: {family(font['heading'])};
 }}
 h2 {{ font-size: {size['heading1']}pt; }}
 h3 {{ font-size: {size['heading2']}pt; }}
 h4, h5, h6 {{ font-size: {size['heading3']}pt; }}
-.references {{ font-family: "Times New Roman", "{font['reference']}", serif; font-size: {size['reference']}pt; }}
+.references {{ font-family: {family(font['reference'])}; font-size: {size['reference']}pt; }}
 figcaption, .caption, .source, table, pre {{ font-size: {size['caption']}pt; }}
 """
 

@@ -209,7 +209,7 @@ class FormalExportTests(unittest.TestCase):
 
     def test_heading_runs_inherit_their_real_heading_sizes_and_fonts(self):
         doc = self.make_doc()
-        for name, size in (("Title", 22), ("Heading 1", 15), ("Heading 2", 13)):
+        for name, size in (("Title", 18), ("Heading 1", 15), ("Heading 2", 13)):
             heading = next(p for p in doc.paragraphs if p.style.name == name)
             self.assertEqual(heading.style.font.size, Pt(size))
             self.assertEqual(heading.style._element.rPr.rFonts.get(qn("w:eastAsia")), "SimHei")

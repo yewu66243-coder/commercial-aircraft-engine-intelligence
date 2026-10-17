@@ -32,12 +32,22 @@ DEFAULT_REPORT_FORMAT_PROFILE: Dict[str, Any] = {
 }
 
 
+LATIN_REPORT_FONTS = frozenset({"Times New Roman", "Arial", "Calibri", "Cambria", "Georgia"})
+
 _FONT_ALIASES = {
     "宋体": "SimSun",
     "黑体": "SimHei",
     "微软雅黑": "Microsoft YaHei",
     "楷体": "KaiTi",
     "仿宋": "FangSong",
+    "等线": "DengXian",
+    "华文中宋": "STZhongsong",
+    "华文宋体": "STSong",
+    "华文仿宋": "STFangsong",
+    "华文楷体": "STKaiti",
+    "华文细黑": "STXihei",
+    "隶书": "LiSu",
+    "幼圆": "YouYuan",
     "times new roman": "Times New Roman",
     "simsun": "SimSun",
     "simhei": "SimHei",
@@ -45,6 +55,7 @@ _FONT_ALIASES = {
     "kaiti": "KaiTi",
     "fangsong": "FangSong",
 }
+_FONT_ALIASES.update({name.lower(): name for name in list(_FONT_ALIASES.values()) + sorted(LATIN_REPORT_FONTS)})
 
 
 def _clean_font(value: Any, fallback: str) -> str:
@@ -139,6 +150,30 @@ def normalize_report_format_profile(value: Any) -> Dict[str, Any]:
     profile["layout"]["cover"] = _bool(layout.get("cover"), profile["layout"]["cover"])
     profile["layout"]["numbering"] = _bool(layout.get("numbering"), profile["layout"]["numbering"])
     profile["chapters"] = normalize_chapters(value.get("chapters"))
+    template = value.get("template")
+    if isinstance(template, dict) and re.fullmatch(r"[a-f0-9]{24}", str(template.get("id", ""))):
+        overrides = template.get("overrides") if isinstance(template.get("overrides"), list) else []
+        profile["template"] = {
+            "id": template["id"],
+            "overrides": list(dict.fromkeys(p for p in overrides if isinstance(p, str)))[:20],
+        }
+        # Imported templates may use fixed-point line spacing and asymmetric margins.
+        for field in ("page_width_mm", "page_height_mm"):
+            if field in layout:
+                profile["layout"][field] = _number(layout[field], 210 if field == "page_width_mm" else 297, 100, 600)
+        for side in ("top", "bottom", "left", "right"):
+            field = f"margin_{side}_mm"
+            if field in layout:
+                profile["layout"][field] = _number(layout[field], 25, 0, 100)
+        rule = layout.get("line_spacing_rule", "auto")
+        profile["layout"]["line_spacing_rule"] = rule if rule in {"auto", "exact", "atLeast"} else "auto"
+        profile["layout"]["line_spacing"] = _number(layout.get("line_spacing"), 1.5, 0.5,
+                                                     100 if rule != "auto" else 5)
+        for role in ("heading2", "heading3", "caption"):
+            if role in font:
+                profile["font"][role] = _clean_font(font[role], profile["font"]["heading"])
+        for role in profile["size"]:
+            profile["size"][role] = _number(size.get(role), profile["size"][role], 6, 72)
     return profile
 
 

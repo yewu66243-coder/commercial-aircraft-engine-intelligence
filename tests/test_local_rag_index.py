@@ -123,7 +123,7 @@ class LocalRagTests(unittest.TestCase):
 
 
 class RagServiceTests(unittest.IsolatedAsyncioTestCase):
-    async def run_selection(self, fail=False):
+    async def run_selection(self, has_documents=True):
         from three_agent_service import ThreeAgentService
         from unittest.mock import Mock
 
@@ -133,33 +133,30 @@ class RagServiceTests(unittest.IsolatedAsyncioTestCase):
         service.selected_search_scopes = lambda: {"papers"}
         service.demand_profile_summary = lambda: "test"
         service._log = Mock()
-        service.rag_retrieval_context = ""
-        service.rag_retrieval_stats = {}
         source = SelectedLocalPaper("engine", "engine.txt", "engine.txt", 1)
-        selection = SimpleNamespace(has_documents=True, selected=[source], doc_path="selected")
-        stats = {"errors": [], "indexed_chunks": 1}
+        selection = SimpleNamespace(has_documents=has_documents, selected=[source],
+                                    doc_path="selected", reason="no matching abstracts")
         with patch.dict("os.environ", {"LOCAL_RAG_ENABLED": "true"}), \
-             patch("three_agent_service.search_library", return_value={"matches": [], "chunk_count": 0}), \
              patch("three_agent_service.prepare_local_docs_for_query", return_value=selection), \
-             patch("three_agent_service.build_or_update_local_rag_index", return_value=stats,
-                   side_effect=RuntimeError("offline") if fail else None), \
-             patch("three_agent_service.retrieve_local_rag_matches",
-                   return_value={"context": "source excerpt", "matches": []}), \
-             patch("three_agent_service.logging.getLogger"):
+             patch("gpt_researcher.document.library_rag.search_library") as search, \
+             patch("gpt_researcher.document.local_rag.build_or_update_local_rag_index") as build, \
+             patch("gpt_researcher.document.local_rag.retrieve_local_rag_matches") as retrieve:
             await service.pre_search_abstracts()
+            search.assert_not_called()
+            build.assert_not_called()
+            retrieve.assert_not_called()
         return service
 
-    async def test_pipeline_receives_context(self):
+    async def test_pipeline_uses_abstract_selection_without_vector_retrieval(self):
         service = await self.run_selection()
-        self.assertEqual(service.rag_retrieval_context, "source excerpt")
-        self.assertTrue(service.rag_retrieval_stats["enabled"])
-
-    async def test_pipeline_falls_back_to_selected_documents(self):
-        service = await self.run_selection(fail=True)
-        self.assertFalse(service.rag_retrieval_stats["enabled"])
         self.assertEqual(service.local_doc_path, "selected")
         self.assertEqual(len(service.selected_local_papers), 1)
-        self.assertEqual(service.rag_retrieval_context, "")
+        self.assertFalse(hasattr(service, "rag_retrieval_context"))
+
+    async def test_empty_selection_does_not_trigger_vector_index_build(self):
+        service = await self.run_selection(has_documents=False)
+        self.assertTrue(any("no matching abstracts" in str(call)
+                            for call in service._log.call_args_list))
 
 
 if __name__ == "__main__":

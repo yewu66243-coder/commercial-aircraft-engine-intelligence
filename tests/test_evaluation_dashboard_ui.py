@@ -15,8 +15,9 @@ def tag_of(identifier: str) -> str:
     return HTML[start:end + 1]
 
 
-def test_markup_and_runtime_wiring_exist():
+def test_customer_preview_omits_quality_banner_and_evaluation_panel():
     for identifier in (
+        "reportQualityStatus",
         "evaluationPanel",
         "evaluationEntityPrecision",
         "evaluationEntityRecallF1",
@@ -28,29 +29,16 @@ def test_markup_and_runtime_wiring_exist():
         "evaluationClaimSupportStatus",
         "evaluationCategoryBody",
     ):
-        assert f'id="{identifier}"' in HTML, identifier
-
-    assert HTML.index('id="evaluationPanel"') < HTML.index('id="reportContainer"')
-    assert "/site/evaluation_panel.js?v=evaluation-dashboard-20260921" in HTML
-    assert "/site/styles.css?v=evaluation-dashboard-20260921" in HTML
-    assert "/site/scripts.js?v=evaluation-dashboard-20260921" in HTML
-    assert "window.EvaluationPanel?.reset()" in SCRIPT
-    assert "window.EvaluationPanel?.render(" in SCRIPT
+        assert f'id="{identifier}"' not in HTML, identifier
+    assert "/site/evaluation_panel.js" not in HTML
+    assert 'id="reportContainer"' in HTML
 
 
-def test_action_controls_start_disabled_and_expose_status():
-    input_tag = tag_of("evaluationGroundTruthInput")
-    assert 'type="file"' in input_tag
-    assert "hidden" in input_tag
-    assert 'accept=".json,.xlsx"' in input_tag
-
-    assert "disabled" in tag_of("evaluationRerunButton")
-    assert 'aria-disabled="true"' in tag_of("evaluationDownloadWord")
-    assert 'aria-disabled="true"' in tag_of("evaluationDownloadPdf")
-
-    status_tag = tag_of("evaluationActionStatus")
-    assert 'role="status"' in status_tag
-    assert 'aria-live="polite"' in status_tag
+def test_report_downloads_and_actual_error_feedback_remain_available():
+    for identifier in ("downloadLinkMdTop", "downloadLinkWordTop", "downloadLinkTop"):
+        assert "disabled" in tag_of(identifier)
+    assert "addAgentResponse({ output: renderReportError(errorInfo) });" in SCRIPT
+    assert "exportErrors.forEach(message => addAgentResponse" in SCRIPT
 
 
 def test_scripts_bind_run_id_task_and_form_upload():
@@ -107,29 +95,18 @@ def test_action_failures_never_touch_the_current_report():
     assert "lastEvaluationSummary = null" not in block
 
 
-def test_four_cards_follow_the_confirmed_order():
-    positions = [
-        HTML.index('id="evaluationEntityPrecision"'),
-        HTML.index('id="evaluationEntityRecallF1"'),
-        HTML.index('id="evaluationLinkAccessibility"'),
-        HTML.index('id="evaluationClaimSupport"'),
-    ]
-
-    assert positions == sorted(positions)
-    assert "实体 F1 90% · 链接可访问率 98% · 结论支撑准确率 90%" in HTML
+def test_web_source_tracking_is_not_removed_with_evaluation():
+    assert 'id="webSourceTracking"' in HTML
+    assert 'id="webSourceRows"' in HTML
 
 
-def test_ground_truth_upload_and_rerun_controls_exist():
-    assert 'id="evaluationGroundTruthInput"' in HTML
-    assert 'accept=".json,.xlsx"' in HTML
-    assert 'id="evaluationUploadButton"' in HTML
-    assert 'id="evaluationRerunButton"' in HTML
-    assert "重新测评" in HTML
-    assert 'id="evaluationDownloadWord"' in HTML
-    assert 'id="evaluationDownloadPdf"' in HTML
-    assert 'id="evaluationGroundTruthStatus"' in HTML
-    assert 'id="evaluationActionStatus"' in HTML
-    assert 'aria-live="polite"' in HTML
+def test_evaluation_controls_and_downloads_are_not_exposed():
+    for identifier in ("evaluationGroundTruthInput", "evaluationUploadButton", "evaluationRerunButton",
+                       "evaluationDownloadWord", "evaluationDownloadPdf", "evaluationGroundTruthStatus", "evaluationActionStatus"):
+        assert f'id="{identifier}"' not in HTML
+    assert "    initEvaluationControls();" not in SCRIPT
+    assert "        renderEvaluation(lastEvaluationSummary);" not in SCRIPT
+    assert '指标测评：${evaluation.assessment.overall}' not in SCRIPT
 
 
 def test_scripts_call_evaluation_endpoints_without_rerunning_research():

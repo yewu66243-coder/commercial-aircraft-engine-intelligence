@@ -3,7 +3,6 @@ const GPTResearcher = (() => {
   let connectionTimeout = null;
   let conversationHistory = [];
   let isInitialLoad = true; // Flag to track initial page load
-  let cookiesEnabled = true; // Flag to track if cookies are enabled
   let allReports = ''; // Store all reports cumulatively
   let currentReport = ''; // Store the current report (will be overwritten)
   let isFirstReport = true; // Flag to track if this is the first report
@@ -47,12 +46,6 @@ const GPTResearcher = (() => {
   };
   let localLibraryStatsCache = {};
   let coverageRefreshTimer = null;
-  let uploadIndexPollTimer = null;
-  let uploadIndexHideTimer = null;
-  let uploadIndexLastJobs = [];
-  const uploadIndexLastStatuses = new Map();
-  const uploadIndexCompletedAt = new Map();
-  const UPLOAD_INDEX_DONE_VISIBLE_MS = 10000;
   let intelligenceTemplateCache = {
     demand_models: [],
     task_templates: [],
@@ -158,8 +151,9 @@ const GPTResearcher = (() => {
     const list = document.getElementById('customModelList');
     if (!list) return;
     const providers = (modelProviderCatalog.providers || []).filter(item => item.custom);
+    setText('customModelCount', String(providers.length));
     if (!providers.length) {
-      list.innerHTML = '<div class="empty-state">暂无自定义模型。保存后会出现在详细报告的大模型列表中。</div>';
+      list.innerHTML = '<div class="empty-state">暂无已保存的 API 配置。</div>';
       return;
     }
     list.innerHTML = providers.map((provider) => `
@@ -168,7 +162,7 @@ const GPTResearcher = (() => {
           <strong>${escapeHtml(provider.name || provider.id)}</strong>
           <small>${escapeHtml((provider.models || []).join('，') || provider.model || '-')} · ${escapeHtml(provider.endpoint_host || '-')} · ${provider.configured ? '已配置' : '未配置'}${provider.api_key_preview ? ` · ${escapeHtml(provider.api_key_preview)}` : ''}</small>
         </div>
-        <button type="button" class="delete-custom-model-btn" data-provider-id="${escapeHtml(provider.id)}" title="删除">×</button>
+        <button type="button" class="delete-custom-model-btn" data-provider-id="${escapeHtml(provider.id)}" title="删除 API 配置：${escapeHtml(provider.name || provider.id)}" aria-label="删除 API 配置：${escapeHtml(provider.name || provider.id)}"><i class="fas fa-trash-alt" aria-hidden="true"></i></button>
       </div>
     `).join('');
   };
@@ -268,7 +262,8 @@ const GPTResearcher = (() => {
   };
 
   const deleteCustomModelProvider = async (providerId) => {
-    if (!providerId || !confirm('确定删除这个自定义模型配置吗？')) return;
+    const provider = (modelProviderCatalog.providers || []).find(item => item.id === providerId);
+    if (!providerId || !confirm(`确定删除“${provider?.name || '此 API'}”的本地配置吗？这不会注销服务商账户或使 API Key 失效。`)) return;
     try {
       const response = await fetch(`/api/model-providers/custom/${encodeURIComponent(providerId)}`, {
         method: 'DELETE',
@@ -278,8 +273,8 @@ const GPTResearcher = (() => {
       if (data.catalog) modelProviderCatalog = data.catalog;
       syncReportDetailModel();
       renderCustomModelProviders();
-      setCustomModelStatus('模型配置已删除。', 'ready');
-      showToast('自定义模型已删除');
+      setCustomModelStatus('API 配置已删除，模型选择列表已更新。', 'ready');
+      showToast('API 配置已删除');
     } catch (error) {
       console.error('删除自定义模型失败:', error);
       setCustomModelStatus(`删除失败：${error.message}`, 'unavailable');
@@ -455,9 +450,6 @@ const GPTResearcher = (() => {
   };
 
   const init = () => {
-    // Check if cookies are enabled
-    checkCookiesEnabled();
-
     // Load history immediately on page load
     loadConversationHistory();
 
@@ -496,8 +488,8 @@ const GPTResearcher = (() => {
     // Initialize local document library panel
     initLocalLibraryPanel();
 
-    // Initialize evaluation upload and rerun controls
-    initEvaluationControls();
+    // Initialize report template controls
+    initReportTemplates();
 
     // Initialize demand model, task template and source template panels
     initIntelligenceTemplates();
@@ -528,34 +520,10 @@ const GPTResearcher = (() => {
     }
   }
 
-  // Check if cookies are enabled
-  const checkCookiesEnabled = () => {
-    try {
-      // Try to set a test cookie
-      document.cookie = "testcookie=1; path=/";
-      const cookieEnabled = document.cookie.indexOf("testcookie") !== -1;
-
-      if (!cookieEnabled) {
-        console.warn("Cookies are disabled in this browser");
-        cookiesEnabled = false;
-        showToast("Cookies are disabled. History will use localStorage instead.", 5000);
-      } else {
-        // Clean up test cookie
-        document.cookie = "testcookie=; expires=Thu, 01 Jan 1970 00:00:00 UTC; path=/;";
-        cookiesEnabled = true;
-      }
-
-      return cookieEnabled;
-    } catch (e) {
-      console.error("Error checking cookies:", e);
-      cookiesEnabled = false;
-      return false;
-    }
-  }
 
   // Initialize conversation history panel functionality
   const initHistoryPanel = () => {
-    // Load history from cookie
+    // Load history from browser local storage.
     loadConversationHistory();
 
     // Setup history panel toggle button
@@ -632,7 +600,7 @@ const GPTResearcher = (() => {
       importBtn.innerHTML = '<i class="fas fa-file-import"></i>';
       importBtn.addEventListener('click', triggerImportHistory);
 
-      // Add cookie debug button with enhanced styling and tooltip
+      // Add storage status button.
       const debugBtn = document.createElement('button');
       debugBtn.className = 'history-action-btn';
       debugBtn.title = 'Check storage status';
@@ -940,96 +908,57 @@ const GPTResearcher = (() => {
     }
   }
 
-  // Load conversation history from cookie
+  // Migrate legacy cookies only after the full history has been persisted.
   const loadConversationHistory = () => {
     try {
-      const storedHistory = getCookie('conversationHistory');
-      if (storedHistory && storedHistory.trim() !== '') {
-        try {
-          const parsedHistory = JSON.parse(storedHistory);
-          if (Array.isArray(parsedHistory)) {
-            conversationHistory = parsedHistory;
-            console.debug('Loaded research history from storage:', conversationHistory);
-            console.log('Loaded research history:', conversationHistory.length, 'items');
-          } else {
-            console.warn('History storage does not contain an array');
-            conversationHistory = [];
-            deleteCookie('conversationHistory');
-          }
-        } catch (jsonError) {
-          console.error('Invalid JSON in history storage:', jsonError);
-          conversationHistory = [];
-          deleteCookie('conversationHistory');
-        }
-      } else {
-        console.log('No research history found in storage');
-        conversationHistory = [];
+      const result = ReportHistoryStorage.load(localStorage, document);
+      conversationHistory = result.entries;
+      if (result.warning) {
+        console.warn('History migration was not persisted:', result.warning);
+        showToast('历史记录已读取，但迁移保存失败。请导出历史记录备份，检查浏览器存储空间。');
       }
     } catch (error) {
       console.error('Error loading research history from storage:', error);
-      conversationHistory = [];
-      // If JSON parsing fails, delete the corrupt cookie
-      deleteCookie('conversationHistory');
+      showToast('历史记录读取失败，原有数据未删除。请勿清理浏览器数据。');
     }
 
     // Force render after loading
     renderHistoryEntries();
   }
 
-  // Save conversation history to cookie
+  // Store metadata, not report bodies; never silently discard older tasks.
   const saveConversationHistory = () => {
     try {
-      if (conversationHistory.length === 0) {
-        deleteCookie('conversationHistory');
-        console.debug('No history to save, deleted storage');
-        return;
-      }
-
-      // Only keep the last 20 entries
-      let storageHistory = [...conversationHistory];
-      if (storageHistory.length > 20) {
-        storageHistory = storageHistory.slice(0, 20);
-        console.debug('Trimmed history to last 20 entries');
-      }
-
-      // Only keep minimal fields: prompt, links and timestamp
-      storageHistory = storageHistory.map(entry => ({
-        prompt: entry.prompt || '',
-        links: entry.links || {},
-        timestamp: entry.timestamp || new Date().toISOString()
-      }));
-
-      const jsonString = JSON.stringify(storageHistory);
-      console.debug('History JSON size:', jsonString.length, 'characters');
-
-      setCookie('conversationHistory', jsonString, 30);
-
-      if (storageHistory.length > 0 && !isInitialLoad) {
-        showToast('Research history saved!');
-      }
+      ReportHistoryStorage.save(localStorage, document, conversationHistory);
+      return true;
     } catch (error) {
       console.error('Error saving research history:', error);
-      showToast('Error saving history. Some entries may not be saved.');
+      showToast('历史记录保存失败，未自动删除旧记录。请先导出历史记录备份，再检查浏览器存储权限或空间。', 6000);
+      return false;
     }
   }
 
   // Delete a history entry
   const deleteHistoryEntry = (index) => {
     if (confirm('Are you sure you want to delete this research entry?')) {
+      const previousHistory = [...conversationHistory];
       conversationHistory.splice(index, 1);
-      saveConversationHistory();
+      const saved = saveConversationHistory();
+      if (!saved) conversationHistory = previousHistory;
       renderHistoryEntries();
-      showToast('Entry deleted successfully');
+      if (saved) showToast('Entry deleted successfully');
     }
   }
 
   // Clear all conversation history
   const clearConversationHistory = () => {
     if (confirm('Are you sure you want to clear all research history? This cannot be undone.')) {
+      const previousHistory = conversationHistory;
       conversationHistory = [];
-      saveConversationHistory();
+      const saved = saveConversationHistory();
+      if (!saved) conversationHistory = previousHistory;
       renderHistoryEntries();
-      showToast('Research history cleared successfully');
+      if (saved) showToast('Research history cleared successfully');
     }
   }
 
@@ -1319,16 +1248,11 @@ const GPTResearcher = (() => {
     }
 
     conversationHistory.unshift(historyEntry);
-    saveConversationHistory();
+    const saved = saveConversationHistory();
     renderHistoryEntries();
     document.getElementById('historyPanel').classList.add('open');
 
-    // Prompt user about storage method
-    if (cookiesEnabled) {
-      showToast('Research saved! Your history is stored in a browser cookie.');
-    } else {
-      showToast('Research saved! Your history is stored using localStorage.');
-    }
+    if (saved) showToast('历史任务已保存到当前浏览器的本地存储。');
   }
 
   // Function to update the research icon spinning state
@@ -1415,6 +1339,151 @@ const GPTResearcher = (() => {
     return Number.isFinite(value) ? value : fallback;
   };
 
+  let activeReportTemplate = null;
+  let reportTemplates = [];
+  const reportTemplateOverrides = new Set();
+  const formatControlPaths = {
+    formatBodyFont: 'font.body', formatHeadingFont: 'font.heading',
+    formatBodySize: 'size.body', formatHeading1Size: 'size.heading1',
+    formatLineSpacing: 'layout.line_spacing', formatMargin: 'layout.margin_mm',
+    formatCover: 'layout.cover', formatIncludeToc: 'layout.include_toc',
+  };
+  let originalFormatValues = {};
+  let chaptersBeforeTemplate = '';
+
+  const formatFontSizeLabel = (value) => {
+    const names = { 9: '小五', 10.5: '五号', 12: '小四', 14: '四号', 15: '小三', 16: '三号', 18: '小二', 22: '二号', 24: '小一', 26: '一号', 36: '小初', 42: '初号' };
+    return names[Number(value)] ? `${names[Number(value)]} / ${value}pt` : `${value}pt（自定义）`;
+  };
+
+  const setFormatControl = (id, value, label) => {
+    const element = document.getElementById(id);
+    if (!element) return;
+    if (element.type === 'checkbox') { element.checked = Boolean(value); return; }
+    element.querySelectorAll('option[data-imported]').forEach((option) => option.remove());
+    if (![...element.options].some((option) => option.value === String(value))) {
+      const sizeLabel = ['formatBodySize', 'formatHeading1Size'].includes(id) ? formatFontSizeLabel(value) : null;
+      const option = new Option(label || sizeLabel || String(value), String(value));
+      option.dataset.imported = 'true';
+      element.add(option);
+    }
+    element.value = String(value);
+  };
+
+  const selectReportTemplate = (id) => {
+    activeReportTemplate = reportTemplates.find((item) => item.id === id) || null;
+    reportTemplateOverrides.clear();
+    document.getElementById('useTemplateChapters').checked = false;
+    document.getElementById('formatChapters').value = chaptersBeforeTemplate;
+    const summary = document.getElementById('reportTemplateSummary');
+    summary.replaceChildren();
+    summary.hidden = !activeReportTemplate;
+    document.getElementById('templateChaptersLabel').hidden = !activeReportTemplate?.chapters?.length;
+    document.getElementById('previewReportTemplateBtn').disabled = !activeReportTemplate;
+    if (activeReportTemplate) {
+      const profile = activeReportTemplate.profile;
+      const layout = profile.layout;
+      Object.entries(formatControlPaths).forEach(([control, path]) => {
+        const [group, field] = path.split('.');
+        const value = profile[group][field];
+        const label = control === 'formatLineSpacing'
+          ? `${value}${layout.line_spacing_rule === 'auto' || !layout.line_spacing_rule ? '倍' : 'pt（固定/最小行距）'}`
+          : control === 'formatMargin' ? `上 ${value}mm（模板）` : null;
+        setFormatControl(control, value, label);
+      });
+      const rows = [
+        ['纸张', `${layout.page_width_mm} × ${layout.page_height_mm} mm`],
+        ['页边距', `上 ${layout.margin_top_mm} / 下 ${layout.margin_bottom_mm} / 左 ${layout.margin_left_mm} / 右 ${layout.margin_right_mm} mm`],
+        ['正文', `${profile.font.body} · ${formatFontSizeLabel(profile.size.body)}`],
+        ['标题字号', [profile.size.heading1, profile.size.heading2, profile.size.heading3].map(formatFontSizeLabel).join('；')],
+        ['参考文献', `${profile.font.reference} · ${formatFontSizeLabel(profile.size.reference)}`],
+        ['封面', layout.cover ? '沿用模板封面' : '无独立封面'],
+      ];
+      rows.forEach(([name, value]) => {
+        const term = document.createElement('dt'); term.textContent = name;
+        const description = document.createElement('dd'); description.textContent = value;
+        summary.append(term, description);
+      });
+      setText('reportTemplateStatus', activeReportTemplate.notices.join('；') || '模板格式已读取。');
+    } else {
+      Object.entries(originalFormatValues).forEach(([control, value]) => setFormatControl(control, value));
+      setText('reportTemplateStatus', '');
+    }
+    try { localStorage.setItem('reportFormatTemplateId', activeReportTemplate?.id || ''); } catch (_) { /* optional preference */ }
+  };
+
+  const populateReportTemplates = (selected = '') => {
+    const select = document.getElementById('reportTemplateSelect');
+    select.replaceChildren(new Option('系统默认格式', ''));
+    reportTemplates.forEach((item) => select.add(new Option(item.name, item.id)));
+    select.value = reportTemplates.some((item) => item.id === selected) ? selected : '';
+    selectReportTemplate(select.value);
+  };
+
+  const initReportTemplates = async () => {
+    const select = document.getElementById('reportTemplateSelect');
+    if (!select) return;
+    Object.keys(formatControlPaths).forEach((id) => {
+      const control = document.getElementById(id);
+      originalFormatValues[id] = control.type === 'checkbox' ? control.checked : control.value;
+      control.addEventListener('change', () => {
+        if (activeReportTemplate) reportTemplateOverrides.add(formatControlPaths[id]);
+      });
+    });
+    chaptersBeforeTemplate = document.getElementById('formatChapters').value;
+    select.addEventListener('change', () => selectReportTemplate(select.value));
+    document.getElementById('useTemplateChapters').addEventListener('change', (event) => {
+      if (event.target.checked) {
+        chaptersBeforeTemplate = document.getElementById('formatChapters').value;
+        document.getElementById('formatChapters').value = activeReportTemplate.chapters.map((item) => item.title).join('\n');
+      } else {
+        document.getElementById('formatChapters').value = chaptersBeforeTemplate;
+      }
+    });
+    const fileInput = document.getElementById('reportTemplateFile');
+    document.getElementById('importReportTemplateBtn').addEventListener('click', () => fileInput.click());
+    fileInput.addEventListener('change', async () => {
+      const file = fileInput.files[0];
+      if (!file) return;
+      if (!file.name.toLowerCase().endsWith('.docx') || file.size > 10 * 1024 * 1024) {
+        setText('reportTemplateStatus', '请选择不超过 10 MiB 的 .docx 文件。'); fileInput.value = ''; return;
+      }
+      const button = document.getElementById('importReportTemplateBtn');
+      button.disabled = true;
+      setText('reportTemplateStatus', '正在读取模板…');
+      try {
+        const form = new FormData(); form.append('file', file);
+        const response = await fetch('/api/report-templates', { method: 'POST', body: form });
+        if (!response.ok) throw new Error(await readErrorMessage(response));
+        const { template } = await response.json();
+        reportTemplates = [template, ...reportTemplates.filter((item) => item.id !== template.id)];
+        populateReportTemplates(template.id);
+      } catch (error) { setText('reportTemplateStatus', error.message); }
+      finally { button.disabled = false; fileInput.value = ''; }
+    });
+    document.getElementById('previewReportTemplateBtn').addEventListener('click', async (event) => {
+      const button = event.currentTarget; button.disabled = true;
+      try {
+        const response = await fetch('/api/report-templates/preview', { method: 'POST',
+          headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify({ report_format_profile: collectReportFormatProfile() }) });
+        if (!response.ok) throw new Error(await readErrorMessage(response));
+        const url = URL.createObjectURL(await response.blob());
+        const link = document.createElement('a'); link.href = url; link.download = '报告排版示例.docx';
+        link.click(); setTimeout(() => URL.revokeObjectURL(url), 30000);
+      } catch (error) { setText('reportTemplateStatus', error.message); }
+      finally { button.disabled = !activeReportTemplate; }
+    });
+    try {
+      const response = await fetch('/api/report-templates');
+      if (!response.ok) throw new Error(await readErrorMessage(response));
+      reportTemplates = (await response.json()).templates;
+      let selected = '';
+      try { selected = localStorage.getItem('reportFormatTemplateId') || ''; } catch (_) { /* optional preference */ }
+      populateReportTemplates(selected);
+    } catch (_) { setText('reportTemplateStatus', '模板列表暂不可用，请确认后台已重启。'); }
+  };
+
   const collectReportFormatProfile = () => {
     const chapters = (document.getElementById('formatChapters')?.value || '')
       .split(/\r?\n/)
@@ -1423,7 +1492,7 @@ const GPTResearcher = (() => {
       .slice(0, 12)
       .map((title) => ({ title }));
     const heading1 = numberValue('formatHeading1Size', 15);
-    return {
+    const profile = {
       font: {
         body: document.getElementById('formatBodyFont')?.value || 'SimSun',
         heading: document.getElementById('formatHeadingFont')?.value || 'SimHei',
@@ -1447,6 +1516,15 @@ const GPTResearcher = (() => {
       },
       chapters,
     };
+    if (!activeReportTemplate) return profile;
+    const imported = JSON.parse(JSON.stringify(activeReportTemplate.profile));
+    reportTemplateOverrides.forEach((path) => {
+      const [group, field] = path.split('.');
+      imported[group][field] = profile[group][field];
+    });
+    imported.chapters = chapters;
+    imported.template = { id: activeReportTemplate.id, overrides: [...reportTemplateOverrides] };
+    return imported;
   };
 
   const scopeLabelMap = {
@@ -2049,181 +2127,6 @@ const GPTResearcher = (() => {
     }
   };
 
-  const uploadJobTargetLabel = (target) => ({
-    user_docs: '用户资料库',
-    all_papers_pool: '论文池',
-    all_patent_pool: '专利池',
-  }[target] || '本地资料库');
-
-  const uploadJobStatusLabel = (status) => ({
-    queued: '排队',
-    waiting: '等待',
-    indexing: '索引中',
-    ready: '完成',
-    partial: '部分完成',
-    failed: '失败',
-  }[status] || '处理中');
-
-  const uploadJobIsActive = (status) => ['queued', 'waiting', 'indexing'].includes(status);
-
-  const uploadJobShouldAutoHide = (status) => status === 'ready';
-
-  const getVisibleUploadIndexJobs = (jobs = []) => {
-    const now = Date.now();
-    const liveIds = new Set();
-    jobs.forEach((job) => {
-      if (job?.id) liveIds.add(job.id);
-    });
-    uploadIndexCompletedAt.forEach((_, id) => {
-      if (!liveIds.has(id)) uploadIndexCompletedAt.delete(id);
-    });
-    return jobs.filter((job) => {
-      if (!job?.id) return true;
-      if (!uploadJobShouldAutoHide(job.status)) {
-        uploadIndexCompletedAt.delete(job.id);
-        return true;
-      }
-      if (!uploadIndexCompletedAt.has(job.id)) {
-        uploadIndexCompletedAt.set(job.id, now);
-      }
-      return now - uploadIndexCompletedAt.get(job.id) < UPLOAD_INDEX_DONE_VISIBLE_MS;
-    });
-  };
-
-  const scheduleUploadIndexDoneHide = (jobs = []) => {
-    if (uploadIndexHideTimer) {
-      window.clearTimeout(uploadIndexHideTimer);
-      uploadIndexHideTimer = null;
-    }
-    const now = Date.now();
-    const delays = jobs
-      .filter((job) => job?.id && uploadJobShouldAutoHide(job.status))
-      .map((job) => UPLOAD_INDEX_DONE_VISIBLE_MS - (now - (uploadIndexCompletedAt.get(job.id) || now)))
-      .filter((delay) => delay > 0);
-    if (!delays.length) return;
-    uploadIndexHideTimer = window.setTimeout(() => {
-      uploadIndexHideTimer = null;
-      renderUploadIndexJobs(uploadIndexLastJobs);
-    }, Math.min(...delays) + 50);
-  };
-
-  const renderUploadIndexJobs = (jobs = [], { failedToLoad = false } = {}) => {
-    const box = document.getElementById('uploadIndexJobs');
-    if (!box) return;
-    if (!failedToLoad) {
-      uploadIndexLastJobs = Array.isArray(jobs) ? jobs : [];
-    }
-    const visibleJobs = failedToLoad ? [] : getVisibleUploadIndexJobs(uploadIndexLastJobs);
-    box.innerHTML = '';
-    if (!visibleJobs.length && !failedToLoad) {
-      box.hidden = true;
-      scheduleUploadIndexDoneHide(uploadIndexLastJobs);
-      return;
-    }
-    box.hidden = false;
-    if (failedToLoad) {
-      const item = document.createElement('div');
-      item.className = 'upload-index-job';
-      item.dataset.status = 'partial';
-      const text = document.createElement('div');
-      const title = document.createElement('strong');
-      title.textContent = '全文索引状态暂时无法读取';
-      const message = document.createElement('span');
-      message.textContent = '后台任务可能仍在运行，稍后会自动重新读取。';
-      text.append(title, message);
-      item.appendChild(text);
-      box.appendChild(item);
-      return;
-    }
-
-    visibleJobs.forEach((job) => {
-      const item = document.createElement('div');
-      item.className = 'upload-index-job';
-      item.dataset.status = job.status || 'queued';
-
-      const text = document.createElement('div');
-      const title = document.createElement('strong');
-      title.textContent = `${uploadJobTargetLabel(job.target)} · ${job.file_name || '未命名文件'}`;
-      const message = document.createElement('span');
-      message.textContent = `${uploadJobStatusLabel(job.status)}：${job.message || '等待后台处理'}`;
-      text.append(title, message);
-      item.appendChild(text);
-
-      if (job.id && job.id !== 'upload-index-error' && ['failed', 'partial'].includes(job.status)) {
-        const retryButton = document.createElement('button');
-        retryButton.type = 'button';
-        retryButton.className = 'ghost-button';
-        retryButton.dataset.jobId = job.id;
-        retryButton.textContent = '重试';
-        item.appendChild(retryButton);
-      }
-      box.appendChild(item);
-    });
-    scheduleUploadIndexDoneHide(uploadIndexLastJobs);
-  };
-
-  const scheduleUploadIndexPolling = () => {
-    if (uploadIndexPollTimer) return;
-    uploadIndexPollTimer = window.setInterval(() => pollUploadIndexJobs({ silent: true }), 4000);
-  };
-
-  const stopUploadIndexPolling = () => {
-    if (uploadIndexPollTimer) {
-      window.clearInterval(uploadIndexPollTimer);
-      uploadIndexPollTimer = null;
-    }
-  };
-
-  const pollUploadIndexJobs = async ({ silent = false } = {}) => {
-    try {
-      const response = await fetch('/api/local-library/index-jobs');
-      const data = await response.json();
-      if (!response.ok) throw new Error(data.detail || `状态码 ${response.status}`);
-      const jobs = Array.isArray(data.jobs) ? data.jobs : [];
-      renderUploadIndexJobs(jobs);
-
-      let shouldReloadLibrary = false;
-      jobs.forEach((job) => {
-        const previous = uploadIndexLastStatuses.get(job.id);
-        if (previous && previous !== job.status && ['ready', 'partial'].includes(job.status)) {
-          shouldReloadLibrary = true;
-        }
-        uploadIndexLastStatuses.set(job.id, job.status);
-      });
-      if (shouldReloadLibrary) {
-        await loadLocalLibrary();
-      }
-      if (jobs.some((job) => uploadJobIsActive(job.status))) {
-        scheduleUploadIndexPolling();
-      } else {
-        stopUploadIndexPolling();
-      }
-    } catch (error) {
-      console.error('读取全文索引任务失败:', error);
-      if (!silent) {
-        renderUploadIndexJobs([], { failedToLoad: true });
-      }
-      scheduleUploadIndexPolling();
-    }
-  };
-
-  const retryUploadIndexJob = async (jobId) => {
-    try {
-      uploadIndexCompletedAt.delete(jobId);
-      const response = await fetch(`/api/local-library/index-jobs/${encodeURIComponent(jobId)}/retry`, {
-        method: 'POST',
-      });
-      const data = await response.json();
-      if (!response.ok) throw new Error(data.detail || `状态码 ${response.status}`);
-      renderUploadIndexJobs(Array.isArray(data.jobs) ? data.jobs : [data.job].filter(Boolean));
-      scheduleUploadIndexPolling();
-      showToast('已重新加入全文索引队列');
-    } catch (error) {
-      console.error('重试全文索引失败:', error);
-      showToast(`重试失败：${error.message}`);
-    }
-  };
-
   const uploadLocalLibraryFile = async () => {
     const input = document.getElementById('localFileInput');
     const activeTarget = document.querySelector('.upload-target-btn.active');
@@ -2269,21 +2172,10 @@ const GPTResearcher = (() => {
         const extraCount = data.entry_count ? `，当前专利索引 ${data.entry_count} 条` : '';
         setText('uploadStatus', `已上传：${data.file_name}，已写入 ${targetIndexNameMap[target] || '本地索引'}；摘要索引方式：${methodLabel}${extraCount}`);
       }
-      if (data.index_job) {
-        if (data.index_job.id) uploadIndexCompletedAt.delete(data.index_job.id);
-        renderUploadIndexJobs([data.index_job]);
-        scheduleUploadIndexPolling();
-        pollUploadIndexJobs({ silent: true });
-      } else if (data.indexing_error) {
-        renderUploadIndexJobs([{ id: 'upload-index-error', target, file_name: data.file_name, status: 'partial', message: data.indexing_error }]);
-      } else if (data.fulltext_indexing_enabled === false) {
-        renderUploadIndexJobs([]);
-      }
       renderLocalLibrary(data.library);
-      const summaryOnly = data.fulltext_indexing_enabled === false;
       showToast(data.duplicate
-        ? (summaryOnly ? '资料已存在，已复用原文件并跳过全文索引' : '资料已存在，已复用原文件并检查全文索引')
-        : (summaryOnly ? '资料已上传，已更新摘要索引' : '资料已上传，全文索引在后台处理'));
+        ? '资料已存在，已复用原文件并更新摘要索引'
+        : '资料已上传，已更新摘要索引');
     } catch (error) {
       console.error('上传资料失败:', error);
       setText('uploadStatus', `上传失败：${error.message}`);
@@ -2428,14 +2320,6 @@ const GPTResearcher = (() => {
     const uploadButton = document.getElementById('uploadLocalFileBtn');
     if (uploadButton) uploadButton.addEventListener('click', uploadLocalLibraryFile);
 
-    const uploadJobs = document.getElementById('uploadIndexJobs');
-    if (uploadJobs) {
-      uploadJobs.addEventListener('click', (event) => {
-        const button = event.target.closest('button[data-job-id]');
-        if (button) retryUploadIndexJob(button.dataset.jobId);
-      });
-    }
-
     const input = document.getElementById('localFileInput');
     if (input) {
       input.addEventListener('change', () => {
@@ -2574,11 +2458,6 @@ const startResearch = async () => {
     document.getElementById('output').innerHTML = '';
     document.getElementById('reportContainer').innerHTML = '';
     renderWebSourceTracking(null);
-    const qualityStatus = document.getElementById('reportQualityStatus');
-    if (qualityStatus) {
-        qualityStatus.textContent = '正在检索资料并撰写研究报告…';
-        qualityStatus.dataset.state = 'pending';
-    }
     ['downloadLinkTop', 'downloadLinkWordTop', 'downloadLinkMdTop', 'downloadLink', 'downloadLinkWord', 'downloadLinkMd'].forEach(id => {
         const link = document.getElementById(id);
         if (link) {
@@ -2735,38 +2614,18 @@ const startResearch = async () => {
         const statisticsTask = typeof runStatistics.task === 'string' ? runStatistics.task.trim() : '';
         currentEvaluationTask = statisticsTask || document.getElementById('task')?.value?.trim() || '';
         lastEvaluationSummary = runStatistics.evaluation_summary || null;
-        renderEvaluation(lastEvaluationSummary);
 
         // 7. 更新UI状态，结束动画
         lastTaskDurationSeconds = Math.max(0, Math.floor((Date.now() - taskStartTime) / 1000));
         taskStartTime = null;
         updateState('finished');
         const reportState = data.report_status || 'needs_review';
-        const warnings = data.report_quality?.warnings || [];
         const exportErrors = data.export_errors || [];
-        const referenceIssues = data.report_quality?.reference_metadata_issues || [];
-        const referenceMessages = referenceIssues.map(item =>
-            `${item.id} ${item.title || '参考文献'}：缺少 ${(item.missing_fields || []).join('、')}`);
         const resultMessage = reportState === 'draft'
             ? '已保存草稿，综合写作尚未完成。请检查研究记录后重新生成。'
-            : referenceIssues.length
-                ? `报告已生成，${referenceIssues.length} 条参考文献待补全。可下载审阅版。`
-            : reportState === 'needs_review'
-                ? '研究报告已生成，部分结构或来源需要复核。'
-                : data.report_quality?.editorial_review?.passed
-                    ? '研究报告已完成自动校订与来源复查，可以下载。'
-                    : '研究报告已生成，可以审阅和下载。';
-        if (qualityStatus) {
-            qualityStatus.dataset.state = exportErrors.length ? 'error' : referenceIssues.length ? 'needs_review' : reportState;
-            qualityStatus.textContent = [resultMessage, ...referenceMessages, ...warnings, ...exportErrors].join(' ');
-        }
+            : '研究报告已生成，可以审阅和下载。';
         addAgentResponse({ output: resultMessage });
-        referenceMessages.forEach(message => addAgentResponse({ output: message }));
         exportErrors.forEach(message => addAgentResponse({ output: message }));
-        if (evaluation.assessment) {
-            addAgentResponse({ output: `指标测评：${evaluation.assessment.overall}，结果已写入本次运行记录。` });
-        }
-        (evaluation.errors || []).forEach(message => addAgentResponse({ output: message }));
         loadLocalLibrary();
 
         // ================= 修改：将真实的路径保存到历史记录中 =================
@@ -2790,10 +2649,6 @@ const startResearch = async () => {
         taskStartTime = null;
         await stopTaskProgressPolling();
         updateState('error');
-        if (qualityStatus) {
-            qualityStatus.dataset.state = 'error';
-            qualityStatus.textContent = '报告生成失败：' + formatReportErrorText(errorInfo);
-        }
         addAgentResponse({ output: renderReportError(errorInfo) });
     }
   }
@@ -3452,165 +3307,17 @@ const startResearch = async () => {
     }
   }
 
-  // --- Storage Helpers (Cookies or LocalStorage) ---
-  function setCookie(name, value, days) {
-    // Maximum cookie size is around 4KB (4096 bytes)
-    const MAX_COOKIE_SIZE = 4000;
-
-    // If cookies are disabled, use localStorage instead
-    if (!cookiesEnabled) {
-      try {
-        localStorage.setItem(name, value);
-        console.debug(`Data saved to localStorage: ${name}`);
-        return true;
-      } catch (e) {
-        console.error("Error saving to localStorage:", e);
-        return false;
-      }
-    }
-
-    let expires = '';
-    if (days) {
-      const date = new Date();
-      date.setTime(date.getTime() + (days * 24 * 60 * 60 * 1000));
-      expires = '; expires=' + date.toUTCString();
-    }
-
-    // Encode the value
-    const encodedValue = encodeURIComponent(value);
-
-    // Calculate cookie size
-    const cookieSize = (name + '=' + encodedValue + expires + '; path=/').length;
-    console.debug(`Setting cookie: ${name}, size: ${cookieSize} bytes`);
-
-    // If cookie is too large, display warning and truncate history
-    if (cookieSize > MAX_COOKIE_SIZE) {
-      console.warn(`Cookie size (${cookieSize} bytes) exceeds the ${MAX_COOKIE_SIZE} bytes limit!`);
-      showToast('Warning: History too large for cookie storage! Oldest entries will be removed.');
-
-      if (name === 'conversationHistory') {
-        try {
-          // Parse, reduce entries, and try again
-          const historyData = JSON.parse(value);
-          if (Array.isArray(historyData) && historyData.length > 1) {
-            // Remove the last entry and try again recursively
-            const reducedHistory = historyData.slice(0, -1);
-            console.debug(`Reducing history from ${historyData.length} to ${reducedHistory.length} entries`);
-            setCookie(name, JSON.stringify(reducedHistory), days);
-            return; // Exit after recursive call
-          }
-        } catch (e) {
-          console.error('Could not parse history to reduce size:', e);
-        }
-      }
-
-      return false; // Indicate failure
-    }
-
-    // Set the cookie
-    document.cookie = name + '=' + encodedValue + expires + '; path=/';
-    console.debug(`Cookie set: ${name}`);
-    return true; // Indicate success
-  }
-
-  function getCookie(name) {
-    console.debug(`Getting data: ${name}`);
-
-    // If cookies are disabled, use localStorage instead
-    if (!cookiesEnabled) {
-      try {
-        const value = localStorage.getItem(name);
-        if (value) {
-          console.debug(`Data found in localStorage: ${name}, length: ${value.length} chars`);
-          return value;
-        }
-        console.debug(`Data not found in localStorage: ${name}`);
-        return null;
-      } catch (e) {
-        console.error("Error retrieving from localStorage:", e);
-        return null;
-      }
-    }
-
-    const nameEQ = name + '=';
-    const ca = document.cookie.split(';');
-    for (let i = 0; i < ca.length; i++) {
-      let c = ca[i];
-      while (c.charAt(0) == ' ') c = c.substring(1, c.length);
-      if (c.indexOf(nameEQ) == 0) {
-        const value = decodeURIComponent(c.substring(nameEQ.length, c.length));
-        console.debug(`Found cookie: ${name}, length: ${value.length} chars`);
-        return value;
-      }
-    }
-    console.debug(`Cookie not found: ${name}`);
-    return null;
-  }
-
-  function deleteCookie(name) {
-    console.debug(`Deleting storage: ${name}`);
-
-    // If cookies are disabled, use localStorage instead
-    if (!cookiesEnabled) {
-      try {
-        localStorage.removeItem(name);
-        return;
-      } catch (e) {
-        console.error("Error removing from localStorage:", e);
-        return;
-      }
-    }
-
-    document.cookie = name + '=; expires=Thu, 01 Jan 1970 00:00:00 UTC; path=/;';
-  }
-  // --- End Storage Helpers ---
-
-  // Debug Helper - check cookie status
+  // Public name retained for existing callers; history now always uses localStorage.
   const checkCookieStatus = () => {
-    if (!cookiesEnabled) {
+    try {
       const storageData = localStorage.getItem('conversationHistory');
-      if (storageData) {
-        const byteSize = new Blob([storageData]).size;
-        const kilobyteSize = (byteSize / 1024).toFixed(2);
-
-        try {
-          const parsed = JSON.parse(storageData);
-          const entryCount = Array.isArray(parsed) ? parsed.length : 0;
-
-          showToast(`Using localStorage: ${kilobyteSize}KB, ${entryCount} entries`);
-          console.debug(`LocalStorage size: ${byteSize} bytes, ${kilobyteSize}KB`);
-          console.debug(`LocalStorage entries: ${entryCount}`);
-        } catch (e) {
-          showToast(`LocalStorage contains invalid data: ${kilobyteSize}KB`);
-          console.error('LocalStorage parse error:', e);
-        }
-      } else {
-        showToast('No research history found in localStorage');
-      }
-      return;
-    }
-
-    const allCookies = document.cookie;
-    console.debug('All cookies:', allCookies);
-
-    const conversationCookie = getCookie('conversationHistory');
-    if (conversationCookie) {
-      const byteSize = new Blob([conversationCookie]).size;
-      const kilobyteSize = (byteSize / 1024).toFixed(2);
-
-      try {
-        const parsed = JSON.parse(conversationCookie);
-        const entryCount = Array.isArray(parsed) ? parsed.length : 0;
-
-        showToast(`Cookie found: ${kilobyteSize}KB, ${entryCount} research entries`);
-        console.debug(`Cookie size: ${byteSize} bytes, ${kilobyteSize}KB`);
-        console.debug(`Cookie entries: ${entryCount}`);
-      } catch (e) {
-        showToast(`Cookie found but invalid: ${kilobyteSize}KB`);
-        console.error('Cookie parse error:', e);
-      }
-    } else {
-      showToast('No research history cookie found');
+      const entries = storageData ? JSON.parse(storageData) : [];
+      if (!Array.isArray(entries)) throw new Error('Invalid history data');
+      const size = (new Blob([storageData || '[]']).size / 1024).toFixed(2);
+      showToast(`浏览器本地历史：${entries.length} 条，占用 ${size} KB。`);
+    } catch (error) {
+      console.error('Error checking history storage:', error);
+      showToast('无法读取历史存储状态，请检查浏览器存储权限或数据。');
     }
   }
 
@@ -3708,6 +3415,7 @@ const startResearch = async () => {
           };
         });
 
+        const previousHistory = conversationHistory;
         // Confirm before overwriting existing history
         if (conversationHistory && conversationHistory.length > 0) {
           if (confirm(`You have ${conversationHistory.length} existing research entries. Do you want to:
@@ -3725,10 +3433,11 @@ const startResearch = async () => {
         }
 
         // Save the new history and update the UI
-        saveConversationHistory();
+        const saved = saveConversationHistory();
+        if (!saved) conversationHistory = previousHistory;
         renderHistoryEntries();
 
-        showToast(`Successfully imported ${validEntries.length} research entries`);
+        if (saved) showToast(`Successfully imported ${validEntries.length} research entries`);
         console.debug('Research history imported, valid entries:', validEntries.length);
 
       } catch (error) {

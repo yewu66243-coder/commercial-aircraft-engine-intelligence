@@ -152,6 +152,24 @@ class ModelProviderSelectionTests(unittest.TestCase):
         self.assertEqual(service.model_runtime.smart_model, "private-fast")
         self.assertEqual(service.model_runtime.base_url, "https://model.example/v1")
 
+    def test_deleting_custom_api_removes_its_models_and_preserves_other_configs(self):
+        from backend.model_provider_registry import save_custom_model_provider, delete_custom_model_provider, load_custom_model_providers
+        from three_agent_service import get_model_provider_catalog
+
+        with TemporaryDirectory() as temp_dir, patch(
+            "backend.model_provider_registry.CONFIG_PATH", Path(temp_dir) / "model_providers.local.json",
+        ):
+            first = save_custom_model_provider({"name": "旧接口", "base_url": "https://old.example/v1",
+                "api_key": "old-secret", "models": ["old-model"]})['provider']
+            second = save_custom_model_provider({"name": "保留接口", "base_url": "https://keep.example/v1",
+                "api_key": "keep-secret", "models": ["keep-model"]})['provider']
+            delete_custom_model_provider(first['id'])
+            catalog = get_model_provider_catalog({})
+            self.assertNotIn(first['id'], [provider['id'] for provider in catalog['providers']])
+            self.assertNotIn('old-model', [model['model'] for model in catalog['generation_models']])
+            self.assertIn(second['id'], [provider['id'] for provider in catalog['providers']])
+            self.assertEqual(load_custom_model_providers()[0]['api_key'], 'keep-secret')
+
     def test_missing_qwen_key_and_unknown_provider_are_rejected(self):
         from three_agent_service import (
             ModelProviderConfigurationError,
