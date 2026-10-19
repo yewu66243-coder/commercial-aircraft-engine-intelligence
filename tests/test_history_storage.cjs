@@ -110,10 +110,11 @@ function ui(f) {
   vm.createContext(context);
   const start = script.indexOf('  const loadConversationHistory =');
   const end = script.indexOf('  // Filter history entries', start);
-  vm.runInContext(`let conversationHistory = [];\n${script.slice(start, end)}\nthis.api = {
+  vm.runInContext(`let conversationHistory = []; let hasUnsavedHistory = false;\n${script.slice(start, end)}\nthis.api = {
     load: loadConversationHistory, save: saveConversationHistory,
     remove: deleteHistoryEntry, clear: clearConversationHistory,
-    get: () => conversationHistory, set: value => { conversationHistory = value; }
+    get: () => conversationHistory, set: value => { conversationHistory = value; },
+    markUnsaved: () => { hasUnsavedHistory = true; }
   };`, context);
   return { api: context.api, messages };
 }
@@ -153,4 +154,48 @@ test('storage script loads before the app; legacy truncation is gone', () => {
   assert.ok(!script.includes('MAX_COOKIE_SIZE'));
   assert.ok(!script.includes('storageHistory.slice(0, 20)'));
   new vm.Script(script);
+});
+
+test('opening history after a failed new-task save keeps the unsaved task exportable', () => {
+  const f = fixture([entry(0)]);
+  const { api } = ui(f);
+  api.set([entry(1), entry(0)]);
+  api.markUnsaved();
+  api.load();
+  assert.equal(api.get().length, 2);
+  api.save();
+  api.load();
+  assert.equal(api.get().length, 2);
+});
+
+test('import persists more than 20 entries and rolls back when storage is full', () => {
+  const f = fixture();
+  const messages = [];
+  const context = {
+    ReportHistoryStorage: history, localStorage: f.storage, document: f.doc,
+    console: { error() {}, warn() {}, debug() {} }, confirm: () => true,
+    showToast: message => messages.push(message), renderHistoryEntries() {},
+    FileReader: class { readAsText(file) { this.onload({ target: { result: file.content } }); } },
+  };
+  vm.createContext(context);
+  const saveStart = script.indexOf('  const saveConversationHistory =');
+  const saveEnd = script.indexOf('  // Delete a history entry', saveStart);
+  const importStart = script.indexOf('  const handleFileImport =');
+  const importEnd = script.indexOf('\n  }', importStart) + 4;
+  vm.runInContext(`let conversationHistory = []; let hasUnsavedHistory = false;
+    ${script.slice(saveStart, saveEnd)}
+    ${script.slice(importStart, importEnd)}
+    this.importFile = handleFileImport;
+    this.count = () => conversationHistory.length;`, context);
+  const imported = Array.from({ length: 40 }, (_, i) => entry(i));
+  context.importFile({ target: { files: [{ content: JSON.stringify(imported) }], value: 'file' } });
+  assert.equal(context.count(), 40);
+  assert.equal(history.load(f.storage, f.doc).entries.length, 40);
+  const stored = f.raw();
+  f.storage.setItem = () => { throw new Error('QuotaExceededError'); };
+  messages.length = 0;
+  context.importFile({ target: { files: [{ content: JSON.stringify([entry(99)]) }], value: 'file' } });
+  assert.equal(context.count(), 40);
+  assert.equal(f.raw(), stored);
+  assert.ok(messages.every(message => !message.includes('Successfully imported')));
 });

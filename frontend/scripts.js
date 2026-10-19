@@ -2,7 +2,7 @@ const GPTResearcher = (() => {
   let isResearchActive = false;
   let connectionTimeout = null;
   let conversationHistory = [];
-  let isInitialLoad = true; // Flag to track initial page load
+  let hasUnsavedHistory = false;
   let allReports = ''; // Store all reports cumulatively
   let currentReport = ''; // Store the current report (will be overwritten)
   let isFirstReport = true; // Flag to track if this is the first report
@@ -452,11 +452,6 @@ const GPTResearcher = (() => {
   const init = () => {
     // Load history immediately on page load
     loadConversationHistory();
-
-    // After a short delay, mark initial load as complete
-    setTimeout(() => {
-      isInitialLoad = false;
-    }, 1000);
 
     // Setup form submission
     document.getElementById('researchForm').addEventListener('submit', (e) => {
@@ -910,6 +905,11 @@ const GPTResearcher = (() => {
 
   // Migrate legacy cookies only after the full history has been persisted.
   const loadConversationHistory = () => {
+    // Keep newly completed tasks exportable if browser storage is full or blocked.
+    if (hasUnsavedHistory) {
+      renderHistoryEntries();
+      return;
+    }
     try {
       const result = ReportHistoryStorage.load(localStorage, document);
       conversationHistory = result.entries;
@@ -930,6 +930,7 @@ const GPTResearcher = (() => {
   const saveConversationHistory = () => {
     try {
       ReportHistoryStorage.save(localStorage, document, conversationHistory);
+      hasUnsavedHistory = false;
       return true;
     } catch (error) {
       console.error('Error saving research history:', error);
@@ -1249,6 +1250,7 @@ const GPTResearcher = (() => {
 
     conversationHistory.unshift(historyEntry);
     const saved = saveConversationHistory();
+    hasUnsavedHistory = !saved;
     renderHistoryEntries();
     document.getElementById('historyPanel').classList.add('open');
 
