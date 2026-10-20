@@ -48,7 +48,7 @@ from backend.reporting.finalization import clean_formal_report_style, finalize_r
 from gpt_researcher.document.local_index import SelectedLocalPaper, prepare_local_docs_for_query
 from gpt_researcher.document.local_image_extractor import extract_local_report_images
 from gpt_researcher.evaluation.evidence_samples import evaluate_local_references
-from gpt_researcher.evaluation.independent_judge import judge_report
+from gpt_researcher.evaluation.manual_review import create_review_package
 from gpt_researcher.evaluation.evidence_workspace import stage_catalog, save_snapshot
 from gpt_researcher.retrievers.search_diagnostics import search_trace
 from gpt_researcher.evaluation.evaluation_summary import build_evaluation_summary
@@ -848,7 +848,7 @@ class ThreeAgentService:
         if not local_scopes:
             return
 
-        max_docs = max(3, min(int(self.request.max_search_results or 5), 8))
+        max_docs = max(1, int(self.request.max_search_results or 5))
         print("\n" + "=" * 60)
         print("[Librarian Agent] Searching local paper index before close reading...")
         enabled_indexes = []
@@ -858,7 +858,7 @@ class ThreeAgentService:
             enabled_indexes.append("user_docs_index.json")
         if "patents" in local_scopes:
             enabled_indexes.append("patents_index.json")
-        self._log("Librarian Agent", f"正在检索 {', '.join(enabled_indexes)}，并筛选待精读文献/资料/专利。")
+        self._log("Librarian Agent", f"正在检索 {', '.join(enabled_indexes)}；每个已选资料池最多精读 {max_docs} 份相关资料。")
         self._log("Demand Model", self.demand_profile_summary())
 
         selection = prepare_local_docs_for_query(
@@ -872,10 +872,16 @@ class ThreeAgentService:
             self.local_doc_path = selection.doc_path
             self.selected_local_papers = selection.selected
             selected_names = ", ".join(item.file_name for item in selection.selected)
+            selected_counts = {
+                label: sum(item.source_type == label for item in selection.selected)
+                for scope, label in (("papers", "论文"), ("user_docs", "用户资料"), ("patents", "专利"))
+                if scope in local_scopes
+            }
+            counts_text = "，".join(f"{label} {count} 份" for label, count in selected_counts.items())
             print(f"[Librarian Agent] Selected {len(selection.selected)} local document(s): {selected_names}")
             self._log(
                 "Librarian Agent",
-                f"已从本地索引筛选 {len(selection.selected)} 份高相关文献/资料/专利用于精读：{selected_names}",
+                f"已从本地索引筛选 {len(selection.selected)} 份高相关文献/资料/专利用于精读（{counts_text}；每池上限 {max_docs}）：{selected_names}",
             )
         else:
             print(f"[Librarian Agent] Local index selection did not produce documents: {selection.reason}")
@@ -1156,7 +1162,7 @@ class ThreeAgentService:
                         f"检索记录时间：{getattr(self, 'started_at', self._now_iso())}；"
                         f"检索范围：{self.search_scope_label()}；"
                         f"本地纳入资料数：{len(self.selected_local_papers)}；"
-                        f"每轮精读/抓取上限配置：{self.request.max_search_results}。"
+                        f"每个本地资料池的精读上限、每次Web查询的抓取上限：{self.request.max_search_results}。"
                         + ("本地资料按题名、摘要与文件名的主题匹配进行初筛；" if self.selected_local_papers else "本次未纳入本地资料；")
                         +
                         "对选定资料进行主题归纳和来源对照。尚未进行最终报告证据核验，不能声称核验通过。"
@@ -1368,7 +1374,7 @@ class ThreeAgentService:
         )
         self.source_catalog = stage_catalog(self.source_catalog)
         await asyncio.to_thread(save_snapshot, self.evidence_workspace, 'source_catalog', self.source_catalog)
-        self._log('Source Reader', f'已暂存 {len(self.source_catalog["fragments"])} 个原文片段，供写作与独立裁判复用。')
+        self._log('Source Reader', f'已暂存 {len(self.source_catalog["fragments"])} 个原文片段，供写作与人工核验复用。')
         final_report = await self.writer_agent(sections)
         final_report = self.ensure_report_title(final_report)
         final_report = self.ensure_report_images_inserted(final_report)
@@ -1432,26 +1438,7 @@ class ThreeAgentService:
         await asyncio.to_thread(save_snapshot, self.evidence_workspace, "source_catalog", self.source_catalog)
         audit_report = cleaned_report
         local_reference_eval = evaluate_local_references(cleaned_report, self.source_catalog)
-        self._log("Evaluation Agent", "正在检查独立裁判配置并核验报告与原文。")
-        try:
-            independent_judge = await judge_report(
-                cleaned_report,
-                entity_eval,
-                self.source_catalog,
-                writer_model=runtime.smart_model,
-                workspace=self.evidence_workspace,
-                log=lambda message: self._log("Evaluation Agent", message),
-            )
-        except Exception as exc:
-            logging.getLogger(__name__).exception("Independent judge failed")
-            independent_judge = {
-                "status": "failed",
-                "message": f"独立裁判未完成（{type(exc).__name__}）。",
-                "entity": {},
-                "source": {},
-                "results": [],
-            }
-        self._log("Evaluation Agent", independent_judge.get("message", "独立裁判已结束。"))
+        self._log("Evaluation Agent", "规则结果仅供初筛；正式指标由人工核验，不调用独立模型裁判。")
         self._log(
             "Evaluation Agent",
             f"已抽取 {entity_eval.get('extracted_count', 0)} 个实体/参数，"
@@ -1554,6 +1541,7 @@ class ThreeAgentService:
             ],
             "task_template_id": self.request.task_template_id,
             "selected_source_count": len(self.selected_local_papers),
+            "local_document_limit_per_pool": max(1, int(self.request.max_search_results or 5)),
             "selected_source_files": [item.file_name for item in self.selected_local_papers],
             "report_image_count": inserted_report_image_count,
             "report_image_inserted_count": inserted_report_image_count,
@@ -1566,7 +1554,7 @@ class ThreeAgentService:
             "duration_minutes": round(stats_ready_elapsed / 60, 2),
             "entity_eval": entity_eval,
             "local_reference_eval": local_reference_eval,
-            "independent_judge": independent_judge,
+            "acceptance_mode": "human",
             "evaluation_summary": evaluation_summary,
             "report_style_cleanup": report_style_cleanup,
             "evaluation_report_paths": evaluation_report_paths,
@@ -1623,6 +1611,7 @@ class ThreeAgentService:
             "content_enrichment": self.content_enrichment,
             "editorial_review": self.editorial_review,
             "original_source_catalog": self.source_catalog,
+            "published_markdown": prepared.markdown,
         })
         self._log("Report Format", "研究报告结构与参考文献已整理；运行统计保留在研究记录中。")
         
@@ -1691,9 +1680,7 @@ class ThreeAgentService:
                         .get("accessibility", {})
                         .get("requirement_met")
                     ),
-                    "url_requirement_met": (
-                        public_url_source_eval.get("requirement_met")
-                    ),
+                    "url_requirement_met": None,
                     "entity_requirement_met": None,
                     "entity_auto_evidence_requirement_met": (
                         entity_eval.get("auto_evidence_eval", {}).get("requirement_met")
@@ -1701,17 +1688,18 @@ class ThreeAgentService:
                     "entity_accuracy_without_missed_requirement_met": (
                         entity_eval.get("accuracy_without_missed_requirement_met")
                     ),
-                    "notes": "实体抽取准确率需提供标准答案 JSON 后自动评估；url_accessibility_requirement_met 为链接可访问率，url_requirement_met 为公开信息溯源链接支撑准确率。",
+                    "notes": "规则结果仅供初筛；实体及公开引用准确率须完成人工核验后判定。链接可访问性不是引用准确率。",
                 },
             }
         )
-        run_stats["validation_summary"]["entity_requirement_met"] = entity_eval.get("requirement_met")
-        run_stats['validation_summary']['independent_judge_status'] = independent_judge['status']
-        if independent_judge['status'] in {'completed', 'partial'}:
-            run_stats['validation_summary']['entity_requirement_met'] = independent_judge.get('entity', {}).get('requirement_met')
-            run_stats['validation_summary']['url_requirement_met'] = independent_judge.get('source', {}).get('requirement_met')
-            run_stats['validation_summary']['notes'] = (
-                '独立模型按已抽取候选及已引用URL核验；未评价漏抽，待核验项不计通过；详细口径见independent_judge。')
+        # Freeze report timing before preparing human-review attachments.
+        try:
+            run_stats['manual_review_package'] = await asyncio.to_thread(create_review_package, run_stats, Path.cwd())
+            self._log('Evaluation Agent', '人工核验表及证据材料已保存到outputs/manual_reviews，等待维护人员核验。')
+        except Exception as exc:
+            logging.getLogger(__name__).exception('Manual review package export failed')
+            run_stats['manual_review_package'] = {'status': 'failed', 'error': type(exc).__name__}
+            self._log('Evaluation Agent', '人工核验材料导出未完成；报告已保留，可通过维护工具重新导出。')
         acceptance_assessment = assess_run(run_stats)
         compat_eval_paths = {
             key: (value[1:] if isinstance(value, str) and value.startswith("/") else value)

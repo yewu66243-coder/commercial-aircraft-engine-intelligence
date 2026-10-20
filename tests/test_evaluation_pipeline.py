@@ -406,7 +406,7 @@ def test_pipeline_evaluates_and_exports_the_cleaned_post_editorial_report():
     assert saved[0]["evidence_report"] == cleaned
     assert saved[0]["report_style_cleanup"] == {"removed_count": 1}
     assert saved[0]["evaluation_report_paths"]["word"].endswith("eval.docx")
-    assert result["run_statistics"]["validation_summary"]["url_requirement_met"] is True
+    assert result["run_statistics"]["validation_summary"]["url_requirement_met"] is None
 
 
 def test_evaluation_export_failure_keeps_original_report_downloads():

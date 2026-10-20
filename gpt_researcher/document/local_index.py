@@ -889,6 +889,7 @@ def prepare_local_docs_for_query(
     include_user_docs: bool = True,
     include_patents: bool = True,
 ) -> LocalIndexSelection:
+    """Select up to max_docs relevant documents independently from each enabled pool."""
     local_root = Path(local_docs_root or get_default_local_docs_root()).resolve()
     index_path = Path(os.getenv("LOCAL_DOCS_INDEX_PATH", local_root / "papers_index.json")).resolve()
     pool_dir = Path(os.getenv("LOCAL_DOCS_POOL_PATH", local_root / "all_papers_pool")).resolve()
@@ -903,7 +904,7 @@ def prepare_local_docs_for_query(
     )
 
     selected_dir = _prepare_temp_dir(query, Path(temp_root) if temp_root else None)
-    max_docs = max(1, min(int(max_docs or 5), 12))
+    max_docs = max(1, int(max_docs or 5))
     selected: list[SelectedLocalPaper] = []
     missing: list[str] = []
     reasons: list[str] = []
@@ -928,7 +929,7 @@ def prepare_local_docs_for_query(
             index_path=get_user_docs_index_path(),
             pool_dir=get_user_docs_dir(),
             selected_dir=selected_dir,
-            max_docs=max(1, min(max_docs, 5)),
+            max_docs=max_docs,
             source_type="用户资料",
         )
         selected.extend(user_selected)
@@ -942,7 +943,7 @@ def prepare_local_docs_for_query(
             index_path=get_patents_index_path(),
             pool_dir=get_patent_pool_dir(),
             selected_dir=selected_dir,
-            max_docs=max(1, min(max_docs, 5)),
+            max_docs=max_docs,
             source_type="专利",
             allow_virtual_records=True,
         )

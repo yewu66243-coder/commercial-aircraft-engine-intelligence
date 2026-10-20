@@ -5,7 +5,7 @@ from backend.reporting.citations import CitationRegistry
 from backend.reporting.finalization import check_contract
 from backend.reporting.source_identity import resolve_local_source
 from gpt_researcher.evaluation.evidence_samples import saved_pages
-from gpt_researcher.evaluation.independent_judge import build_samples
+from gpt_researcher.evaluation.review_samples import build_samples
 from gpt_researcher.evaluation.source_evaluator import evaluate_public_url_sources
 
 

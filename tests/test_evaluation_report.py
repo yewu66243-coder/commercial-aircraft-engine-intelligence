@@ -53,7 +53,7 @@ def _report(summary=None, *, entity=None, urls=None, support=None):
 
 def test_strict_report_contains_metrics_details_definitions_and_safe_metadata():
     report = _report()
-    for expected in ("# 独立测评报告", "任务名称", "发动机市场", "测评时间",
+    for expected in ("# 自动规则初筛记录", "不是人工验收结论", "任务名称", "发动机市场", "测评时间",
                      "报告标识", "run-123", "truth.json", "精确率", "召回率", "F1",
                      "90%", "98%", "实体总体", "TP", "FP", "FN", "机构",
                      "GE", "CFM", "RR", "唯一URL可访问率", "https://example.test/one",

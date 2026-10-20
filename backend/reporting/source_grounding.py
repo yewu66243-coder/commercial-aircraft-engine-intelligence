@@ -46,7 +46,8 @@ def build_source_catalog(sources, sections, *, allow_web=False, query='', allow_
         except Exception as exc:
             errors.append({'locator':name, 'reason':type(exc).__name__})
         records.append({'locator':name, 'file_name':name, 'kind':'local',
-                        'title':item.get('title') or name, 'pages':pages})
+                        'title':item.get('title') or name, 'pages':pages,
+                        'source_path': str(path.resolve()) if path.is_file() else ''})
 
     web = {}
     if allow_web:

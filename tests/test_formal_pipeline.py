@@ -50,12 +50,14 @@ class FormalPipelineTests(unittest.TestCase):
         service.generation_status = 'ready'
         original_cwd = os.getcwd()
         with TemporaryDirectory() as temporary, ExitStack() as stack:
-            stack.enter_context(patch.dict(os.environ, {'JUDGE_ENABLED': 'false'}))
+            stack.enter_context(patch.dict(os.environ, {'REFERENCE_LOOKUP_ENABLED': 'false'}))
             stack.enter_context(patch.object(service, 'pre_search_abstracts', new=AsyncMock()))
             stack.enter_context(patch.object(service, 'planner_agent', return_value=['GTF']))
             stack.enter_context(patch.object(service, 'research_agent', new=AsyncMock(return_value=[])))
             stack.enter_context(patch.object(service, 'collect_report_images'))
             stack.enter_context(patch.object(service, 'writer_agent', new=AsyncMock(return_value=BASE)))
+            stack.enter_context(patch.object(service, 'editorial_agent', new=AsyncMock(return_value=BASE)))
+            stack.enter_context(patch('three_agent_service.build_source_catalog', return_value={'sources': []}))
             stack.enter_context(patch.object(service, 'append_evaluation_record', return_value='offline-record'))
             stack.enter_context(patch('three_agent_service.evaluate_saved_report',
                                       new=AsyncMock(return_value=evaluation_result())))
@@ -84,15 +86,16 @@ class FormalPipelineTests(unittest.TestCase):
         saved = []
         annotated = BASE.replace('35天[URL8]', '35天[URL8]（该点待后续核验）', 1)
         with ExitStack() as stack:
+            stack.enter_context(patch.dict(os.environ, {'REFERENCE_LOOKUP_ENABLED': 'false'}))
             stack.enter_context(patch.object(service, 'pre_search_abstracts', new=AsyncMock()))
             stack.enter_context(patch.object(service, 'planner_agent', return_value=['GTF']))
             stack.enter_context(patch.object(service, 'research_agent', new=AsyncMock(return_value=[])))
             stack.enter_context(patch.object(service, 'collect_report_images'))
             stack.enter_context(patch.object(service, 'writer_agent', new=AsyncMock(return_value=annotated)))
+            stack.enter_context(patch.object(service, 'editorial_agent', new=AsyncMock(return_value=annotated)))
+            stack.enter_context(patch('three_agent_service.build_source_catalog', return_value={'sources': []}))
             stack.enter_context(patch.object(service, 'append_evaluation_record', side_effect=lambda record: saved.append(record) or 'record.json'))
-            judge = stack.enter_context(patch('three_agent_service.judge_report', new=AsyncMock(return_value={
-                'status': 'completed', 'message': '离线裁判测试',
-                'entity': {'requirement_met': True}, 'source': {'requirement_met': False}})))
+            package = stack.enter_context(patch('three_agent_service.create_review_package', return_value={'status': 'pending'}))
             evaluator = stack.enter_context(patch('three_agent_service.evaluate_saved_report',
                                       new=AsyncMock(return_value=evaluation_result())))
             md = stack.enter_context(patch('three_agent_service.write_text_to_md', new=AsyncMock(return_value='outputs/report.md')))
@@ -107,10 +110,11 @@ class FormalPipelineTests(unittest.TestCase):
         self.assertEqual(result['export_status']['pdf'], False)
         self.assertIn('部分实体或参数的来源支撑需复核。', result['report_quality']['warnings'])
         self.assertEqual(saved[0]['status'], 'export_partial')
-        self.assertTrue(saved[0]['validation_summary']['entity_requirement_met'])
-        self.assertFalse(saved[0]['validation_summary']['url_requirement_met'])
-        self.assertEqual(saved[0]['independent_judge']['status'], 'completed')
-        self.assertIn('[URL8]', judge.call_args.args[0])
+        self.assertIsNone(saved[0]['validation_summary']['entity_requirement_met'])
+        self.assertIsNone(saved[0]['validation_summary']['url_requirement_met'])
+        self.assertNotIn('independent_judge', saved[0])
+        self.assertEqual(saved[0]['acceptance_mode'], 'human')
+        self.assertEqual(package.call_args.args[0]['published_markdown'], result['report'])
         self.assertTrue(saved[0]['citation_map'])
         self.assertIn('[URL8]', saved[0]['evidence_report'])
         self.assertNotIn('该点待后续核验', result['report'])

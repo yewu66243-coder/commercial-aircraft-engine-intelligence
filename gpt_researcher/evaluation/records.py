@@ -39,6 +39,40 @@ class EvaluationRecordStore:
         self.path = Path(path) if path is not None else _default_records_path()
         self._lock = _lock_for(self.path)
 
+    @contextlib.contextmanager
+    def _locked(self):
+        """Serialize the server and offline review CLI, not only Python threads."""
+        with self._lock:
+            self.path.parent.mkdir(parents=True, exist_ok=True)
+            with self.path.with_suffix(self.path.suffix + '.lock').open('a+b') as stream:
+                stream.seek(0, os.SEEK_END)
+                if not stream.tell():
+                    stream.write(b'0')
+                    stream.flush()
+                deadline = time.monotonic() + 60
+                while True:
+                    try:
+                        stream.seek(0)
+                        if os.name == 'nt':
+                            import msvcrt
+                            msvcrt.locking(stream.fileno(), msvcrt.LK_NBLCK, 1)
+                        else:
+                            import fcntl
+                            fcntl.flock(stream.fileno(), fcntl.LOCK_EX | fcntl.LOCK_NB)
+                        break
+                    except OSError:
+                        if time.monotonic() >= deadline:
+                            raise TimeoutError('Evaluation records are busy; retry later')
+                        time.sleep(.05)
+                try:
+                    yield
+                finally:
+                    stream.seek(0)
+                    if os.name == 'nt':
+                        msvcrt.locking(stream.fileno(), msvcrt.LK_UNLCK, 1)
+                    else:
+                        fcntl.flock(stream.fileno(), fcntl.LOCK_UN)
+
     @staticmethod
     def _clone(value: Any) -> Any:
         return copy.deepcopy(value)
@@ -106,14 +140,14 @@ class EvaluationRecordStore:
 
     def append_run(self, record: dict[str, Any]) -> str:
         prepared = self._validated_record(record)
-        with self._lock:
+        with self._locked():
             records = self._read_unlocked()
             records.append(prepared)
             self._write_unlocked(records)
         return str(self.path)
 
     def get_run(self, run_id: str) -> dict[str, Any] | None:
-        with self._lock:
+        with self._locked():
             records = self._read_unlocked()
             for record in reversed(records):
                 if record.get("run_id") == run_id:
@@ -122,11 +156,32 @@ class EvaluationRecordStore:
                     return result
         return None
 
+    def list_runs(self) -> list[dict[str, Any]]:
+        with self._locked():
+            return self._clone(self._read_unlocked())
+
+    def append_manual_review(self, run_id: str, result: dict[str, Any]) -> dict[str, Any]:
+        if result.get("mode") != "human" or result.get("run_id") != run_id:
+            raise ValueError("manual review must belong to the run")
+        with self._locked():
+            records = self._read_unlocked()
+            for record in reversed(records):
+                if record.get("run_id") == run_id:
+                    record.setdefault("manual_reviews", []).append(self._clone(result))
+                    # Keep automatic diagnostics and historical model results intact.
+                    record["manual_acceptance"] = {
+                        "review_id": result["review_id"], "overall": result["overall"],
+                        "report_sha256": result["report_sha256"],
+                    }
+                    self._write_unlocked(records)
+                    return self._clone(record)
+        raise KeyError(run_id)
+
     def append_reevaluation(self, run_id: str, result: dict[str, Any]) -> dict[str, Any]:
         if not isinstance(result, dict):
             raise TypeError("reevaluation result must be an object")
         prepared = self._clone(result)
-        with self._lock:
+        with self._locked():
             records = self._read_unlocked()
             for index in range(len(records) - 1, -1, -1):
                 if records[index].get("run_id") != run_id:

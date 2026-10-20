@@ -1,7 +1,7 @@
 import unittest
 from backend.reporting.citations import CitationRegistry
 from gpt_researcher.evaluation.evidence_samples import extract_body_candidates
-from gpt_researcher.evaluation.independent_judge import build_samples
+from gpt_researcher.evaluation.review_samples import build_samples
 
 
 class AuthorEntityReviewTests(unittest.TestCase):

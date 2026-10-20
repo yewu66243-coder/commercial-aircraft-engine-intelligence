@@ -122,7 +122,7 @@ def _plain_percent(value: object) -> str:
 
 
 def assess_run(record: dict) -> dict:
-    """Compatibility assessment used by the independent-judge workflow."""
+    """Automatic diagnostics are not a substitute for human acceptance."""
     record = _mapping(record)
     seconds = _number(record.get("total_duration_seconds"))
     entity = _mapping(record.get("entity_eval"))
@@ -162,7 +162,7 @@ def assess_run(record: dict) -> dict:
             "threshold": "不低于98%",
             "value": source_value,
             "status": "待复核",
-            "method": "现有规则按引用上下文关键词及数字匹配，部分支撑计0.5分，未核验计入分母；须由人工或模型裁判复核",
+            "method": "规则初筛按引用上下文关键词及数字匹配；须由人工核验，规则分数不作正式验收结论",
         },
     ]
     for item, score, threshold in ((metrics[1], entity_score, 0.9), (metrics[2], source.get("support_accuracy"), 0.98)):
@@ -170,26 +170,8 @@ def assess_run(record: dict) -> dict:
         item["screening_status"] = (
             "待补充测评条件" if numeric is None else "初筛达标" if numeric >= threshold else "初筛未达标"
         )
-    judge = _mapping(record.get("independent_judge"))
-    if judge.get("status") in {"completed", "partial"}:
-        for item, kind in ((metrics[1], "entity"), (metrics[2], "source")):
-            measured = _mapping(judge.get(kind))
-            if not measured.get("total"):
-                continue
-            item.pop("screening_status", None)
-            verified = measured.get("correct", 0) + measured.get("incorrect", 0)
-            item["value"] = (
-                _plain_percent(measured.get("accuracy")) + "（模型核验）"
-                if verified
-                else f"未完成核验（{measured['total']}项待核验）"
-            )
-            met = measured.get("requirement_met")
-            item["status"] = "待复核" if not verified else "达标" if met is True else "未达标" if met is False else "待复核"
-            item["method"] = (
-                f"独立模型{judge.get('model', '')}逐项核验；正确{measured.get('correct', 0)}/总数{measured['total']}，"
-                f"待核验{measured.get('unresolved', 0)}；待核验项保留在分母中，未全部核验时不作达标判定。"
-                + str(measured.get("scope", ""))
-            )
+    for item in metrics[1:]:
+        item['method'] += '。正式验收以绑定最终报告版本的人工核验记录为准。'
     statuses = [item["status"] for item in metrics]
     overall = "未达标" if "未达标" in statuses else "待复核" if "待复核" in statuses else "达标"
     return {"overall": overall, "metrics": metrics, "acceptance_ready": overall == "达标", "required_test_rounds": 10}
@@ -228,7 +210,6 @@ def render_evaluation_report(record: dict, assessment: dict) -> str:
         lines += [f"{_plain_cell(item.get('name'))}：{_plain_cell(item.get('method'))}。", ""]
     entity = _mapping(record.get("entity_eval"))
     source = _mapping(record.get("public_url_source_eval"))
-    judge = _mapping(record.get("independent_judge"))
     lines += [
         f"实体/参数候选数：{entity.get('extracted_count', 0)}；候选核验说明：{_plain_cell(entity.get('note', '未获得有效实体测评结果'))}",
         "",
@@ -236,11 +217,11 @@ def render_evaluation_report(record: dict, assessment: dict) -> str:
         f"部分支撑 {source.get('partially_supported_count', 0)}，未支撑 {source.get('unsupported_count', 0)}，"
         f"未核验 {source.get('unchecked_count', 0)}。",
         "",
-        "## 3 独立大模型裁判",
+        "## 3 人工核验",
         "",
-        f"裁判模型：{_plain_cell(judge.get('model') or '未配置')}；状态：{_plain_cell(judge.get('status') or '未启用')}。",
+        "独立模型裁判已移除。人工核验材料保存于 outputs/manual_reviews。",
         "",
-        _plain_cell(judge.get("message") or "此运行未执行独立裁判。"),
+        "本文件仅为自动初筛记录，不代替填写核验表后生成的人工指标测评报告。",
         "",
         "## 4 验收轮次要求",
         "",
@@ -316,7 +297,9 @@ def render_evaluation_report_markdown(*, task: str, run_id: str, evaluated_at: s
         ground_truth = _text(ground_truth.replace("\\", "/").rsplit("/", 1)[-1], 120)
 
     lines = [
-        "# 独立测评报告", "", "| 字段 | 内容 |", "| --- | --- |",
+        "# 自动规则初筛记录", "",
+        "本记录保留自动诊断及既有规则阈值，不是人工验收结论。正式验收要求：每轮耗时≤20分钟、实体准确率≥90%、公开引用准确率≥98%；请填写人工核验表后汇总。", "",
+        "| 字段 | 内容 |", "| --- | --- |",
         f"| 任务名称 | {_cell(task, 200)} |",
         f"| 测评时间 | {_cell(evaluated_at, 80)} |",
         f"| 报告标识 | {_cell(run_id, 120)} |",
